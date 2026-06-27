@@ -72,7 +72,10 @@ impl RefBackend for DiskRefBackend {
         let path = self.ref_path(name);
         fs::create_dir_all(path.parent().expect("ref path always has a parent"))?;
         let data = postcard::to_allocvec(r).map_err(|e| Error::Codec(e.to_string()))?;
-        let tmp = path.with_extension("tmp");
+        let tmp = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
         fs::write(&tmp, &data)?;
         fs::rename(&tmp, &path)?;
         Ok(())
@@ -165,5 +168,20 @@ mod tests {
         b.set(&name("experiment/foo"), &tag(id)).unwrap();
         // verify the file exists at the expected path
         assert!(dir.path().join("refs/experiment/foo").exists());
+    }
+
+    #[test]
+    fn dotted_ref_name_no_stem_collision() {
+        let dir = TempDir::new().unwrap();
+        let b = DiskRefBackend::open(dir.path()).unwrap();
+        let id = ObjectId::new([1u8; 32]);
+        // "v1" and "v1.0" must be stored as distinct files
+        b.set(&name("v1"), &tag(id)).unwrap();
+        b.set(&name("v1.0"), &tag(id)).unwrap();
+        assert!(b.get(&name("v1")).unwrap().is_some());
+        assert!(b.get(&name("v1.0")).unwrap().is_some());
+        // verify distinct paths on disk
+        assert!(dir.path().join("refs/v1").exists());
+        assert!(dir.path().join("refs/v1.0").exists());
     }
 }
