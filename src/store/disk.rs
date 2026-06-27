@@ -1,4 +1,5 @@
 // bole-2zd
+// bole-4q6
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::path::{Path, PathBuf};
@@ -28,15 +29,20 @@ impl DiskBackend {
 impl StorageBackend for DiskBackend {
     async fn put(&self, id: &ObjectId, data: &[u8]) -> Result<()> {
         let path = self.object_path(id);
-        fs::create_dir_all(path.parent().unwrap()).await?;
+        if tokio::fs::try_exists(&path).await? {
+            return Ok(());
+        }
+        let parent = path.parent().expect("object path always has a parent directory");
+        tokio::fs::create_dir_all(parent).await?;
         let data = data.to_vec();
-        let compressed = tokio::task::spawn_blocking(move || {
-            zstd::encode_all(data.as_slice(), 3)
-        })
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?
-        .map_err(|e| Error::Storage(e.to_string()))?;
-        fs::write(&path, compressed).await?;
+        let compressed = tokio::task::spawn_blocking(move || zstd::encode_all(data.as_slice(), 3))
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        // Write to a temp file then rename for atomicity
+        let tmp_path = path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, &compressed).await?;
+        tokio::fs::rename(&tmp_path, &path).await?;
         Ok(())
     }
 
@@ -58,7 +64,7 @@ impl StorageBackend for DiskBackend {
     }
 
     async fn exists(&self, id: &ObjectId) -> Result<bool> {
-        Ok(self.object_path(id).exists())
+        Ok(tokio::fs::try_exists(self.object_path(id)).await?)
     }
 
     async fn delete(&self, id: &ObjectId) -> Result<()> {
