@@ -24,11 +24,10 @@ impl RefName {
                     "consecutive slashes produce empty segment".into(),
                 ));
             }
-            if segment == ".." {
-                return Err(Error::InvalidRefName("'..' segment not allowed".into()));
-            }
-            if segment == "." {
-                return Err(Error::InvalidRefName("'.' segment not allowed".into()));
+            if segment.starts_with('.') {
+                return Err(Error::InvalidRefName(
+                    "segment must not start with '.'".into(),
+                ));
             }
             if segment.contains('\0') {
                 return Err(Error::InvalidRefName("null byte in segment".into()));
@@ -113,5 +112,12 @@ mod tests {
     fn rejects_single_dot() {
         assert!(RefName::new(".").is_err());
         assert!(RefName::new("a/./b").is_err());
+    }
+
+    #[test]
+    fn rejects_leading_dot_segment() {
+        assert!(RefName::new(".foo").is_err());
+        assert!(RefName::new("a/.foo").is_err());
+        assert!(RefName::new(".foo/bar").is_err());
     }
 }
