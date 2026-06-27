@@ -19,7 +19,7 @@ fn run_t2_suite(store: RefStore) {
     assert_eq!(store.get_tag(&name("experiment/foo")).unwrap().unwrap().target, s2);
 
     // T2: create main timeline and advance head S1→S2→S3
-    store.create_timeline(name("main"), s1, TimelinePolicy::Append, 1000).unwrap();
+    store.create_timeline(name("main"), s1, TimelinePolicy::Append, 1000, "persistent".into(), None).unwrap();
     store.advance_head(&name("main"), s2).unwrap();
     store.advance_head(&name("main"), s3).unwrap();
     assert_eq!(store.get_timeline(&name("main")).unwrap().unwrap().head, s3);
@@ -48,7 +48,7 @@ fn t2_disk_backend() {
 fn t2_wrong_kind_errors() {
     let store = RefStore::new(MemoryRefBackend::new());
     let id = ObjectId::new([1u8; 32]);
-    store.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1).unwrap();
+    store.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1, "persistent".into(), None).unwrap();
     // move_tag on a timeline must fail
     assert!(store.move_tag(&name("main"), id).is_err());
 
@@ -84,7 +84,7 @@ fn t2_disk_persists_across_reopen() {
         let b = DiskRefBackend::open(dir.path()).unwrap();
         let store = RefStore::new(b);
         store.create_tag(name("v1"), id, Some("persisted".into()), 1).unwrap();
-        store.create_timeline(name("main"), id, TimelinePolicy::Append, 1).unwrap();
+        store.create_timeline(name("main"), id, TimelinePolicy::Append, 1, "persistent".into(), None).unwrap();
     }
     let b = DiskRefBackend::open(dir.path()).unwrap();
     let store = RefStore::new(b);

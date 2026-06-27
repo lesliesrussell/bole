@@ -88,6 +88,9 @@ mod store {
             head: ObjectId,
             policy: TimelinePolicy,
             now: u64,
+            // bole-qv5
+            kind: String,
+            expires_at: Option<u64>,
         ) -> Result<()> {
             if self.backend.get(&name)?.is_some() {
                 return Err(Error::Storage(format!(
@@ -95,7 +98,14 @@ mod store {
                     name.as_str()
                 )));
             }
-            self.backend.set(&name, &Ref::Timeline(Timeline { head, policy, created_at: now }))
+            self.backend.set(&name, &Ref::Timeline(Timeline {
+                head,
+                policy,
+                created_at: now,
+                // bole-qv5
+                kind,
+                expires_at,
+            }))
         }
 
         pub fn advance_head(&self, name: &RefName, new_head: ObjectId) -> Result<()> {
@@ -176,7 +186,7 @@ mod tests {
     fn move_tag_on_timeline_errors() {
         let s = store();
         let id = ObjectId::new([1u8; 32]);
-        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1).unwrap();
+        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1, "persistent".into(), None).unwrap();
         let err = s.move_tag(&name("main"), id).unwrap_err();
         assert!(matches!(err, crate::error::Error::WrongRefKind(_)));
     }
@@ -187,7 +197,7 @@ mod tests {
         let s1 = ObjectId::new([1u8; 32]);
         let s2 = ObjectId::new([2u8; 32]);
         let s3 = ObjectId::new([3u8; 32]);
-        s.create_timeline(name("main"), s1, TimelinePolicy::Append, 1).unwrap();
+        s.create_timeline(name("main"), s1, TimelinePolicy::Append, 1, "persistent".into(), None).unwrap();
         s.advance_head(&name("main"), s2).unwrap();
         s.advance_head(&name("main"), s3).unwrap();
         assert_eq!(s.get_timeline(&name("main")).unwrap().unwrap().head, s3);
@@ -211,7 +221,7 @@ mod tests {
         s.delete_ref(&name("v1")).unwrap();
         assert!(s.get(&name("v1")).unwrap().is_none());
         // delete a timeline
-        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1).unwrap();
+        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1, "persistent".into(), None).unwrap();
         s.delete_ref(&name("main")).unwrap();
         assert!(s.get(&name("main")).unwrap().is_none());
     }
@@ -245,15 +255,50 @@ mod tests {
         // creating again must fail
         assert!(s.create_tag(name("v1"), id, None, 2).is_err());
         // creating a timeline with the same name must also fail
-        assert!(s.create_timeline(name("v1"), id, TimelinePolicy::Unrestricted, 2).is_err());
+        assert!(s.create_timeline(name("v1"), id, TimelinePolicy::Unrestricted, 2, "persistent".into(), None).is_err());
     }
 
     #[test]
     fn create_timeline_on_existing_ref_errors() {
         let s = store();
         let id = ObjectId::new([1u8; 32]);
-        s.create_timeline(name("main"), id, TimelinePolicy::Append, 1).unwrap();
-        assert!(s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 2).is_err());
+        s.create_timeline(name("main"), id, TimelinePolicy::Append, 1, "persistent".into(), None).unwrap();
+        assert!(s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 2, "persistent".into(), None).is_err());
         assert!(s.create_tag(name("main"), id, None, 2).is_err());
+    }
+
+    // bole-qv5
+    #[test]
+    fn timeline_kind_and_expires_at_stored_and_retrieved() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        s.create_timeline(
+            name("ephemeral"),
+            id,
+            TimelinePolicy::Unrestricted,
+            1,
+            "ephemeral".into(),
+            Some(9999),
+        ).unwrap();
+        let tl = s.get_timeline(&name("ephemeral")).unwrap().unwrap();
+        assert_eq!(tl.kind, "ephemeral");
+        assert_eq!(tl.expires_at, Some(9999));
+    }
+
+    #[test]
+    fn timeline_default_kind_is_persistent() {
+        let s = store();
+        let id = ObjectId::new([2u8; 32]);
+        s.create_timeline(
+            name("main"),
+            id,
+            TimelinePolicy::Unrestricted,
+            1,
+            "persistent".into(),
+            None,
+        ).unwrap();
+        let tl = s.get_timeline(&name("main")).unwrap().unwrap();
+        assert_eq!(tl.kind, "persistent");
+        assert_eq!(tl.expires_at, None);
     }
 }

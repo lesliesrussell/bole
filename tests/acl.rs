@@ -115,7 +115,7 @@ async fn t3_merge_check() {
 
     // Create source timeline pointing at the secret-containing snapshot
     let source = RefName::new("feature/secret-work").unwrap();
-    repo.refs.create_timeline(source.clone(), snap_id, TimelinePolicy::Unrestricted, 1).unwrap();
+    repo.refs.create_timeline(source.clone(), snap_id, TimelinePolicy::Unrestricted, 1, "persistent".into(), None).unwrap();
 
     // Create a public destination timeline
     let dest = RefName::new("main").unwrap();
@@ -123,7 +123,7 @@ async fn t3_merge_check() {
         root: tree_id, parents: vec![], author: "test".into(),
         created_at: 2, message: "public".into(),
     }).await.unwrap();
-    repo.refs.create_timeline(dest.clone(), pub_snap, TimelinePolicy::Unrestricted, 2).unwrap();
+    repo.refs.create_timeline(dest.clone(), pub_snap, TimelinePolicy::Unrestricted, 2, "persistent".into(), None).unwrap();
 
     // Accessor with write on dest: RequiresApproval
     let writer = Accessor::new()
@@ -157,7 +157,7 @@ async fn t3_merge_check() {
         created_at: 3, message: "clean".into(),
     }).await.unwrap();
     let clean_source = RefName::new("feature/clean").unwrap();
-    repo.refs.create_timeline(clean_source.clone(), clean_snap, TimelinePolicy::Unrestricted, 3).unwrap();
+    repo.refs.create_timeline(clean_source.clone(), clean_snap, TimelinePolicy::Unrestricted, 3, "persistent".into(), None).unwrap();
     let result3 = repo.check_merge(&clean_source, &dest, &reader).await.unwrap();
     assert_eq!(result3, MergeCheck::Allowed);
 }

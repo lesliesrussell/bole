@@ -30,6 +30,9 @@ mod tests {
             head: id,
             policy: TimelinePolicy::Append,
             created_at: 2000,
+            // bole-qv5
+            kind: "persistent".into(),
+            expires_at: None,
         });
         let bytes = postcard::to_allocvec(&r).unwrap();
         let decoded: Ref = postcard::from_bytes(&bytes).unwrap();

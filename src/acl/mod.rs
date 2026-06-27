@@ -55,6 +55,13 @@ impl Accessor {
         self
     }
 
+    // bole-qv5
+    pub fn privileged() -> Self {
+        Self::new()
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read })
+            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Read })
+    }
+
     pub fn can_read_path(&self, path: &str) -> bool {
         self.path_roles.iter().any(|r|
             r.permission == Permission::Read && glob_matches(&r.glob, path)
@@ -142,6 +149,19 @@ mod tests {
             .with_timeline_role(TimelineRole { pattern: "leslie/private/**".into(), permission: Permission::Read });
         assert!(a.can_read_timeline("leslie/private/exp-foo"));
         assert!(!a.can_read_timeline("main"));
+    }
+
+    // bole-qv5
+    #[test]
+    fn privileged_accessor_can_read_everything() {
+        let a = Accessor::privileged();
+        assert!(a.can_read_path("secrets/prod.key"));
+        assert!(a.can_read_path("src/main.rs"));
+        assert!(a.can_read_timeline("leslie/private/exp-foo"));
+        assert!(a.can_read_timeline("main"));
+        // privileged does not grant write
+        assert!(!a.can_write_path("src/main.rs"));
+        assert!(!a.can_write_timeline("main"));
     }
 
     // bole-sxf

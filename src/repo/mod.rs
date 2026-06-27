@@ -294,7 +294,7 @@ mod tests {
         let id = ObjectId::new([1u8; 32]);
         from.create_tag(RefName::new("v1").unwrap(), id, None, 1).unwrap();
         from.create_tag(RefName::new("v2").unwrap(), id, None, 2).unwrap();
-        from.create_timeline(RefName::new("main").unwrap(), id, TimelinePolicy::Unrestricted, 3).unwrap();
+        from.create_timeline(RefName::new("main").unwrap(), id, TimelinePolicy::Unrestricted, 3, "persistent".into(), None).unwrap();
         copy_refs(&from, &to).unwrap();
         assert!(to.get(&RefName::new("v1").unwrap()).unwrap().is_some());
         assert!(to.get(&RefName::new("v2").unwrap()).unwrap().is_some());
