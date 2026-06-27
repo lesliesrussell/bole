@@ -15,7 +15,7 @@ pub struct MergeConflict {
 }
 
 /// Result of a three-way merge over flat path→blob maps.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MergeResult {
     pub merged: BTreeMap<String, ObjectId>,
     pub conflicts: Vec<MergeConflict>,
@@ -281,6 +281,19 @@ mod tests {
         assert_eq!(r.merged["new"], id(7));
     }
 
+    // bole-9lj
+    #[test]
+    fn both_added_differently_is_conflict() {
+        let ancestor = map(&[]);  // no common ancestor
+        let ours = map(&[("a.rs", 1)]);
+        let theirs = map(&[("a.rs", 2)]);  // different blob
+        let r = three_way_diff(&ancestor, &ours, &theirs);
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!(r.conflicts[0].path, "a.rs");
+        assert_eq!(r.conflicts[0].ours, Some(id(1)));
+        assert_eq!(r.conflicts[0].theirs, Some(id(2)));
+    }
+
     // ── find_common_ancestor ─────────────────────────────────────────────────
 
     /// Each snapshot gets a unique root blob so content-addressed hashing
@@ -330,6 +343,6 @@ mod tests {
         let base  = make_snapshot(&store, vec![], "base").await;
         let child = make_snapshot(&store, vec![base], "child").await;
         let lca = find_common_ancestor(&store, base, child).await.unwrap();
-        assert!(lca.is_some(), "base and child share base as ancestor");
+        assert_eq!(lca, Some(base));
     }
 }
