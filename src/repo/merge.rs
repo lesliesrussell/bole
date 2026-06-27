@@ -325,7 +325,7 @@ mod tests {
         let tip_b = make_snapshot(&store, vec![mid], "tip_b").await;
         let lca = find_common_ancestor(&store, tip_a, tip_b).await.unwrap();
         // The closest common ancestor is mid; base is also valid but further back
-        assert!(lca == Some(mid) || lca == Some(base), "lca was {lca:?}");
+        assert_eq!(lca, Some(mid));
     }
 
     #[tokio::test]
