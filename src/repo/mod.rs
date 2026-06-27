@@ -1,5 +1,7 @@
 // bole-1vi
 pub mod materialize;
+// bole-l0i
+pub mod workspace;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -8,6 +10,9 @@ use crate::acl::memory::MemoryAclBackend;
 use crate::acl::{Accessor, AclStore, PathAcl, PathRole, Permission};
 use crate::error::Result;
 use crate::object::{EntryKind, Object, ObjectId};
+// bole-l0i
+use crate::object::EnvValue;
+use workspace::WorkspaceView;
 use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
 use crate::store::{disk::DiskBackend, memory::MemoryBackend, ObjectStore};
 
@@ -142,6 +147,42 @@ impl Repository {
         } else {
             Ok(MergeCheck::Rejected(leaking))
         }
+    }
+
+    // bole-l0i
+    pub async fn compute_workspace_view(
+        &self,
+        snapshot_id: ObjectId,
+        overlay_id: ObjectId,
+        key: &[u8; 32],
+        accessor: &Accessor,
+    ) -> Result<Option<WorkspaceView>> {
+        let filtered = match self.get_snapshot_filtered(snapshot_id, accessor).await? {
+            Some(f) => f,
+            None => return Ok(None),
+        };
+        let overlay = match self.objects.get_overlay(&overlay_id).await? {
+            Some(o) => o,
+            None => return Err(crate::error::Error::Storage(
+                format!("overlay not found: {}", overlay_id)
+            )),
+        };
+        let mut env = std::collections::BTreeMap::new();
+        for (var, value) in overlay.entries {
+            let resolved = match value {
+                EnvValue::Plain(s) => s,
+                EnvValue::Secret(id) => {
+                    let bytes = self.objects.get_secret(&id, key).await?
+                        .ok_or_else(|| crate::error::Error::Storage(
+                            format!("secret not found: {}", id)
+                        ))?;
+                    String::from_utf8(bytes)
+                        .map_err(|_| crate::error::Error::SecretNotUtf8)?
+                }
+            };
+            env.insert(var, resolved);
+        }
+        Ok(Some(WorkspaceView { files: filtered.visible_paths, env }))
     }
 }
 
@@ -328,5 +369,87 @@ mod tests {
         let visible2 = repo.list_refs_filtered("", &privileged).unwrap();
         let names2: Vec<&str> = visible2.iter().map(|n| n.as_str()).collect();
         assert!(names2.contains(&"leslie/private/exp"));
+    }
+
+    // bole-l0i
+    #[tokio::test]
+    async fn compute_workspace_view_resolves_env() {
+        use crate::acl::{Accessor, PathRole, Permission};
+        use crate::object::{EnvOverlay, EnvValue, Snapshot, TreeEntry, EntryKind};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let key = [42u8; 32];
+
+        let blob_id = repo.objects.put_blob(Bytes::from("code")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("src/main.rs".into(), TreeEntry { id: blob_id, kind: EntryKind::Blob });
+        let tree_id = repo.objects.put_tree(entries).await.unwrap();
+        let snap_id = repo.objects.put_snapshot(Snapshot {
+            root: tree_id, parents: vec![], author: "test".into(),
+            created_at: 1, message: "m".into(),
+        }).await.unwrap();
+
+        let secret_id = repo.objects.put_secret(b"postgres://prod", &key).await.unwrap();
+        let mut env_entries = BTreeMap::new();
+        env_entries.insert("DB_URL".into(), EnvValue::Secret(secret_id));
+        env_entries.insert("LOG_LEVEL".into(), EnvValue::Plain("info".into()));
+        let overlay_id = repo.objects.put_overlay(EnvOverlay { entries: env_entries }).await.unwrap();
+
+        let accessor = Accessor::new()
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });
+
+        let view = repo.compute_workspace_view(snap_id, overlay_id, &key, &accessor)
+            .await.unwrap().unwrap();
+
+        assert!(view.files.contains_key("src/main.rs"));
+        assert_eq!(view.env.get("DB_URL").map(String::as_str), Some("postgres://prod"));
+        assert_eq!(view.env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+    }
+
+    #[tokio::test]
+    async fn compute_workspace_view_acl_filters_files() {
+        use crate::acl::{Accessor, PathAcl};
+        use crate::object::{EnvOverlay, Snapshot, TreeEntry, EntryKind};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let key = [1u8; 32];
+
+        let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("src/app.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        entries.insert("src/config.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree_id = repo.objects.put_tree(entries).await.unwrap();
+        let snap_id = repo.objects.put_snapshot(Snapshot {
+            root: tree_id, parents: vec![], author: "t".into(),
+            created_at: 1, message: "m".into(),
+        }).await.unwrap();
+
+        repo.acls.set_path_acl(PathAcl { glob: "src/config.rs".into() }).unwrap();
+
+        let overlay_id = repo.objects.put_overlay(EnvOverlay { entries: BTreeMap::new() }).await.unwrap();
+
+        let view = repo.compute_workspace_view(snap_id, overlay_id, &key, &Accessor::new())
+            .await.unwrap().unwrap();
+
+        assert!(view.files.contains_key("src/app.rs"));
+        assert!(!view.files.contains_key("src/config.rs"));
+        assert!(view.env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compute_workspace_view_returns_none_for_missing_snapshot() {
+        use crate::acl::Accessor;
+        use crate::object::{EnvOverlay, ObjectId};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let key = [1u8; 32];
+        let missing = ObjectId::new([9u8; 32]);
+        let overlay_id = repo.objects.put_overlay(EnvOverlay { entries: BTreeMap::new() }).await.unwrap();
+        let result = repo.compute_workspace_view(missing, overlay_id, &key, &Accessor::new())
+            .await.unwrap();
+        assert!(result.is_none());
     }
 }

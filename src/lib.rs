@@ -36,3 +36,5 @@ pub use store::{
 pub use repo::{copy_objects, materialize::materialize, Repository};
 // bole-9by
 pub use repo::{FilteredSnapshot, MergeCheck};
+// bole-l0i
+pub use repo::workspace::WorkspaceView;
