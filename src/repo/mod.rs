@@ -114,11 +114,16 @@ impl Repository {
             Some(tl) => tl.head,
             None => return Ok(MergeCheck::Allowed),
         };
+        // bole-4j3
+        let source_tree = match self.objects.get(&source_head).await? {
+            Some(Object::Snapshot(s)) => s.root,
+            _ => return Ok(MergeCheck::Allowed),
+        };
         let mut visible = BTreeMap::new();
         // bole-hc1
         let privileged = Accessor::new()
             .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });
-        walk_tree_filtered(&self.objects, &self.acls, source_head, "", &privileged, &mut visible).await?;
+        walk_tree_filtered(&self.objects, &self.acls, source_tree, "", &privileged, &mut visible).await?;
         // Find all paths in source that are protected but dest doesn't enforce them
         let mut leaking: Vec<PathAcl> = Vec::new();
         let path_acls = self.acls.list_path_acls()?;
