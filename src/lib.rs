@@ -10,6 +10,13 @@ pub(crate) mod codec;
 
 pub use error::{Error, Result};
 pub use object::{Blob, EntryKind, Object, ObjectId, Snapshot, Tree, TreeEntry};
+// bole-wmu
+pub use refs::{
+    backend::RefBackend,
+    disk::DiskRefBackend,
+    memory::MemoryRefBackend,
+    Ref, RefName, RefStore, Tag, Timeline, TimelinePolicy,
+};
 pub use store::{
     backend::StorageBackend,
     disk::DiskBackend,
