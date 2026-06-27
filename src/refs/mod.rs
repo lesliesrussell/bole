@@ -23,6 +23,7 @@ pub use timeline::{Timeline, TimelinePolicy};
 // bole-2jp
 pub use self::store::RefStore;
 
+// bole-2jp
 use crate::error::Error;
 use crate::object::ObjectId;
 
@@ -159,7 +160,8 @@ mod tests {
         let s = store();
         let id = ObjectId::new([1u8; 32]);
         s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1).unwrap();
-        assert!(s.move_tag(&name("main"), id).is_err());
+        let err = s.move_tag(&name("main"), id).unwrap_err();
+        assert!(matches!(err, crate::error::Error::WrongRefKind(_)));
     }
 
     #[test]
@@ -179,16 +181,22 @@ mod tests {
         let s = store();
         let id = ObjectId::new([1u8; 32]);
         s.create_tag(name("v1"), id, None, 1).unwrap();
-        assert!(s.advance_head(&name("v1"), id).is_err());
+        let err = s.advance_head(&name("v1"), id).unwrap_err();
+        assert!(matches!(err, crate::error::Error::WrongRefKind(_)));
     }
 
     #[test]
     fn delete_ref_works_for_both_kinds() {
         let s = store();
         let id = ObjectId::new([1u8; 32]);
+        // delete a tag
         s.create_tag(name("v1"), id, None, 1).unwrap();
         s.delete_ref(&name("v1")).unwrap();
         assert!(s.get(&name("v1")).unwrap().is_none());
+        // delete a timeline
+        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 1).unwrap();
+        s.delete_ref(&name("main")).unwrap();
+        assert!(s.get(&name("main")).unwrap().is_none());
     }
 
     #[test]
@@ -200,5 +208,15 @@ mod tests {
         s.create_tag(name("v1"), id, None, 1).unwrap();
         let listed = s.list("leslie/").unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    #[test]
+    fn move_and_advance_not_found_returns_storage_error() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        let err = s.move_tag(&name("nonexistent"), id).unwrap_err();
+        assert!(matches!(err, crate::error::Error::Storage(_)));
+        let err = s.advance_head(&name("nonexistent"), id).unwrap_err();
+        assert!(matches!(err, crate::error::Error::Storage(_)));
     }
 }
