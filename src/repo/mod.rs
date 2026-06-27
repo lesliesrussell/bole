@@ -407,6 +407,7 @@ mod tests {
         assert_eq!(view.env.get("LOG_LEVEL").map(String::as_str), Some("info"));
     }
 
+    // bole-l0i
     #[tokio::test]
     async fn compute_workspace_view_acl_filters_files() {
         use crate::acl::{Accessor, PathAcl};
@@ -438,6 +439,7 @@ mod tests {
         assert!(view.env.is_empty());
     }
 
+    // bole-l0i
     #[tokio::test]
     async fn compute_workspace_view_returns_none_for_missing_snapshot() {
         use crate::acl::Accessor;
