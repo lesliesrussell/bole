@@ -35,7 +35,11 @@ impl DiskRefBackend {
             if path.is_dir() {
                 self.walk_refs(&path, root, prefix, acc)?;
             } else {
-                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                if path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with('.'))
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let rel = path.strip_prefix(root).unwrap();
@@ -73,7 +77,7 @@ impl RefBackend for DiskRefBackend {
         fs::create_dir_all(path.parent().expect("ref path always has a parent"))?;
         let data = postcard::to_allocvec(r).map_err(|e| Error::Codec(e.to_string()))?;
         let tmp = path.with_file_name(format!(
-            "{}.tmp",
+            ".{}.tmp",
             path.file_name().unwrap().to_string_lossy()
         ));
         fs::write(&tmp, &data)?;
@@ -168,6 +172,16 @@ mod tests {
         b.set(&name("experiment/foo"), &tag(id)).unwrap();
         // verify the file exists at the expected path
         assert!(dir.path().join("refs/experiment/foo").exists());
+    }
+
+    #[test]
+    fn ref_named_dot_tmp_appears_in_list() {
+        let dir = TempDir::new().unwrap();
+        let b = DiskRefBackend::open(dir.path()).unwrap();
+        let id = ObjectId::new([1u8; 32]);
+        b.set(&name("foo.tmp"), &tag(id)).unwrap();
+        let names = b.list("").unwrap();
+        assert!(names.iter().any(|n| n.as_str() == "foo.tmp"));
     }
 
     #[test]

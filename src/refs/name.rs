@@ -27,6 +27,9 @@ impl RefName {
             if segment == ".." {
                 return Err(Error::InvalidRefName("'..' segment not allowed".into()));
             }
+            if segment == "." {
+                return Err(Error::InvalidRefName("'.' segment not allowed".into()));
+            }
             if segment.contains('\0') {
                 return Err(Error::InvalidRefName("null byte in segment".into()));
             }
@@ -104,5 +107,11 @@ mod tests {
     fn display() {
         let n = RefName::new("leslie/exp-foo").unwrap();
         assert_eq!(n.to_string(), "leslie/exp-foo");
+    }
+
+    #[test]
+    fn rejects_single_dot() {
+        assert!(RefName::new(".").is_err());
+        assert!(RefName::new("a/./b").is_err());
     }
 }

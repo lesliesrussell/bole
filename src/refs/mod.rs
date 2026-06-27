@@ -48,6 +48,12 @@ mod store {
             message: Option<String>,
             now: u64,
         ) -> Result<()> {
+            if self.backend.get(&name)?.is_some() {
+                return Err(Error::Storage(format!(
+                    "ref already exists: {}",
+                    name.as_str()
+                )));
+            }
             self.backend.set(&name, &Ref::Tag(Tag { target, created_at: now, message }))
         }
 
@@ -83,6 +89,12 @@ mod store {
             policy: TimelinePolicy,
             now: u64,
         ) -> Result<()> {
+            if self.backend.get(&name)?.is_some() {
+                return Err(Error::Storage(format!(
+                    "ref already exists: {}",
+                    name.as_str()
+                )));
+            }
             self.backend.set(&name, &Ref::Timeline(Timeline { head, policy, created_at: now }))
         }
 
@@ -218,5 +230,25 @@ mod tests {
         assert!(matches!(err, crate::error::Error::Storage(_)));
         let err = s.advance_head(&name("nonexistent"), id).unwrap_err();
         assert!(matches!(err, crate::error::Error::Storage(_)));
+    }
+
+    #[test]
+    fn create_tag_on_existing_ref_errors() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        s.create_tag(name("v1"), id, None, 1).unwrap();
+        // creating again must fail
+        assert!(s.create_tag(name("v1"), id, None, 2).is_err());
+        // creating a timeline with the same name must also fail
+        assert!(s.create_timeline(name("v1"), id, TimelinePolicy::Unrestricted, 2).is_err());
+    }
+
+    #[test]
+    fn create_timeline_on_existing_ref_errors() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        s.create_timeline(name("main"), id, TimelinePolicy::Append, 1).unwrap();
+        assert!(s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 2).is_err());
+        assert!(s.create_tag(name("main"), id, None, 2).is_err());
     }
 }
