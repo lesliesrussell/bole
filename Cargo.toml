@@ -20,3 +20,4 @@ gix = { version = "0.70", default-features = false, features = ["max-performance
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
+flate2 = "1"
