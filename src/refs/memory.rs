@@ -87,8 +87,8 @@ mod tests {
         b.set(&name("v1"), &tag(id)).unwrap();
         let names = b.list("leslie/").unwrap();
         assert_eq!(names.len(), 2);
-        assert!(names.iter().any(|n| n.as_str() == "leslie/a"));
-        assert!(names.iter().any(|n| n.as_str() == "leslie/b"));
+        assert_eq!(names[0].as_str(), "leslie/a");
+        assert_eq!(names[1].as_str(), "leslie/b");
     }
 
     #[test]
