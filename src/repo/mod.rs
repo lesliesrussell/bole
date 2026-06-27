@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use crate::acl::disk::DiskAclBackend;
 use crate::acl::memory::MemoryAclBackend;
-use crate::acl::{Accessor, AclStore, PathAcl};
+use crate::acl::{Accessor, AclStore, PathAcl, PathRole, Permission};
 use crate::error::Result;
 use crate::object::{EntryKind, Object, ObjectId};
 use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
@@ -115,7 +115,10 @@ impl Repository {
             None => return Ok(MergeCheck::Allowed),
         };
         let mut visible = BTreeMap::new();
-        walk_tree_filtered(&self.objects, &self.acls, source_head, "", &Accessor::new(), &mut visible).await?;
+        // bole-hc1
+        let privileged = Accessor::new()
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });
+        walk_tree_filtered(&self.objects, &self.acls, source_head, "", &privileged, &mut visible).await?;
         // Find all paths in source that are protected but dest doesn't enforce them
         let mut leaking: Vec<PathAcl> = Vec::new();
         let path_acls = self.acls.list_path_acls()?;
@@ -194,7 +197,6 @@ pub fn copy_refs(from: &RefStore, to: &RefStore) -> Result<()> {
     Ok(())
 }
 
-// bole-1vi
 #[cfg(test)]
 mod tests {
     use super::{copy_objects, copy_refs, Repository};
