@@ -31,4 +31,4 @@ pub use store::{
     ObjectStore,
 };
 // bole-1vi
-pub use repo::{copy_objects, materialize::materialize, Repository};
+pub use repo::{copy_objects, materialize::materialize, FilteredSnapshot, MergeCheck, Repository};
