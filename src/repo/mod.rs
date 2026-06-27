@@ -45,6 +45,7 @@ pub async fn copy_objects(from: &ObjectStore, to: &ObjectStore) -> Result<()> {
     Ok(())
 }
 
+// bole-1vi
 pub fn copy_refs(from: &RefStore, to: &RefStore) -> Result<()> {
     for name in from.list("")? {
         if let Some(r) = from.get(&name)? {
