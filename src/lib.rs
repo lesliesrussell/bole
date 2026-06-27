@@ -5,6 +5,8 @@ pub mod error;
 pub mod object;
 pub mod refs;
 pub mod store;
+// bole-1vi
+pub mod repo;
 
 pub(crate) mod codec;
 
@@ -23,3 +25,5 @@ pub use store::{
     memory::MemoryBackend,
     ObjectStore,
 };
+// bole-1vi
+pub use repo::{copy_objects, materialize::materialize, Repository};

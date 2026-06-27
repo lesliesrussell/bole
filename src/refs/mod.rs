@@ -134,6 +134,11 @@ mod store {
         pub fn list(&self, prefix: &str) -> Result<Vec<RefName>> {
             self.backend.list(prefix)
         }
+
+        // bole-1vi
+        pub(crate) fn set_raw(&self, name: &RefName, r: &Ref) -> Result<()> {
+            self.backend.set(name, r)
+        }
     }
 }
 
