@@ -25,12 +25,12 @@ pub struct TimelineRole {
     pub permission: Permission,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathAcl {
     pub glob: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineAcl {
     pub pattern: String,
 }
@@ -142,5 +142,40 @@ mod tests {
             .with_timeline_role(TimelineRole { pattern: "leslie/private/**".into(), permission: Permission::Read });
         assert!(a.can_read_timeline("leslie/private/exp-foo"));
         assert!(!a.can_read_timeline("main"));
+    }
+
+    // bole-sxf
+    #[test]
+    fn acl_store_path_is_protected() {
+        use crate::acl::memory::MemoryAclBackend;
+        let store = super::AclStore::new(MemoryAclBackend::new());
+
+        // Initially nothing is protected
+        assert!(!store.path_is_protected("secrets/prod.key").unwrap());
+
+        // After adding an ACL, matching paths are protected
+        store.set_path_acl(super::PathAcl { glob: "secrets/**".into() }).unwrap();
+        assert!(store.path_is_protected("secrets/prod.key").unwrap());
+        assert!(store.path_is_protected("secrets/a/b/c").unwrap());
+        assert!(!store.path_is_protected("src/main.rs").unwrap());
+
+        // After removing, no longer protected
+        store.remove_path_acl("secrets/**").unwrap();
+        assert!(!store.path_is_protected("secrets/prod.key").unwrap());
+    }
+
+    #[test]
+    fn acl_store_timeline_is_protected() {
+        use crate::acl::memory::MemoryAclBackend;
+        let store = super::AclStore::new(MemoryAclBackend::new());
+
+        assert!(!store.timeline_is_protected("main").unwrap());
+
+        store.set_timeline_acl(super::TimelineAcl { pattern: "leslie/private/**".into() }).unwrap();
+        assert!(store.timeline_is_protected("leslie/private/exp-foo").unwrap());
+        assert!(!store.timeline_is_protected("main").unwrap());
+
+        store.remove_timeline_acl("leslie/private/**").unwrap();
+        assert!(!store.timeline_is_protected("leslie/private/exp-foo").unwrap());
     }
 }
