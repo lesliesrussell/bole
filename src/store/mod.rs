@@ -7,7 +7,7 @@ use bytes::Bytes;
 use std::collections::BTreeMap;
 use crate::codec;
 use crate::error::Result;
-use crate::object::{Blob, Object, ObjectId, Snapshot, Tree, TreeEntry};
+use crate::object::{Blob, EnvOverlay, Object, ObjectId, Secret, Snapshot, Tree, TreeEntry};
 use backend::StorageBackend;
 
 pub struct ObjectStore {
@@ -54,6 +54,32 @@ impl ObjectStore {
     // bole-dq2
     pub async fn list(&self) -> Result<Vec<ObjectId>> {
         self.backend.list().await
+    }
+
+    // bole-meg
+    pub async fn put_secret(&self, plaintext: &[u8], key: &[u8; 32]) -> Result<ObjectId> {
+        let secret = Secret::encrypt(plaintext, key)?;
+        self.put(&Object::Secret(secret)).await
+    }
+
+    pub async fn get_secret(&self, id: &ObjectId, key: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        match self.get(id).await? {
+            None => Ok(None),
+            Some(Object::Secret(s)) => Ok(Some(s.decrypt(key)?)),
+            Some(_) => Err(crate::error::Error::Codec("not a secret".into())),
+        }
+    }
+
+    pub async fn put_overlay(&self, overlay: EnvOverlay) -> Result<ObjectId> {
+        self.put(&Object::EnvOverlay(overlay)).await
+    }
+
+    pub async fn get_overlay(&self, id: &ObjectId) -> Result<Option<EnvOverlay>> {
+        match self.get(id).await? {
+            None => Ok(None),
+            Some(Object::EnvOverlay(o)) => Ok(Some(o)),
+            Some(_) => Err(crate::error::Error::Codec("not an env overlay".into())),
+        }
     }
 }
 
@@ -149,6 +175,58 @@ mod tests {
             Object::Tree(t) => assert_eq!(t.entries, entries),
             _ => panic!("expected tree"),
         }
+    }
+
+    // bole-meg
+    #[tokio::test]
+    async fn put_secret_roundtrip() {
+        let s = store();
+        let key = [1u8; 32];
+        let id = s.put_secret(b"value", &key).await.unwrap();
+        let got = s.get_secret(&id, &key).await.unwrap().unwrap();
+        assert_eq!(got, b"value");
+    }
+
+    #[tokio::test]
+    async fn get_secret_wrong_key_returns_err() {
+        let s = store();
+        let key = [1u8; 32];
+        let wrong_key = [2u8; 32];
+        let id = s.put_secret(b"secret", &key).await.unwrap();
+        let err = s.get_secret(&id, &wrong_key).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::DecryptionFailed));
+    }
+
+    #[tokio::test]
+    async fn get_secret_missing_returns_none() {
+        let s = store();
+        let key = [1u8; 32];
+        let id = crate::object::ObjectId::new([9u8; 32]);
+        let got = s.get_secret(&id, &key).await.unwrap();
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_overlay_get_overlay_roundtrip() {
+        use crate::object::{EnvOverlay, EnvValue, ObjectId};
+        use std::collections::BTreeMap;
+        let s = store();
+        let mut entries = BTreeMap::new();
+        entries.insert("LOG".into(), EnvValue::Plain("info".into()));
+        entries.insert("KEY".into(), EnvValue::Secret(ObjectId::new([7u8; 32])));
+        let overlay = EnvOverlay { entries };
+        let id = s.put_overlay(overlay.clone()).await.unwrap();
+        let got = s.get_overlay(&id).await.unwrap().unwrap();
+        assert_eq!(got, overlay);
+    }
+
+    #[tokio::test]
+    async fn get_secret_on_non_secret_object_returns_err() {
+        let s = store();
+        let blob_id = s.put_blob(Bytes::from("not a secret")).await.unwrap();
+        let key = [1u8; 32];
+        let err = s.get_secret(&blob_id, &key).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::Codec(_)));
     }
 
     // bole-dq2
