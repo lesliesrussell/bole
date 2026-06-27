@@ -686,6 +686,63 @@ mod tests {
         assert_eq!(result.merged.get("other.rs"), Some(&blob_other));
     }
 
+    // bole-u6p
+    #[tokio::test]
+    async fn merge_conflicting_timelines() {
+        use crate::acl::{Accessor, PathRole, TimelineRole, Permission};
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+
+        // Ancestor snapshot: shared.rs at blob v1
+        let blob_v1 = repo.objects.put_blob(Bytes::from("v1")).await.unwrap();
+        let mut anc_entries = BTreeMap::new();
+        anc_entries.insert("shared.rs".into(), TreeEntry { id: blob_v1, kind: EntryKind::Blob });
+        let anc_tree = repo.objects.put_tree(anc_entries).await.unwrap();
+        let anc_snap = repo.objects.put_snapshot(Snapshot {
+            root: anc_tree, parents: vec![], author: "t".into(), created_at: 0, message: "anc".into(),
+        }).await.unwrap();
+
+        // Source timeline: shared.rs → blob v2
+        let blob_v2 = repo.objects.put_blob(Bytes::from("v2")).await.unwrap();
+        let mut src_entries = BTreeMap::new();
+        src_entries.insert("shared.rs".into(), TreeEntry { id: blob_v2, kind: EntryKind::Blob });
+        let src_tree = repo.objects.put_tree(src_entries).await.unwrap();
+        let src_snap = repo.objects.put_snapshot(Snapshot {
+            root: src_tree, parents: vec![anc_snap], author: "t".into(), created_at: 1, message: "src".into(),
+        }).await.unwrap();
+
+        // Target timeline: shared.rs → blob v3
+        let blob_v3 = repo.objects.put_blob(Bytes::from("v3")).await.unwrap();
+        let mut tgt_entries = BTreeMap::new();
+        tgt_entries.insert("shared.rs".into(), TreeEntry { id: blob_v3, kind: EntryKind::Blob });
+        let tgt_tree = repo.objects.put_tree(tgt_entries).await.unwrap();
+        let tgt_snap = repo.objects.put_snapshot(Snapshot {
+            root: tgt_tree, parents: vec![anc_snap], author: "t".into(), created_at: 2, message: "tgt".into(),
+        }).await.unwrap();
+
+        let src = RefName::new("conflict-src").unwrap();
+        let tgt = RefName::new("conflict-tgt").unwrap();
+        repo.refs.create_timeline(src.clone(), src_snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(tgt.clone(), tgt_snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let full_write_accessor = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "*".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+
+        let result = repo.merge_timelines(&src, &tgt, &full_write_accessor).await.unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].path, "shared.rs");
+        // merge_timelines calls three_way_diff(&ancestor, &target_tree, &source_tree)
+        // so ours = target's blob, theirs = source's blob
+        assert_eq!(result.conflicts[0].ours, Some(blob_v3));
+        assert_eq!(result.conflicts[0].theirs, Some(blob_v2));
+    }
+
     #[tokio::test]
     async fn advance_timeline_requires_write_cap_on_timeline() {
         use crate::acl::Accessor;
@@ -746,6 +803,38 @@ mod tests {
         let full = Accessor::new()
             .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Write })
             .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+        repo.advance_timeline(&name, snap2, &full).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, snap2);
+    }
+
+    // bole-u6p
+    #[tokio::test]
+    async fn advance_timeline_write_role_succeeds() {
+        use crate::acl::{Accessor, PathRole, TimelineRole, Permission};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+
+        // Initial snapshot with empty tree
+        let empty_tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap1 = repo.objects.put_snapshot(Snapshot {
+            root: empty_tree, parents: vec![], author: "t".into(), created_at: 0, message: "s1".into(),
+        }).await.unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), snap1, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // Second snapshot parenting the first
+        let snap2 = repo.objects.put_snapshot(Snapshot {
+            root: empty_tree, parents: vec![snap1], author: "t".into(), created_at: 1, message: "s2".into(),
+        }).await.unwrap();
+
+        // Full-write accessor: timeline write + path write
+        let full = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+
         repo.advance_timeline(&name, snap2, &full).await.unwrap();
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, snap2);
     }
