@@ -14,6 +14,7 @@ pub enum Error {
     #[error("access denied: {0}")] AccessDenied(String),
     #[error("decryption failed")] DecryptionFailed,
     #[error("secret value is not valid UTF-8")] SecretNotUtf8,
+    #[error("git projection failed: {0}")] GitProjection(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

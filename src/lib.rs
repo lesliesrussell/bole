@@ -34,6 +34,8 @@ pub use store::{
 };
 // bole-1vi
 pub use repo::{copy_objects, materialize::materialize, Repository};
+// bole-6bd
+pub use repo::git_projection::project_to_git;
 // bole-9by
 pub use repo::{FilteredSnapshot, MergeCheck};
 // bole-9lj
