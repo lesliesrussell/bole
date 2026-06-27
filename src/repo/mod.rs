@@ -10,8 +10,11 @@ use std::path::Path;
 use crate::acl::disk::DiskAclBackend;
 use crate::acl::memory::MemoryAclBackend;
 use crate::acl::{Accessor, AclStore, PathAcl, PathRole, Permission};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::object::{EntryKind, Object, ObjectId};
+// bole-u6p
+use merge::{MergeResult, three_way_diff, find_common_ancestor as lca};
+use crate::refs::Ref;
 // bole-l0i
 use crate::object::EnvValue;
 use workspace::WorkspaceView;
@@ -149,6 +152,123 @@ impl Repository {
         } else {
             Ok(MergeCheck::Rejected(leaking))
         }
+    }
+
+    // bole-u6p
+    pub async fn find_common_ancestor(&self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+        lca(&self.objects, a, b).await
+    }
+
+    pub async fn merge_timelines(
+        &self,
+        source: &RefName,
+        target: &RefName,
+        accessor: &Accessor,
+    ) -> Result<MergeResult> {
+        if !accessor.can_write_timeline(target.as_str()) {
+            return Err(Error::AccessDenied(format!(
+                "write denied on timeline: {}",
+                target.as_str()
+            )));
+        }
+        let source_tl = self.refs.get_timeline(source)?.ok_or_else(|| {
+            Error::Storage(format!("timeline not found: {}", source.as_str()))
+        })?;
+        let target_tl = self.refs.get_timeline(target)?.ok_or_else(|| {
+            Error::Storage(format!("timeline not found: {}", target.as_str()))
+        })?;
+        let ancestor_id = lca(&self.objects, source_tl.head, target_tl.head).await?;
+        let source_root = match self.objects.get(&source_tl.head).await? {
+            Some(Object::Snapshot(s)) => s.root,
+            _ => return Err(Error::Storage(format!("snapshot not found: {}", source_tl.head))),
+        };
+        let target_root = match self.objects.get(&target_tl.head).await? {
+            Some(Object::Snapshot(s)) => s.root,
+            _ => return Err(Error::Storage(format!("snapshot not found: {}", target_tl.head))),
+        };
+        let ancestor_tree = match ancestor_id {
+            Some(id) => match self.objects.get(&id).await? {
+                Some(Object::Snapshot(s)) => self.tree_as_map(s.root).await?,
+                _ => BTreeMap::new(),
+            },
+            None => BTreeMap::new(),
+        };
+        let source_tree = self.tree_as_map(source_root).await?;
+        let target_tree = self.tree_as_map(target_root).await?;
+        // ours = target (being merged into), theirs = source
+        Ok(three_way_diff(&ancestor_tree, &target_tree, &source_tree))
+    }
+
+    pub async fn advance_timeline(
+        &self,
+        name: &RefName,
+        snapshot_id: ObjectId,
+        accessor: &Accessor,
+    ) -> Result<()> {
+        if !accessor.can_write_timeline(name.as_str()) {
+            return Err(Error::AccessDenied(format!(
+                "write denied on timeline: {}",
+                name.as_str()
+            )));
+        }
+        let snap = match self.objects.get(&snapshot_id).await? {
+            Some(Object::Snapshot(s)) => s,
+            _ => return Err(Error::Storage(format!("snapshot not found: {}", snapshot_id))),
+        };
+        let mut paths = BTreeMap::new();
+        walk_tree_filtered(
+            &self.objects,
+            &self.acls,
+            snap.root,
+            "",
+            &Accessor::privileged(),
+            &mut paths,
+        )
+        .await?;
+        for path in paths.keys() {
+            if !accessor.can_write_path(path) {
+                return Err(Error::AccessDenied(format!(
+                    "write denied on path: {}",
+                    path
+                )));
+            }
+        }
+        self.refs.advance_head(name, snapshot_id)?;
+        Ok(())
+    }
+
+    pub fn prune_timeline(&self, name: &RefName, now: u64) -> Result<bool> {
+        let tl = match self.refs.get_timeline(name)? {
+            Some(t) => t,
+            None => return Ok(false),
+        };
+        match tl.expires_at {
+            Some(exp) if exp <= now => {}
+            _ => return Ok(false),
+        }
+        for ref_name in self.refs.list("")? {
+            if let Some(Ref::Tag(tag)) = self.refs.get(&ref_name)? {
+                if tag.target == tl.head {
+                    return Ok(false);
+                }
+            }
+        }
+        self.refs.delete_ref(name)?;
+        Ok(true)
+    }
+
+    async fn tree_as_map(&self, tree_id: ObjectId) -> Result<BTreeMap<String, ObjectId>> {
+        let mut map = BTreeMap::new();
+        walk_tree_filtered(
+            &self.objects,
+            &self.acls,
+            tree_id,
+            "",
+            &Accessor::privileged(),
+            &mut map,
+        )
+        .await?;
+        Ok(map)
     }
 
     // bole-l0i
@@ -455,5 +575,237 @@ mod tests {
         let result = repo.compute_workspace_view(missing, overlay_id, &key, &Accessor::new())
             .await.unwrap();
         assert!(result.is_none());
+    }
+
+    // bole-u6p
+    #[tokio::test]
+    async fn find_common_ancestor_delegates_to_merge_lca() {
+        use crate::object::Snapshot;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        let root = repo.objects.put_blob(Bytes::from("root")).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot {
+            root, parents: vec![], author: "t".into(), created_at: 0, message: "b".into(),
+        }).await.unwrap();
+        let root2 = repo.objects.put_blob(Bytes::from("a")).await.unwrap();
+        let tip_a = repo.objects.put_snapshot(Snapshot {
+            root: root2, parents: vec![base], author: "t".into(), created_at: 1, message: "a".into(),
+        }).await.unwrap();
+        let root3 = repo.objects.put_blob(Bytes::from("b")).await.unwrap();
+        let tip_b = repo.objects.put_snapshot(Snapshot {
+            root: root3, parents: vec![base], author: "t".into(), created_at: 2, message: "b2".into(),
+        }).await.unwrap();
+        let lca = repo.find_common_ancestor(tip_a, tip_b).await.unwrap();
+        assert!(lca == Some(base));
+    }
+
+    #[tokio::test]
+    async fn merge_timelines_requires_write_cap() {
+        use crate::acl::{Accessor, TimelineRole, Permission};
+        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("a.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let snap = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into(),
+        }).await.unwrap();
+
+        let src = RefName::new("src").unwrap();
+        let tgt = RefName::new("tgt").unwrap();
+        repo.refs.create_timeline(src.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(tgt.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // no write cap → AccessDenied
+        let err = repo.merge_timelines(&src, &tgt, &Accessor::new()).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::AccessDenied(_)), "got {err:?}");
+
+        // with write cap → succeeds (clean merge, same snap)
+        let writer = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "tgt".into(), permission: Permission::Write });
+        let result = repo.merge_timelines(&src, &tgt, &writer).await.unwrap();
+        assert!(result.is_clean());
+    }
+
+    #[tokio::test]
+    async fn merge_timelines_three_way_diff() {
+        use crate::acl::{Accessor, TimelineRole, Permission};
+        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+
+        // Base snapshot: file "shared.rs"
+        let blob_base = repo.objects.put_blob(Bytes::from("base")).await.unwrap();
+        let mut base_entries = BTreeMap::new();
+        base_entries.insert("shared.rs".into(), TreeEntry { id: blob_base, kind: EntryKind::Blob });
+        let base_tree = repo.objects.put_tree(base_entries).await.unwrap();
+        let base_snap = repo.objects.put_snapshot(Snapshot {
+            root: base_tree, parents: vec![], author: "t".into(), created_at: 0, message: "base".into(),
+        }).await.unwrap();
+
+        // Source snapshot: changes "shared.rs"
+        let blob_src = repo.objects.put_blob(Bytes::from("src-change")).await.unwrap();
+        let mut src_entries = BTreeMap::new();
+        src_entries.insert("shared.rs".into(), TreeEntry { id: blob_src, kind: EntryKind::Blob });
+        let src_tree = repo.objects.put_tree(src_entries).await.unwrap();
+        let src_snap = repo.objects.put_snapshot(Snapshot {
+            root: src_tree, parents: vec![base_snap], author: "t".into(), created_at: 1, message: "src".into(),
+        }).await.unwrap();
+
+        // Target snapshot: adds "other.rs", keeps "shared.rs" at base
+        let blob_other = repo.objects.put_blob(Bytes::from("other")).await.unwrap();
+        let mut tgt_entries = BTreeMap::new();
+        tgt_entries.insert("shared.rs".into(), TreeEntry { id: blob_base, kind: EntryKind::Blob });
+        tgt_entries.insert("other.rs".into(), TreeEntry { id: blob_other, kind: EntryKind::Blob });
+        let tgt_tree = repo.objects.put_tree(tgt_entries).await.unwrap();
+        let tgt_snap = repo.objects.put_snapshot(Snapshot {
+            root: tgt_tree, parents: vec![base_snap], author: "t".into(), created_at: 2, message: "tgt".into(),
+        }).await.unwrap();
+
+        let src = RefName::new("src").unwrap();
+        let tgt = RefName::new("tgt").unwrap();
+        repo.refs.create_timeline(src.clone(), src_snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(tgt.clone(), tgt_snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let writer = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "tgt".into(), permission: Permission::Write });
+        let result = repo.merge_timelines(&src, &tgt, &writer).await.unwrap();
+
+        // clean merge: theirs changed "shared.rs", ours added "other.rs"
+        assert!(result.is_clean(), "conflicts: {:?}", result.conflicts);
+        assert_eq!(result.merged.get("shared.rs"), Some(&blob_src));
+        assert_eq!(result.merged.get("other.rs"), Some(&blob_other));
+    }
+
+    #[tokio::test]
+    async fn advance_timeline_requires_write_cap_on_timeline() {
+        use crate::acl::Accessor;
+        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("a.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let snap = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into(),
+        }).await.unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let snap2 = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![snap], author: "t".into(), created_at: 1, message: "m2".into(),
+        }).await.unwrap();
+
+        let err = repo.advance_timeline(&name, snap2, &Accessor::new()).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::AccessDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn advance_timeline_requires_write_cap_on_paths() {
+        use crate::acl::{Accessor, PathRole, TimelineRole, Permission};
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        let blob = repo.objects.put_blob(Bytes::from("secret")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("secrets/key".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let snap = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into(),
+        }).await.unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let snap2 = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![snap], author: "t".into(), created_at: 1, message: "m2".into(),
+        }).await.unwrap();
+
+        // has timeline write but no path write → AccessDenied on path
+        let partial = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Write });
+        let err = repo.advance_timeline(&name, snap2, &partial).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::AccessDenied(_)));
+
+        // with both → succeeds
+        let full = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+        repo.advance_timeline(&name, snap2, &full).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, snap2);
+    }
+
+    #[test]
+    fn prune_timeline_removes_expired_with_no_tags() {
+        use crate::object::ObjectId;
+        use crate::refs::{RefName, TimelinePolicy};
+
+        let repo = Repository::memory();
+        let head = ObjectId::new([1u8; 32]);
+        let name = RefName::new("exp").unwrap();
+        repo.refs.create_timeline(
+            name.clone(), head, TimelinePolicy::Unrestricted, 0,
+            "ephemeral".into(), Some(100),
+        ).unwrap();
+
+        // not yet expired
+        assert!(!repo.prune_timeline(&name, 99).unwrap());
+        assert!(repo.refs.get_timeline(&name).unwrap().is_some());
+
+        // now = 100 → expired, no tags → pruned
+        assert!(repo.prune_timeline(&name, 100).unwrap());
+        assert!(repo.refs.get_timeline(&name).unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_timeline_does_not_remove_when_tag_on_head() {
+        use crate::object::ObjectId;
+        use crate::refs::{RefName, TimelinePolicy};
+
+        let repo = Repository::memory();
+        let head = ObjectId::new([2u8; 32]);
+        let tl_name = RefName::new("exp2").unwrap();
+        repo.refs.create_timeline(
+            tl_name.clone(), head, TimelinePolicy::Unrestricted, 0,
+            "ephemeral".into(), Some(100),
+        ).unwrap();
+        // pin the head with a tag
+        repo.refs.create_tag(RefName::new("pinned-v1").unwrap(), head, None, 0).unwrap();
+
+        // expired but pinned → not pruned
+        assert!(!repo.prune_timeline(&tl_name, 200).unwrap());
+        assert!(repo.refs.get_timeline(&tl_name).unwrap().is_some());
+    }
+
+    #[test]
+    fn prune_timeline_ignores_non_expired() {
+        use crate::object::ObjectId;
+        use crate::refs::{RefName, TimelinePolicy};
+
+        let repo = Repository::memory();
+        let head = ObjectId::new([3u8; 32]);
+        let name = RefName::new("persistent").unwrap();
+        // no expires_at
+        repo.refs.create_timeline(
+            name.clone(), head, TimelinePolicy::Unrestricted, 0,
+            "persistent".into(), None,
+        ).unwrap();
+        assert!(!repo.prune_timeline(&name, 99999).unwrap());
+        assert!(repo.refs.get_timeline(&name).unwrap().is_some());
     }
 }
