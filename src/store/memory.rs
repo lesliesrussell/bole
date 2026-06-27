@@ -41,6 +41,14 @@ impl StorageBackend for MemoryBackend {
         self.store.write().await.remove(id.as_bytes());
         Ok(())
     }
+
+    // bole-dq2
+    async fn list(&self) -> Result<Vec<ObjectId>> {
+        Ok(self.store.read().await
+            .keys()
+            .map(|k| ObjectId::new(*k))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +89,28 @@ mod tests {
         backend.put(&id, b"data").await.unwrap();
         backend.delete(&id).await.unwrap();
         assert!(!backend.exists(&id).await.unwrap());
+    }
+
+    // bole-dq2
+    #[tokio::test]
+    async fn list_returns_all_ids() {
+        let backend = MemoryBackend::new();
+        let id1 = ObjectId::from_bytes(b"a");
+        let id2 = ObjectId::from_bytes(b"b");
+        let id3 = ObjectId::from_bytes(b"c");
+        backend.put(&id1, b"data1").await.unwrap();
+        backend.put(&id2, b"data2").await.unwrap();
+        backend.put(&id3, b"data3").await.unwrap();
+        let ids = backend.list().await.unwrap();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+        assert!(ids.contains(&id3));
+    }
+
+    #[tokio::test]
+    async fn list_empty_store_returns_empty() {
+        let backend = MemoryBackend::new();
+        assert!(backend.list().await.unwrap().is_empty());
     }
 }

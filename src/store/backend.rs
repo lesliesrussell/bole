@@ -10,4 +10,6 @@ pub trait StorageBackend: Send + Sync {
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>>;
     async fn exists(&self, id: &ObjectId) -> Result<bool>;
     async fn delete(&self, id: &ObjectId) -> Result<()>;
+    // bole-dq2
+    async fn list(&self) -> Result<Vec<ObjectId>>;
 }

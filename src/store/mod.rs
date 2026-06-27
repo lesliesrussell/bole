@@ -50,6 +50,11 @@ impl ObjectStore {
     pub async fn put_snapshot(&self, snap: Snapshot) -> Result<ObjectId> {
         self.put(&Object::Snapshot(snap)).await
     }
+
+    // bole-dq2
+    pub async fn list(&self) -> Result<Vec<ObjectId>> {
+        self.backend.list().await
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +149,17 @@ mod tests {
             Object::Tree(t) => assert_eq!(t.entries, entries),
             _ => panic!("expected tree"),
         }
+    }
+
+    // bole-dq2
+    #[tokio::test]
+    async fn object_store_list() {
+        let s = store();
+        let id1 = s.put_blob(Bytes::from("foo")).await.unwrap();
+        let id2 = s.put_blob(Bytes::from("bar")).await.unwrap();
+        let ids = s.list().await.unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
     }
 }
