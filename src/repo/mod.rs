@@ -2,6 +2,8 @@
 pub mod materialize;
 // bole-l0i
 pub mod workspace;
+// bole-9lj
+pub mod merge;
 
 use std::collections::BTreeMap;
 use std::path::Path;
