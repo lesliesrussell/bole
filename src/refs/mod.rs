@@ -11,6 +11,9 @@ pub mod timeline;
 pub use backend::RefBackend;
 pub use memory::MemoryRefBackend;
 
+// bole-fkt
+pub use disk::DiskRefBackend;
+
 // bole-prn
 pub use name::RefName;
 pub use ref_type::Ref;
