@@ -7,6 +7,11 @@ pub mod refs;
 pub mod store;
 // bole-1vi
 pub mod repo;
+// bole-mhs
+pub mod acl;
+pub use acl::{
+    Accessor, AclStore, PathAcl, PathRole, Permission, TimelineAcl, TimelineRole,
+};
 
 pub(crate) mod codec;
 
