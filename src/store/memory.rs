@@ -1,4 +1,5 @@
 // bole-mbt
+// bole-eje
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use super::backend::StorageBackend;
 
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBackend {
-    store: Arc<RwLock<HashMap<[u8; 32], Bytes>>>,
+    store: Arc<RwLock<HashMap<ObjectId, Bytes>>>,
 }
 
 impl MemoryBackend {
@@ -25,29 +26,26 @@ impl StorageBackend for MemoryBackend {
         self.store
             .write()
             .await
-            .insert(*id.as_bytes(), Bytes::copy_from_slice(data));
+            .insert(*id, Bytes::copy_from_slice(data));
         Ok(())
     }
 
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>> {
-        Ok(self.store.read().await.get(id.as_bytes()).cloned())
+        Ok(self.store.read().await.get(id).cloned())
     }
 
     async fn exists(&self, id: &ObjectId) -> Result<bool> {
-        Ok(self.store.read().await.contains_key(id.as_bytes()))
+        Ok(self.store.read().await.contains_key(id))
     }
 
     async fn delete(&self, id: &ObjectId) -> Result<()> {
-        self.store.write().await.remove(id.as_bytes());
+        self.store.write().await.remove(id);
         Ok(())
     }
 
     // bole-dq2
     async fn list(&self) -> Result<Vec<ObjectId>> {
-        Ok(self.store.read().await
-            .keys()
-            .map(|k| ObjectId::new(*k))
-            .collect())
+        Ok(self.store.read().await.keys().copied().collect())
     }
 }
 
