@@ -350,6 +350,10 @@ async fn walk_tree_filtered(
 }
 
 // bole-1vi
+// bole-1cq
+// Decode + re-encode rather than raw byte copy. Safe because postcard is
+// deterministic and BLAKE3 ids are stable, so round-tripping preserves the id.
+// If codec versioning ever changes, revisit this.
 pub async fn copy_objects(from: &ObjectStore, to: &ObjectStore) -> Result<()> {
     for id in from.list().await? {
         if let Some(obj) = from.get(&id).await? {
