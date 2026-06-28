@@ -235,6 +235,45 @@ mod tests {
         assert!(!a.can_read_timeline("main"));
     }
 
+    // bole-l54
+    #[test]
+    fn read_role_does_not_grant_write() {
+        let a = Accessor::new()
+            .with_path_role(PathRole { glob: "src/**".into(), permission: Permission::Read })
+            .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Read });
+        assert!(a.can_read_path("src/lib.rs"));
+        assert!(!a.can_write_path("src/lib.rs"));
+        assert!(a.can_read_timeline("main"));
+        assert!(!a.can_write_timeline("main"));
+    }
+
+    // bole-l54
+    #[test]
+    fn write_role_grants_write() {
+        let a = Accessor::new()
+            .with_path_role(PathRole { glob: "src/**".into(), permission: Permission::Write })
+            .with_timeline_role(TimelineRole { pattern: "agent/**".into(), permission: Permission::Write });
+        assert!(a.can_write_path("src/lib.rs"));
+        assert!(a.can_write_timeline("agent/fmt"));
+        assert!(!a.can_write_timeline("main"));
+    }
+
+    // bole-l54
+    #[test]
+    fn roles_union_across_multiple_grants() {
+        let a = Accessor::new()
+            .with_path_role(PathRole { glob: "src/**".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "docs/**".into(), permission: Permission::Read });
+        // write on src is granted; not on docs (only a read role there)
+        assert!(a.can_write_path("src/main.rs"));
+        assert!(!a.can_write_path("docs/readme.md"));
+        // read is granted on docs but not on src (only a write role there)
+        assert!(a.can_read_path("docs/readme.md"));
+        assert!(!a.can_read_path("src/main.rs"));
+        // neither role covers an unrelated path
+        assert!(!a.can_read_path("secrets/key"));
+    }
+
     // bole-qv5
     #[test]
     fn privileged_accessor_can_read_everything() {

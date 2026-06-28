@@ -172,3 +172,70 @@ async fn check_merge_missing_source_returns_error() {
     let result = repo.check_merge(&missing, &dest, &accessor).await;
     assert!(result.is_err(), "missing source ref should return an error, not Allowed");
 }
+
+// bole-l54
+/// A write-only role on a protected path does NOT make it readable: filtering
+/// requires a Read role, so a write-only accessor sees the protected path
+/// hidden just like an empty accessor would.
+#[tokio::test]
+async fn write_only_role_cannot_read_protected_path() {
+    let repo = Repository::memory();
+    repo.acls.set_path_acl(PathAcl { glob: "secrets/**".into() }).unwrap();
+
+    let pub_blob = repo.objects.put_blob(Bytes::from("public")).await.unwrap();
+    let sec_blob = repo.objects.put_blob(Bytes::from("secret")).await.unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert("src/app.rs".into(), TreeEntry { id: pub_blob, kind: EntryKind::Blob });
+    entries.insert("secrets/prod.key".into(), TreeEntry { id: sec_blob, kind: EntryKind::Blob });
+    let tree = repo.objects.put_tree(entries).await.unwrap();
+    let snap = repo.objects.put_snapshot(Snapshot {
+        root: tree, parents: vec![], author: "t".into(), created_at: 1, message: "s".into(),
+    }).await.unwrap();
+
+    // Write (not Read) on secrets/** -> protected path stays hidden.
+    let writer = Accessor::new()
+        .with_path_role(PathRole { glob: "secrets/**".into(), permission: Permission::Write });
+    let f = repo.get_snapshot_filtered(snap, &writer).await.unwrap().unwrap();
+    assert!(f.visible_paths.contains_key("src/app.rs"));
+    assert!(!f.visible_paths.contains_key("secrets/prod.key"), "write-only role must not reveal a protected path");
+
+    // A Read role does reveal it.
+    let reader = Accessor::new()
+        .with_path_role(PathRole { glob: "secrets/**".into(), permission: Permission::Read });
+    let f2 = repo.get_snapshot_filtered(snap, &reader).await.unwrap().unwrap();
+    assert!(f2.visible_paths.contains_key("secrets/prod.key"));
+}
+
+// bole-l54
+/// merge_timelines must reject when the accessor cannot write the target,
+/// independent of check_merge.
+#[tokio::test]
+async fn merge_timelines_denies_non_writable_target() {
+    let repo = Repository::memory();
+
+    let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert("a.txt".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+    let tree = repo.objects.put_tree(entries).await.unwrap();
+    let base = repo.objects.put_snapshot(Snapshot {
+        root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "base".into(),
+    }).await.unwrap();
+    let src_head = repo.objects.put_snapshot(Snapshot {
+        root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "s".into(),
+    }).await.unwrap();
+
+    let source = RefName::new("feature").unwrap();
+    let target = RefName::new("main").unwrap();
+    repo.refs.create_timeline(source.clone(), src_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+    repo.refs.create_timeline(target.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+    // No write role on main -> denied.
+    let no_write = Accessor::new();
+    let err = repo.merge_timelines(&source, &target, &no_write).await.unwrap_err();
+    assert!(matches!(err, bole::Error::AccessDenied(_)), "expected AccessDenied, got {err:?}");
+
+    // With write on main, the merge proceeds.
+    let writer = Accessor::new()
+        .with_timeline_role(TimelineRole { pattern: "main".into(), permission: Permission::Write });
+    repo.merge_timelines(&source, &target, &writer).await.unwrap();
+}
