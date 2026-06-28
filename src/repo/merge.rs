@@ -338,4 +338,18 @@ mod tests {
         let lca = find_common_ancestor(&store, base, child).await.unwrap();
         assert_eq!(lca, Some(base));
     }
+
+    // bole-d0o
+    #[tokio::test]
+    async fn lca_diamond() {
+        // base → left  ⟩
+        //      → right ⟩ → tip  (diamond topology)
+        let store = ObjectStore::new(MemoryBackend::new());
+        let base  = make_snapshot(&store, vec![], "base").await;
+        let left  = make_snapshot(&store, vec![base], "left").await;
+        let right = make_snapshot(&store, vec![base], "right").await;
+        let _tip  = make_snapshot(&store, vec![left, right], "tip").await;
+        let lca = find_common_ancestor(&store, left, right).await.unwrap();
+        assert_eq!(lca, Some(base), "diamond LCA must be the shared base");
+    }
 }
