@@ -1,4 +1,8 @@
 # bole-4q6
+# bole-aqk
+[workspace]
+members = ["bole-cli"]
+
 [package]
 name = "bole"
 version = "0.1.0"
