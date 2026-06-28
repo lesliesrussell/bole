@@ -4,8 +4,9 @@ use crate::error::{Error, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// bole-0u9
 fn sanitize(s: &str) -> String {
-    s.replace('/', "%2F").replace('*', "%2A")
+    s.replace('%', "%25").replace('/', "%2F").replace('*', "%2A")
 }
 
 
