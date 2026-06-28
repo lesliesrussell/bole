@@ -135,9 +135,8 @@ impl Repository {
         };
         let mut visible = BTreeMap::new();
         // bole-hc1
-        let privileged = Accessor::new()
-            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });
-        walk_tree_filtered(&self.objects, &self.acls, source_tree, "", &privileged, &mut visible).await?;
+        // bole-g21
+        walk_tree_filtered(&self.objects, &self.acls, source_tree, "", &Accessor::privileged(), &mut visible).await?;
         // Find all paths in source that are protected but dest doesn't enforce them
         let mut leaking: Vec<PathAcl> = Vec::new();
         let path_acls = self.acls.list_path_acls()?;
