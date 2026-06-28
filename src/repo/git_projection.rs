@@ -80,6 +80,13 @@ pub async fn project_to_git(
         }
     }
 
+    // bole-fv3
+    // Pass 6: set HEAD to the first projected timeline branch
+    if let Some((branch_name, _)) = timeline_heads.iter().find(|(_, h)| id_map.contains_key(h)) {
+        let head_content = format!("ref: refs/heads/{}\n", branch_name.as_str());
+        std::fs::write(target_path.join("HEAD"), head_content.as_bytes())?;
+    }
+
     Ok(())
 }
 
@@ -443,6 +450,22 @@ mod tests {
         let names = tree_top_entry_names(&tree_bytes);
         assert!(names.contains(&"safe.rs".to_owned()));
         assert!(!names.contains(&"secret.key".to_owned()), "secret entry must be excluded");
+    }
+
+    // bole-fv3
+    #[tokio::test]
+    async fn project_to_git_head_points_to_branch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (repo, _, _, _) = linear_repo().await;
+        let target = dir.path().join("out.git");
+        project_to_git(&repo, &target, &Accessor::privileged()).await.unwrap();
+        let head = std::fs::read_to_string(target.join("HEAD")).unwrap();
+        assert!(head.starts_with("ref: refs/heads/"), "HEAD must be a symbolic ref, got: {head}");
+        let branch = head.trim().strip_prefix("ref: refs/heads/").unwrap();
+        assert!(
+            target.join("refs/heads").join(branch).exists(),
+            "HEAD points to {branch} but refs/heads/{branch} does not exist"
+        );
     }
 
     // bole-68s
