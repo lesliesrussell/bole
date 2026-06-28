@@ -18,3 +18,8 @@ pub mod merge;
 // bole-1q9
 pub mod env;
 pub mod secret;
+// bole-0hg
+pub mod object;
+pub mod refs;
+pub mod repo;
+pub mod store;

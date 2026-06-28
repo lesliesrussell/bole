@@ -116,6 +116,27 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::env::Cmd,
     },
+    // bole-0hg
+    /// Repository-level information.
+    Repo {
+        #[command(subcommand)]
+        cmd: commands::repo::Cmd,
+    },
+    /// Plumbing: content-addressed object store.
+    Object {
+        #[command(subcommand)]
+        cmd: commands::object::Cmd,
+    },
+    /// Plumbing: reference store.
+    Ref {
+        #[command(subcommand)]
+        cmd: commands::refs::Cmd,
+    },
+    /// Plumbing: object-store administration.
+    Store {
+        #[command(subcommand)]
+        cmd: commands::store::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -184,6 +205,23 @@ async fn run() -> Result<()> {
         Command::Env { cmd } => {
             let ctx = open().await?;
             commands::env::run(&ctx, &out, cmd).await
+        }
+        // bole-0hg
+        Command::Repo { cmd } => {
+            let ctx = open().await?;
+            commands::repo::run(&ctx, &out, cmd).await
+        }
+        Command::Object { cmd } => {
+            let ctx = open().await?;
+            commands::object::run(&ctx, &out, cmd).await
+        }
+        Command::Ref { cmd } => {
+            let ctx = open().await?;
+            commands::refs::run(&ctx, &out, cmd).await
+        }
+        Command::Store { cmd } => {
+            let ctx = open().await?;
+            commands::store::run(&ctx, &out, cmd).await
         }
     }
 }
