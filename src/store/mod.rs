@@ -240,4 +240,14 @@ mod tests {
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
     }
+
+    // bole-7vf
+    #[tokio::test]
+    async fn put_secret_identical_plaintext_produces_distinct_ids() {
+        let s = store();
+        let key = [1u8; 32];
+        let id1 = s.put_secret(b"same plaintext", &key).await.unwrap();
+        let id2 = s.put_secret(b"same plaintext", &key).await.unwrap();
+        assert_ne!(id1, id2, "identical plaintext must produce distinct ObjectIds (nonce prevents equality leakage)");
+    }
 }
