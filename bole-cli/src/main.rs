@@ -13,6 +13,8 @@ mod output;
 mod resolve;
 // bole-gvy
 mod worktree;
+// bole-ef8
+mod actor;
 
 use std::path::PathBuf;
 
@@ -78,6 +80,17 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::workspace::Cmd,
     },
+    // bole-ef8
+    /// Manage named actors (reusable access credentials).
+    Actor {
+        #[command(subcommand)]
+        cmd: commands::actor::Cmd,
+    },
+    /// Manage path/timeline protection and test access.
+    Acl {
+        #[command(subcommand)]
+        cmd: commands::acl::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -119,6 +132,15 @@ async fn run() -> Result<()> {
         Command::Workspace { cmd } => {
             let ctx = open().await?;
             commands::workspace::run(&ctx, &out, cmd).await
+        }
+        // bole-ef8
+        Command::Actor { cmd } => {
+            let ctx = open().await?;
+            commands::actor::run(&ctx, &out, cmd).await
+        }
+        Command::Acl { cmd } => {
+            let ctx = open().await?;
+            commands::acl::run(&ctx, &out, cmd).await
         }
     }
 }

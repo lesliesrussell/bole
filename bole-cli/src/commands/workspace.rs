@@ -23,6 +23,9 @@ pub enum Cmd {
         /// Snapshot to create the timeline at (required with --create).
         #[arg(long)]
         from: Option<String>,
+        /// Bind the CLI to act as this actor.
+        #[arg(long = "as")]
+        actor: Option<String>,
     },
     /// Show the current binding and pending changes.
     Show,
@@ -48,7 +51,7 @@ fn short(id: &bole::ObjectId) -> String {
 /// Dispatches a workspace subcommand.
 pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Open { timeline, create, from } => open(ctx, out, timeline, create, from).await,
+        Cmd::Open { timeline, create, from, actor } => open(ctx, out, timeline, create, from, actor).await,
         Cmd::Show => show(ctx, out).await,
         Cmd::Materialize { snapshot, to } => materialize(ctx, out, snapshot, to).await,
         Cmd::Diff => diff(ctx, out).await,
@@ -62,8 +65,15 @@ async fn open(
     timeline: String,
     create: bool,
     from: Option<String>,
+    actor: Option<String>,
 ) -> Result<()> {
     let mut state = ctx.load_state()?;
+
+    // bole-ef8: bind the requested actor before any access-controlled work.
+    if let Some(name) = &actor {
+        crate::actor::bind(ctx, name)?;
+        state.current_actor = Some(name.clone());
+    }
 
     if create {
         let from = from

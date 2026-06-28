@@ -190,10 +190,10 @@ async fn advance(ctx: &RepoContext, out: &Output, name: String, to: String) -> R
     let state = ctx.load_state()?;
     let target = resolve::snapshot(ctx, &state, &to).await?;
     let rn = resolve::ref_name(&name)?;
-    // Actor-aware access lands with the actor command group; until then the CLI
-    // advances with full privilege.
+    // bole-ef8: advance as the bound actor (full access when none is bound).
+    let accessor = crate::actor::effective_accessor(ctx)?;
     ctx.repo
-        .advance_timeline(&rn, target, &resolve::full_access())
+        .advance_timeline(&rn, target, &accessor)
         .await
         .with_context(|| format!("advancing timeline '{name}'"))?;
     out.emit(

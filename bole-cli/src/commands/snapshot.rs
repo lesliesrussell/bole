@@ -114,8 +114,10 @@ async fn create(
     let advanced = match &state.current_timeline {
         Some(name) if !no_advance => {
             let rn = resolve::ref_name(name)?;
+            // bole-ef8: advance as the bound actor (full access when none is bound).
+            let accessor = crate::actor::effective_accessor(ctx)?;
             ctx.repo
-                .advance_timeline(&rn, snap_id, &resolve::full_access())
+                .advance_timeline(&rn, snap_id, &accessor)
                 .await
                 .with_context(|| format!("advancing timeline '{name}'"))?;
             Some(name.clone())
