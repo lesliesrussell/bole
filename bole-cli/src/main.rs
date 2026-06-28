@@ -15,6 +15,9 @@ mod resolve;
 mod worktree;
 // bole-ef8
 mod actor;
+// bole-1q9
+mod key;
+mod registry;
 
 use std::path::PathBuf;
 
@@ -102,6 +105,17 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::git::Cmd,
     },
+    // bole-1q9
+    /// Store and reveal encrypted secrets by name.
+    Secret {
+        #[command(subcommand)]
+        cmd: commands::secret::Cmd,
+    },
+    /// Manage environment overlays.
+    Env {
+        #[command(subcommand)]
+        cmd: commands::env::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -161,6 +175,15 @@ async fn run() -> Result<()> {
         Command::Git { cmd } => {
             let ctx = open().await?;
             commands::git::run(&ctx, &out, cmd).await
+        }
+        // bole-1q9
+        Command::Secret { cmd } => {
+            let ctx = open().await?;
+            commands::secret::run(&ctx, &out, cmd).await
+        }
+        Command::Env { cmd } => {
+            let ctx = open().await?;
+            commands::env::run(&ctx, &out, cmd).await
         }
     }
 }
