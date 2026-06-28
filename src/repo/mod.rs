@@ -7,6 +7,7 @@ pub mod merge;
 // bole-6bd
 pub mod git_projection;
 
+// bole-1vi
 use std::collections::BTreeMap;
 use std::path::Path;
 use crate::acl::disk::DiskAclBackend;
@@ -367,6 +368,7 @@ pub fn copy_refs(from: &RefStore, to: &RefStore) -> Result<()> {
     Ok(())
 }
 
+// bole-1vi
 #[cfg(test)]
 mod tests {
     use super::{copy_objects, copy_refs, Repository};
