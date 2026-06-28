@@ -137,14 +137,14 @@ impl Repository {
         // bole-hc1
         // bole-g21
         walk_tree_filtered(&self.objects, &self.acls, source_tree, "", &Accessor::privileged(), &mut visible).await?;
+        // bole-l55
         // Find all paths in source that are protected but dest doesn't enforce them
+        let dest_is_protected = self.acls.timeline_is_protected(dest.as_str())?;
         let mut leaking: Vec<PathAcl> = Vec::new();
         let path_acls = self.acls.list_path_acls()?;
         for acl in &path_acls {
             let any_match = visible.keys().any(|p| crate::acl::glob::glob_matches(&acl.glob, p));
-            if any_match && !self.acls.timeline_is_protected(dest.as_str())?
-                && !leaking.iter().any(|l| l.glob == acl.glob)
-            {
+            if any_match && !dest_is_protected && !leaking.iter().any(|l| l.glob == acl.glob) {
                 leaking.push(acl.clone());
             }
         }
