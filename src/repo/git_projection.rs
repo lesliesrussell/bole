@@ -16,9 +16,15 @@ pub async fn project_to_git(
     target_path: &Path,
     accessor: &Accessor,
 ) -> Result<()> {
-    // Pass 1: init bare git repo
-    let git_repo = gix::init_bare(target_path)
-        .map_err(|e| Error::GitProjection(e.to_string()))?;
+    // bole-68s
+    // Pass 1: open existing bare repo or create a new one (idempotent)
+    let git_repo = if target_path.exists() {
+        gix::open(target_path)
+            .map_err(|e| Error::GitProjection(format!("path exists but is not a git repo: {e}")))?
+    } else {
+        gix::init_bare(target_path)
+            .map_err(|e| Error::GitProjection(e.to_string()))?
+    };
 
     // Pass 2: collect timeline heads, then topo-sort reachable snapshots
     let all_refs = repo.refs.list("")?;
@@ -437,5 +443,33 @@ mod tests {
         let names = tree_top_entry_names(&tree_bytes);
         assert!(names.contains(&"safe.rs".to_owned()));
         assert!(!names.contains(&"secret.key".to_owned()), "secret entry must be excluded");
+    }
+
+    // bole-68s
+    #[tokio::test]
+    async fn project_to_git_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let accessor = Accessor::privileged();
+        let target = dir.path().join("out.git");
+        // First projection creates the repo
+        project_to_git(&repo, &target, &accessor).await.unwrap();
+        // Second projection on same path must succeed (idempotent open)
+        project_to_git(&repo, &target, &accessor).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_to_git_non_repo_path_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let accessor = Accessor::privileged();
+        // target_path exists but is a plain directory, not a git repo
+        let plain = dir.path().join("not-a-repo");
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(plain.join("garbage.txt"), b"not git").unwrap();
+        let result = project_to_git(&repo, &plain, &accessor).await;
+        assert!(result.is_err(), "non-repo path must return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not a git repo"), "error should describe the problem, got: {msg}");
     }
 }
