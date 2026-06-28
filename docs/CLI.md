@@ -47,6 +47,16 @@ Commands that take a snapshot accept any of:
 | 64 hex chars | that object id verbatim |
 | `<name>` | head of timeline `<name>` (or target if a tag) |
 
+## Glob syntax
+
+Path globs (`acl path`, `actor grant-path`) and timeline patterns (`acl
+timeline`, `actor grant-timeline`) use the same matcher:
+
+- `*` matches within a single path segment (does not cross `/`); it may match zero characters.
+- `**` matches zero or more whole segments, including mid-pattern: `secrets/**`, `**/key`, `a/**/z` all work.
+- A trailing `**` matches descendants only: `src/**` covers `src/main.rs` but not bare `src`.
+- Matching is case-sensitive.
+
 ## CLI-local state
 
 Beyond the library stores, the CLI keeps small JSON files under `.bole/`:
@@ -83,6 +93,11 @@ bole timeline delete <name>
 bole branch ...             # = timeline ...
 bole branches              # = timeline list
 ```
+
+The policy is enforced on `advance` (and on the auto-advance done by
+`snapshot create`): under `ff` or `append` the new head must be a descendant of
+the current head, otherwise the advance is rejected. `unrestricted` allows any
+snapshot.
 
 ### Tags
 

@@ -117,19 +117,17 @@ pub struct Tree {
 }
 
 pub struct TreeEntry {
-    pub id: ObjectId,    // points to a Blob, another Tree, a Secret, or an EnvOverlay
+    pub id: ObjectId,    // points to a Blob or a nested Tree
     pub kind: EntryKind,
 }
 
 pub enum EntryKind {
     Blob,
     Tree,
-    Secret,
-    Env,
 }
 ```
 
-A Tree maps logical path components to child objects. Path components are strings — they do not have to be filesystem names. Trees are typically nested: a root Tree may contain sub-Trees (directories) and Blobs (files).
+A Tree maps logical path components to child objects. Path components are strings — they do not have to be filesystem names. Trees are typically nested: a root Tree may contain sub-Trees (directories) and Blobs (files). A snapshot's tree is a pure file hierarchy: it contains only blobs and subtrees. Secrets and env overlays are **not** tree entries — they are standalone objects referenced out of band (see [Secret](#secret) and [EnvOverlay](#envoverlay)).
 
 When building a tree for a multi-level path like `src/main.rs`, you create the leaf Tree (`src/`) with one entry `"main.rs" → blob_id`, then create a root Tree with one entry `"src" → src_tree_id`.
 
@@ -172,14 +170,14 @@ pub struct EnvOverlay {
 }
 
 pub enum EnvValue {
-    Literal(String),
-    SecretRef(ObjectId),  // points to a Secret in the same store
+    Plain(String),
+    Secret(ObjectId),  // points to a Secret object in the same store
 }
 ```
 
-A named set of environment variables. `Literal` values are stored in plaintext in the overlay. `SecretRef` values are pointers to separately-encrypted `Secret` objects — the overlay itself does not contain the plaintext.
+A named set of environment variables. `Plain` values are stored in plaintext in the overlay. `Secret` values are pointers to separately-encrypted `Secret` objects — the overlay itself does not contain the plaintext.
 
-You never construct `EnvOverlay` directly. Use `ObjectStore::put_env` / `get_env`.
+You never construct `EnvOverlay` directly. Use `ObjectStore::put_overlay` / `get_overlay`.
 
 ---
 
@@ -221,7 +219,7 @@ store.put_snapshot(snap: Snapshot) -> Result<ObjectId>
 store.put_secret(plaintext: &[u8], key: &[u8; 32]) -> Result<ObjectId>
 
 // Stores an EnvOverlay.
-store.put_env(overlay: EnvOverlay) -> Result<ObjectId>
+store.put_overlay(overlay: EnvOverlay) -> Result<ObjectId>
 ```
 
 ### Retrieving objects
@@ -236,7 +234,7 @@ store.get(id: &ObjectId) -> Result<Option<Object>>
 store.get_secret(id: &ObjectId, key: &[u8; 32]) -> Result<Option<Vec<u8>>>
 
 // Returns the EnvOverlay for the given id.
-store.get_env(id: &ObjectId) -> Result<Option<EnvOverlay>>
+store.get_overlay(id: &ObjectId) -> Result<Option<EnvOverlay>>
 
 // Returns all ObjectIds currently in the store.
 // Order is not guaranteed.
@@ -251,7 +249,7 @@ pub enum Object {
     Tree(Tree),
     Snapshot(Snapshot),
     Secret(Secret),
-    Env(EnvOverlay),
+    EnvOverlay(EnvOverlay),
 }
 ```
 
@@ -349,9 +347,9 @@ pub enum Ref {
 pub struct Timeline {
     pub head: ObjectId,           // current head Snapshot
     pub policy: TimelinePolicy,
-    pub updated_at: u64,          // Unix timestamp of last advance
-    pub retention: String,        // "persistent" | "ephemeral" | custom
-    pub ttl: Option<u64>,         // optional Unix timestamp after which pruning is allowed
+    pub created_at: u64,          // Unix timestamp (seconds) when created
+    pub kind: String,             // lifecycle category: "persistent" | "ephemeral" | custom
+    pub expires_at: Option<u64>,  // optional Unix timestamp after which pruning is allowed
 }
 
 pub struct Tag {
@@ -364,23 +362,36 @@ pub struct Tag {
 Access refs via `repo.refs`:
 
 ```rust
-repo.refs.create_timeline(name, head, policy, updated_at, retention, ttl) -> Result<()>
+repo.refs.create_timeline(name, head, policy, now, kind, expires_at) -> Result<()>
 repo.refs.get_timeline(name: &RefName) -> Result<Option<Timeline>>
 repo.refs.get(name: &RefName) -> Result<Option<Ref>>
 repo.refs.list(prefix: &str) -> Result<Vec<RefName>>   // "" = all refs
-repo.refs.delete(name: &RefName) -> Result<()>
-repo.refs.create_tag(name, target, created_at, message) -> Result<()>
+repo.refs.delete_ref(name: &RefName) -> Result<()>
+repo.refs.create_tag(name, target, message: Option<String>, now: u64) -> Result<()>
+repo.refs.get_tag(name: &RefName) -> Result<Option<Tag>>
+repo.refs.move_tag(name: &RefName, target: ObjectId) -> Result<()>
+repo.refs.advance_head(name: &RefName, new_head: ObjectId) -> Result<()>  // raw, policy-free
 ```
 
 ### TimelinePolicy
 
 ```rust
 pub enum TimelinePolicy {
-    Unrestricted,              // any caller can advance
-    RequireApproval,           // advance requires ACL approval
-    Locked,                    // no further advances
+    FastForwardOnly,  // new head must be a descendant of the current head
+    Append,           // new head must be a descendant of the current head
+    Unrestricted,     // head may be set to any snapshot
 }
 ```
+
+The policy is **enforced** by `Repository::advance_timeline`: for `FastForwardOnly`
+and `Append`, an advance is rejected with `Error::PolicyViolation` unless the
+current head is an ancestor of the new head (i.e. a true fast-forward; a no-op
+re-set and any descendant qualify). `Unrestricted` accepts any snapshot. The
+low-level `repo.refs.advance_head` primitive does **not** enforce policy — it is
+the unchecked setter; enforcement lives only in the `Repository` layer.
+
+> Note: `Append` currently applies the same descendant rule as
+> `FastForwardOnly`.
 
 ---
 
@@ -411,7 +422,14 @@ pub struct TimelineRole {
 }
 ```
 
-A `PathRole` grants read or write access to paths matching `glob`. A `TimelineRole` grants read or write access to timelines matching `pattern`. Glob syntax: `*` matches within a path segment, `**` matches across segments.
+A `PathRole` grants read or write access to paths matching `glob`. A `TimelineRole` grants read or write access to timelines matching `pattern`.
+
+**Glob syntax** (used for both roles and ACLs):
+
+- `*` matches any run of characters within a single path segment (does not cross `/`). E.g. `src/*.rs` matches `src/a.rs` but not `src/a/b.rs`; `*` may match zero characters.
+- `**` matches zero or more whole path segments, including in the middle of a pattern: `secrets/**` matches `secrets/a/b`, `**/key` matches `key` and `a/b/key`, `a/**/z` matches `a/z` and `a/x/y/z`.
+- A trailing `**` matches descendants only: `src/**` matches `src/main.rs` but **not** the bare `src`.
+- Matching is **case-sensitive** and literal otherwise (`secret` does not match `secrets`).
 
 ### PathAcl and TimelineAcl
 
@@ -428,14 +446,14 @@ pub struct TimelineAcl {
 ACLs record which globs are protected. They are stored in `repo.acls`:
 
 ```rust
-repo.acls.set_path_acl(&PathAcl { glob: "secrets/**".into() })       // mark glob as protected
-repo.acls.get_path_acl(glob: &str) -> Result<Option<PathAcl>>
-repo.acls.delete_path_acl(glob: &str) -> Result<()>
+repo.acls.set_path_acl(PathAcl { glob: "secrets/**".into() })        // mark glob as protected
+repo.acls.path_is_protected(path: &str) -> Result<bool>
+repo.acls.remove_path_acl(glob: &str) -> Result<()>
 repo.acls.list_path_acls() -> Result<Vec<PathAcl>>
 
-repo.acls.set_timeline_acl(&TimelineAcl { pattern: "leslie/**".into() })
-repo.acls.get_timeline_acl(pattern: &str) -> Result<Option<TimelineAcl>>
-repo.acls.delete_timeline_acl(pattern: &str) -> Result<()>
+repo.acls.set_timeline_acl(TimelineAcl { pattern: "leslie/**".into() })
+repo.acls.timeline_is_protected(name: &str) -> Result<bool>
+repo.acls.remove_timeline_acl(pattern: &str) -> Result<()>
 repo.acls.list_timeline_acls() -> Result<Vec<TimelineAcl>>
 ```
 
@@ -448,7 +466,9 @@ pub struct Accessor { /* ... */ }
 A capability token. Build one per actor using the builder methods.
 
 ```rust
-// Full read + write on everything — for trusted code and tests.
+// READ-ONLY on everything — for internal operations that must bypass per-user
+// ACL checks (e.g. walking a full tree). It does NOT grant write; use explicit
+// Write roles to advance timelines or merge.
 Accessor::privileged() -> Accessor
 
 // Empty — no permissions. Start here and add roles.
@@ -496,17 +516,26 @@ repo.advance_timeline(
 ) -> Result<()>
 ```
 
-Moves a timeline's head to `new_head`. The `new_head` must be a `Snapshot` object. The accessor must have write permission on the timeline and read permission on every path in the snapshot's tree.
+Moves a timeline's head to `new_head`. The `new_head` must be a `Snapshot` object. The accessor must have **write** permission on the timeline and **write** permission on every path in the snapshot's tree.
 
-Returns `Err(Error::AccessDenied)` if the accessor lacks the required permissions.
+It enforces the timeline's [`TimelinePolicy`](#timelinepolicy): under `FastForwardOnly` or `Append`, the new head must be a descendant of the current head.
+
+Returns `Err(Error::AccessDenied)` if the accessor lacks the required permissions, or `Err(Error::PolicyViolation)` if the move violates the policy.
+
+> `Accessor::privileged()` grants read-only access, so it cannot advance a
+> timeline. Build a write-capable accessor (see [Accessor](#accessor)).
 
 ```rust
-// Move "main" to a new snapshot
+// A write-capable accessor (privileged() is read-only and would be denied).
+let writer = Accessor::new()
+    .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write })
+    .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write });
+
 let new_snap = repo.objects.put_snapshot(Snapshot {
     root: new_tree, parents: vec![old_snap], author: "alice".into(),
     created_at: 1_700_000_001, message: "update".into(),
 }).await?;
-repo.advance_timeline(&RefName::new("main")?, new_snap, &Accessor::privileged()).await?;
+repo.advance_timeline(&RefName::new("main")?, new_snap, &writer).await?;
 ```
 
 ### get\_snapshot\_filtered
@@ -720,6 +749,7 @@ pub enum Error {
     DecryptionFailed,        // wrong key or corrupted ciphertext in get_secret
     SecretNotUtf8,           // decrypted secret bytes are not valid UTF-8
     GitProjection(String),   // project_to_git failure
+    PolicyViolation(String), // advance rejected by the timeline's TimelinePolicy
 }
 ```
 
@@ -738,12 +768,12 @@ match repo.objects.get_secret(&id, &wrong_key).await {
 
 ## Complete example
 
-This example creates an in-memory repo with two files and a secret, applies ACLs, snapshots the state, merges an agent branch, and exports to Git.
+This example creates an in-memory repo with two files (one under a protected path), applies ACLs, snapshots the state, merges an agent branch, and exports to Git.
 
 ```rust
 use bole::{
-    Accessor, DiskBackend, EntryKind, Error, MergeCheck, ObjectStore, PathAcl, PathRole,
-    Permission, Repository, Snapshot, TreeEntry,
+    Accessor, Error, MergeCheck, PathAcl, PathRole, Permission, Repository,
+    Snapshot, TimelineRole, TreeEntry, EntryKind,
 };
 use bole::refs::{RefName, TimelinePolicy};
 use bytes::Bytes;
@@ -754,14 +784,24 @@ use std::path::Path;
 async fn main() -> bole::Result<()> {
     let repo = Repository::memory();
 
+    // A write-capable "owner" identity. (Accessor::privileged() is read-only.)
+    let owner = Accessor::new()
+        .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write })
+        .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read })
+        .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write })
+        .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Read });
+
     // ── Build initial snapshot ─────────────────────────────────────────────
+    // Both entries are blobs; "secrets/db.key" is just a file under a path we
+    // will protect with an ACL. (Encrypted Secret objects are separate — see
+    // put_secret / EnvOverlay — and are not stored inside the snapshot tree.)
 
     let src_blob = repo.objects.put_blob(Bytes::from("fn main() {}")).await?;
-    let secret_id = repo.objects.put_secret(b"postgres://prod:s3cr3t@db/app", &[0u8; 32]).await?;
+    let key_blob = repo.objects.put_blob(Bytes::from("postgres://prod:s3cr3t@db/app")).await?;
 
     let mut entries = BTreeMap::new();
     entries.insert("src/main.rs".into(), TreeEntry { id: src_blob, kind: EntryKind::Blob });
-    entries.insert("secrets/db.key".into(), TreeEntry { id: secret_id, kind: EntryKind::Secret });
+    entries.insert("secrets/db.key".into(), TreeEntry { id: key_blob, kind: EntryKind::Blob });
 
     let root_tree = repo.objects.put_tree(entries).await?;
     let snap1 = repo.objects.put_snapshot(Snapshot {
@@ -779,13 +819,13 @@ async fn main() -> bole::Result<()> {
     // ── Apply ACLs ─────────────────────────────────────────────────────────
 
     // Mark secrets/** as protected (merging it into an unprotected timeline requires approval)
-    repo.acls.set_path_acl(&PathAcl { glob: "secrets/**".into() })?;
+    repo.acls.set_path_acl(PathAcl { glob: "secrets/**".into() })?;
 
     // ── Agent with limited access ──────────────────────────────────────────
 
     let agent = Accessor::new()
         .with_path_role(PathRole { glob: "src/**".into(), permission: Permission::Write })
-        .with_timeline_role(bole::TimelineRole {
+        .with_timeline_role(TimelineRole {
             pattern: "agent/**".into(), permission: Permission::Write,
         });
 
@@ -810,16 +850,17 @@ async fn main() -> bole::Result<()> {
 
     // ── Check merge safety before merging ─────────────────────────────────
 
-    let approver = Accessor::privileged();
-    match repo.check_merge(&agent_ref, &main_ref, &approver).await? {
+    // `owner` can write `main`, so a protected-path leak yields RequiresApproval
+    // (an accessor without write on `main` would get Rejected instead).
+    match repo.check_merge(&agent_ref, &main_ref, &owner).await? {
         MergeCheck::Allowed => println!("safe to merge"),
         MergeCheck::RequiresApproval(paths) => println!("needs approval for {:?}", paths),
-        MergeCheck::Rejected(_) => panic!("should not happen for privileged accessor"),
+        MergeCheck::Rejected(paths) => println!("rejected, cannot expose {:?}", paths),
     }
 
     // ── Merge and advance main ─────────────────────────────────────────────
 
-    let merge = repo.merge_timelines(&agent_ref, &main_ref, &approver).await?;
+    let merge = repo.merge_timelines(&agent_ref, &main_ref, &owner).await?;
     if merge.conflicts.is_empty() {
         let merged_tree = repo.objects.put_tree(merge.merged).await?;
         let merged_snap = repo.objects.put_snapshot(Snapshot {
@@ -827,7 +868,7 @@ async fn main() -> bole::Result<()> {
             author: "alice".into(), created_at: 1_700_000_002,
             message: "merge agent/formatter".into(),
         }).await?;
-        repo.advance_timeline(&main_ref, merged_snap, &approver).await?;
+        repo.advance_timeline(&main_ref, merged_snap, &owner).await?;
     }
 
     // ── Filtered view (agent cannot see secrets/**) ────────────────────────
@@ -842,7 +883,7 @@ async fn main() -> bole::Result<()> {
     // ── Export to Git ──────────────────────────────────────────────────────
 
     bole::repo::git_projection::project_to_git(
-        &repo, Path::new("/tmp/bole-export.git"), &approver,
+        &repo, Path::new("/tmp/bole-export.git"), &owner,
     ).await?;
 
     Ok(())

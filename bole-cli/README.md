@@ -59,6 +59,16 @@ Anywhere a snapshot is expected (`--from`, `--to`, `--target`, `snapshot show`,
 | 64 hex chars | that object id, verbatim |
 | `<name>` | head of timeline `<name>` (or target if `<name>` is a tag) |
 
+## Glob syntax
+
+Path globs (`acl path`, `actor grant-path`) and timeline patterns (`acl
+timeline`, `actor grant-timeline`) share one matcher:
+
+- `*` matches within a single segment (does not cross `/`); may match zero characters.
+- `**` matches zero or more whole segments, including mid-pattern (`secrets/**`, `**/key`, `a/**/z`).
+- A trailing `**` matches descendants only (`src/**` matches `src/main.rs`, not bare `src`).
+- Matching is case-sensitive.
+
 ## CLI-local state
 
 In addition to the library's stores, the CLI keeps small JSON files under
@@ -114,7 +124,9 @@ Show a timeline's head, policy, kind, created-at, and expiry.
 
 ### `bole timeline advance <name> --to <snap>`
 Move a timeline's head to another snapshot. Enforced against the bound actor's
-write permissions.
+write permissions **and** the timeline's policy: under `ff`/`append` the new
+head must be a descendant of the current head (otherwise the advance is
+rejected); `unrestricted` allows any snapshot.
 
 ### `bole timeline delete <name>`
 Delete a timeline.
