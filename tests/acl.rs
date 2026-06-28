@@ -161,3 +161,14 @@ async fn t3_merge_check() {
     let result3 = repo.check_merge(&clean_source, &dest, &reader).await.unwrap();
     assert_eq!(result3, MergeCheck::Allowed);
 }
+
+// bole-938
+#[tokio::test]
+async fn check_merge_missing_source_returns_error() {
+    let repo = Repository::memory();
+    let missing = RefName::new("feature/does-not-exist").unwrap();
+    let dest = RefName::new("main").unwrap();
+    let accessor = Accessor::new();
+    let result = repo.check_merge(&missing, &dest, &accessor).await;
+    assert!(result.is_err(), "missing source ref should return an error, not Allowed");
+}

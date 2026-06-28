@@ -123,14 +123,15 @@ impl Repository {
         dest: &RefName,
         accessor: &Accessor,
     ) -> Result<MergeCheck> {
+        // bole-938
         let source_head = match self.refs.get_timeline(source)? {
             Some(tl) => tl.head,
-            None => return Ok(MergeCheck::Allowed),
+            None => return Err(Error::Storage(format!("source ref '{}' not found", source.as_str()))),
         };
         // bole-4j3
         let source_tree = match self.objects.get(&source_head).await? {
             Some(Object::Snapshot(s)) => s.root,
-            _ => return Ok(MergeCheck::Allowed),
+            _ => return Err(Error::WrongRefKind(format!("source ref '{}' head is not a snapshot", source.as_str()))),
         };
         let mut visible = BTreeMap::new();
         // bole-hc1
