@@ -41,51 +41,53 @@ fn bench_put_snapshot_10files(c: &mut Criterion) {
 
 fn bench_advance_timeline(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let repo = Repository::memory();
     let accessor = full_write_accessor();
-    let name = RefName::new("bench/main").unwrap();
 
-    let snap0 = rt.block_on(async {
-        let blob = repo.objects.put_blob(Bytes::from("v0")).await.unwrap();
-        let mut entries = BTreeMap::new();
-        entries.insert("file.txt".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
-        let tree = repo.objects.put_tree(entries).await.unwrap();
-        repo.objects.put_snapshot(Snapshot {
-            root: tree,
-            parents: vec![],
-            author: "bench".into(),
-            created_at: 0,
-            message: "init".into(),
-        }).await.unwrap()
-    });
-    repo.refs
-        .create_timeline(name.clone(), snap0, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
-        .unwrap();
-
-    let mut version = 1u64;
     c.bench_function("advance_timeline", |b| {
-        b.iter(|| {
-            let v = version;
-            version += 1;
-            rt.block_on(async {
-                let blob = repo.objects
-                    .put_blob(Bytes::copy_from_slice(&v.to_le_bytes()))
-                    .await
-                    .unwrap();
-                let mut entries = BTreeMap::new();
-                entries.insert("file.txt".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
-                let tree = repo.objects.put_tree(entries).await.unwrap();
-                let head = repo.refs.get_timeline(&name).unwrap().unwrap().head;
-                let snap = repo.objects.put_snapshot(Snapshot {
-                    root: tree,
-                    parents: vec![head],
-                    author: "bench".into(),
-                    created_at: v,
-                    message: "bench".into(),
-                }).await.unwrap();
-                repo.advance_timeline(&name, snap, &accessor).await.unwrap();
-            })
-        })
+        // Build a fresh repo with one timeline per sample, then time only the advance call.
+        b.iter_batched(
+            || {
+                // Setup: build repo, timeline, and a ready-to-advance snapshot.
+                // This runs outside the timed region.
+                rt.block_on(async {
+                    let repo = Repository::memory();
+                    let blob = repo.objects.put_blob(Bytes::from("v0")).await.unwrap();
+                    let mut entries = BTreeMap::new();
+                    entries.insert("file.txt".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
+                    let tree = repo.objects.put_tree(entries.clone()).await.unwrap();
+                    let snap0 = repo.objects.put_snapshot(Snapshot {
+                        root: tree,
+                        parents: vec![],
+                        author: "bench".into(),
+                        created_at: 0,
+                        message: "init".into(),
+                    }).await.unwrap();
+                    let name = RefName::new("bench/main").unwrap();
+                    repo.refs
+                        .create_timeline(name.clone(), snap0, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+                        .unwrap();
+                    // Build the next snapshot (ready to be advanced to) but don't advance yet
+                    let blob2 = repo.objects.put_blob(Bytes::from("v1")).await.unwrap();
+                    entries.insert("file.txt".to_string(), TreeEntry { id: blob2, kind: EntryKind::Blob });
+                    let tree2 = repo.objects.put_tree(entries).await.unwrap();
+                    let snap1 = repo.objects.put_snapshot(Snapshot {
+                        root: tree2,
+                        parents: vec![snap0],
+                        author: "bench".into(),
+                        created_at: 1,
+                        message: "next".into(),
+                    }).await.unwrap();
+                    (repo, name, snap1)
+                })
+            },
+            |(repo, name, snap1)| {
+                // Timed region: only the advance call
+                rt.block_on(async {
+                    repo.advance_timeline(&name, snap1, &accessor).await.unwrap();
+                })
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 

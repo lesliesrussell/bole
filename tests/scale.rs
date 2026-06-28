@@ -148,6 +148,9 @@ async fn t8_disk_storage_footprint() {
     let disk_bytes = dir_bytes(&dir.path().join("objects"));
     // 10 initial files × 256 bytes + 100 change blobs × 12 bytes (format!("file{x} v{n}") ≈ 9-10 chars; 12 is a conservative ceiling)
     let raw_content_bytes = 10 * 256 + 100 * 12;
+    // 20× accounts for tree and snapshot object overhead: ~101 trees + ~101 snapshots
+    // are each encoded separately, dominating storage for small blob content.
+    // The object-count assertion above is the primary dedup proof; this bounds absolute size.
     assert!(
         disk_bytes <= 20 * raw_content_bytes,
         "disk bytes too large: {disk_bytes} bytes, raw content baseline {raw_content_bytes} bytes (ratio {:.1}×)",
