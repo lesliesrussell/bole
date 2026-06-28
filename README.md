@@ -188,4 +188,4 @@ Benchmarks cover object store put/get, snapshot operations, and git projection a
 
 ## License
 
-TBD
+Licensed under the [MIT License](LICENSE).
