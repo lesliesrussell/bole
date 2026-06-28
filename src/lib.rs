@@ -16,7 +16,8 @@ pub use acl::{
 pub(crate) mod codec;
 
 pub use error::{Error, Result};
-pub use object::{Blob, EntryKind, Object, ObjectId, Snapshot, Tree, TreeEntry};
+// bole-qj8
+pub use object::{Blob, EntryKind, Object, ObjectId, ParseObjectIdError, Snapshot, Tree, TreeEntry};
 // bole-hto
 pub use object::{EnvOverlay, EnvValue, Secret};
 // bole-wmu

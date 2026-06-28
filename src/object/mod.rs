@@ -8,7 +8,7 @@ pub mod env;
 pub mod secret;
 
 pub use blob::Blob;
-pub use id::ObjectId;
+pub use id::{ObjectId, ParseObjectIdError};
 pub use snapshot::Snapshot;
 pub use tree::{EntryKind, Tree, TreeEntry};
 // bole-hto
