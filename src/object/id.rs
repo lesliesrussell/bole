@@ -12,7 +12,8 @@ impl ObjectId {
         Self(bytes)
     }
 
-    pub fn from_bytes(data: &[u8]) -> Self {
+    // bole-92z
+    pub fn from_content(data: &[u8]) -> Self {
         let hash = blake3::hash(data);
         Self(*hash.as_bytes())
     }
@@ -73,27 +74,27 @@ mod tests {
 
     #[test]
     fn same_content_same_id() {
-        let a = ObjectId::from_bytes(b"hello");
-        let b = ObjectId::from_bytes(b"hello");
+        let a = ObjectId::from_content(b"hello");
+        let b = ObjectId::from_content(b"hello");
         assert_eq!(a, b);
     }
 
     #[test]
     fn different_content_different_id() {
-        let a = ObjectId::from_bytes(b"hello");
-        let b = ObjectId::from_bytes(b"world");
+        let a = ObjectId::from_content(b"hello");
+        let b = ObjectId::from_content(b"world");
         assert_ne!(a, b);
     }
 
     #[test]
     fn display_is_64_hex_chars() {
-        let id = ObjectId::from_bytes(b"test");
+        let id = ObjectId::from_content(b"test");
         assert_eq!(id.to_string().len(), 64);
     }
 
     #[test]
     fn roundtrip_via_bytes() {
-        let id = ObjectId::from_bytes(b"roundtrip");
+        let id = ObjectId::from_content(b"roundtrip");
         let id2 = ObjectId::new(*id.as_bytes());
         assert_eq!(id, id2);
     }
@@ -101,7 +102,7 @@ mod tests {
     // bole-qj8
     #[test]
     fn from_str_roundtrip() {
-        let id = ObjectId::from_bytes(b"hello");
+        let id = ObjectId::from_content(b"hello");
         let hex = id.to_string();
         let parsed: ObjectId = hex.parse().unwrap();
         assert_eq!(id, parsed);

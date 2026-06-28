@@ -137,7 +137,7 @@ mod tests {
     async fn put_then_get() {
         let dir = TempDir::new().unwrap();
         let backend = DiskBackend::open(dir.path()).await.unwrap();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         backend.put(&id, b"value").await.unwrap();
         let result = backend.get(&id).await.unwrap();
         assert_eq!(result.as_deref(), Some(b"value".as_slice()));
@@ -147,7 +147,7 @@ mod tests {
     async fn exists_after_put() {
         let dir = TempDir::new().unwrap();
         let backend = DiskBackend::open(dir.path()).await.unwrap();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         assert!(!backend.exists(&id).await.unwrap());
         backend.put(&id, b"data").await.unwrap();
         assert!(backend.exists(&id).await.unwrap());
@@ -165,7 +165,7 @@ mod tests {
     async fn delete_removes_entry() {
         let dir = TempDir::new().unwrap();
         let backend = DiskBackend::open(dir.path()).await.unwrap();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         backend.put(&id, b"data").await.unwrap();
         backend.delete(&id).await.unwrap();
         assert!(!backend.exists(&id).await.unwrap());
@@ -176,7 +176,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let id = {
             let backend = DiskBackend::open(dir.path()).await.unwrap();
-            let id = ObjectId::from_bytes(b"persistent");
+            let id = ObjectId::from_content(b"persistent");
             backend.put(&id, b"data").await.unwrap();
             id
         };
@@ -190,8 +190,8 @@ mod tests {
     async fn list_returns_all_ids() {
         let dir = TempDir::new().unwrap();
         let backend = DiskBackend::open(dir.path()).await.unwrap();
-        let id1 = ObjectId::from_bytes(b"a");
-        let id2 = ObjectId::from_bytes(b"b");
+        let id1 = ObjectId::from_content(b"a");
+        let id2 = ObjectId::from_content(b"b");
         backend.put(&id1, b"data1").await.unwrap();
         backend.put(&id2, b"data2").await.unwrap();
         let ids = backend.list().await.unwrap();

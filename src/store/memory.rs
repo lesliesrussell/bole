@@ -58,7 +58,7 @@ mod tests {
     #[tokio::test]
     async fn put_then_get() {
         let backend = MemoryBackend::new();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         backend.put(&id, b"value").await.unwrap();
         let result = backend.get(&id).await.unwrap();
         assert_eq!(result.as_deref(), Some(b"value".as_slice()));
@@ -67,7 +67,7 @@ mod tests {
     #[tokio::test]
     async fn exists_after_put() {
         let backend = MemoryBackend::new();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         assert!(!backend.exists(&id).await.unwrap());
         backend.put(&id, b"data").await.unwrap();
         assert!(backend.exists(&id).await.unwrap());
@@ -83,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_entry() {
         let backend = MemoryBackend::new();
-        let id = ObjectId::from_bytes(b"key");
+        let id = ObjectId::from_content(b"key");
         backend.put(&id, b"data").await.unwrap();
         backend.delete(&id).await.unwrap();
         assert!(!backend.exists(&id).await.unwrap());
@@ -93,9 +93,9 @@ mod tests {
     #[tokio::test]
     async fn list_returns_all_ids() {
         let backend = MemoryBackend::new();
-        let id1 = ObjectId::from_bytes(b"a");
-        let id2 = ObjectId::from_bytes(b"b");
-        let id3 = ObjectId::from_bytes(b"c");
+        let id1 = ObjectId::from_content(b"a");
+        let id2 = ObjectId::from_content(b"b");
+        let id3 = ObjectId::from_content(b"c");
         backend.put(&id1, b"data1").await.unwrap();
         backend.put(&id2, b"data2").await.unwrap();
         backend.put(&id3, b"data3").await.unwrap();

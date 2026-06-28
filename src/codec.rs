@@ -11,7 +11,7 @@ pub(crate) fn deserialize(data: &[u8]) -> Result<Object> {
 }
 
 pub(crate) fn object_id(data: &[u8]) -> ObjectId {
-    ObjectId::from_bytes(data)
+    ObjectId::from_content(data)
 }
 
 #[cfg(test)]
