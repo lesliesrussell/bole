@@ -9,12 +9,19 @@ use crate::error::Result;
 use crate::object::ObjectId;
 use super::backend::StorageBackend;
 
+// bole-p8u
+/// An in-memory [`StorageBackend`] backed by a `HashMap` behind an async `RwLock`.
+///
+/// Data is lost when the process exits.  Suitable for tests, short-lived
+/// operations, and as the backing store for `Repository::memory()`.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBackend {
     store: Arc<RwLock<HashMap<ObjectId, Bytes>>>,
 }
 
 impl MemoryBackend {
+    // bole-p8u
+    /// Creates a new, empty `MemoryBackend`.
     pub fn new() -> Self {
         Self::default()
     }

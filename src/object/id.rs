@@ -4,26 +4,48 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+// bole-p8u
+/// A 32-byte BLAKE3 content address that uniquely identifies any stored object.
+///
+/// `ObjectId` is the fundamental key in the object store: two objects with the
+/// same serialised bytes will always have the same `ObjectId`, while any
+/// difference in content produces a different id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ObjectId([u8; 32]);
 
 impl ObjectId {
+    // bole-p8u
+    /// Wraps a raw 32-byte array as an `ObjectId` without hashing.
+    ///
+    /// Prefer [`ObjectId::from_content`] when deriving an id from data.
+    /// Use this constructor when you already hold a known hash (e.g. when
+    /// deserialising a stored ref).
     pub fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
     // bole-92z
+    // bole-p8u
+    /// Hashes `data` with BLAKE3 and returns the resulting `ObjectId`.
+    ///
+    /// This is the canonical way to derive a stable id from arbitrary bytes.
     pub fn from_content(data: &[u8]) -> Self {
         let hash = blake3::hash(data);
         Self(*hash.as_bytes())
     }
 
+    // bole-p8u
+    /// Returns the underlying 32-byte hash.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
 // bole-qj8
+// bole-p8u
+/// Error returned when a hex string cannot be parsed as an [`ObjectId`].
+///
+/// Valid input must be exactly 64 lowercase hexadecimal characters.
 #[derive(Debug)]
 pub struct ParseObjectIdError;
 

@@ -1,3 +1,18 @@
+// bole-p8u
+//! Core object model for the bole content-addressed store.
+//!
+//! Every piece of data in bole is represented as one of the types exported
+//! from this module and stored by its [`ObjectId`] — a 32-byte BLAKE3 hash
+//! of its serialised form.  The top-level [`Object`] enum is the single type
+//! written to and read from a [`crate::store::ObjectStore`].
+//!
+//! The object taxonomy:
+//! - [`Blob`] — raw bytes (file contents, configuration values, etc.)
+//! - [`Tree`] — a sorted map of names to child objects, forming a directory
+//! - [`Snapshot`] — a point-in-time record linking a root tree to its parents
+//! - [`Secret`] — a ChaCha20-Poly1305-encrypted typed object
+//! - [`EnvOverlay`] — a typed bundle of environment variable values
+
 // bole-dq0
 pub mod blob;
 pub mod id;
@@ -17,12 +32,28 @@ pub use secret::Secret;
 
 use serde::{Deserialize, Serialize};
 
+// bole-p8u
+/// The tagged union of every object type that the store can persist.
+///
+/// Callers typically work with the concrete variants directly; `Object` exists
+/// so the store can serialise and deserialise any object through a single code
+/// path and verify content-addressing uniformly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Object {
+    // bole-p8u
+    /// A raw byte payload.
     Blob(Blob),
+    // bole-p8u
+    /// A sorted directory of named child objects.
     Tree(Tree),
+    // bole-p8u
+    /// An immutable snapshot node in the history DAG.
     Snapshot(Snapshot),
     // bole-hto
+    // bole-p8u
+    /// An encrypted opaque value.
     Secret(Secret),
+    // bole-p8u
+    /// A typed bundle of environment variable values.
     EnvOverlay(EnvOverlay),
 }

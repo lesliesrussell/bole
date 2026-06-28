@@ -7,13 +7,29 @@ use chacha20poly1305::{
 use rand::random;
 use serde::{Deserialize, Serialize};
 
+// bole-p8u
+/// A ChaCha20-Poly1305 encrypted object stored alongside its random nonce.
+///
+/// `Secret` is the at-rest representation of an encrypted value.  The
+/// encryption key is never stored — callers must supply the same 32-byte key
+/// that was used during [`Secret::encrypt`] to recover the plaintext.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Secret {
+    // bole-p8u
+    /// The 12-byte random nonce generated at encryption time; required for decryption.
     pub nonce: [u8; 12],
+    // bole-p8u
+    /// The AEAD ciphertext (plaintext length + 16-byte authentication tag).
     pub ciphertext: Vec<u8>,
 }
 
 impl Secret {
+    // bole-p8u
+    /// Encrypts `plaintext` with the given 32-byte `key` and returns a `Secret`.
+    ///
+    /// A fresh random nonce is generated for every call, so encrypting the same
+    /// plaintext twice produces two distinct `Secret` values with different
+    /// `ObjectId`s in the store.
     pub fn encrypt(plaintext: &[u8], key: &[u8; 32]) -> Result<Self> {
         let nonce_bytes: [u8; 12] = random();
         let cipher = ChaCha20Poly1305::new_from_slice(key)
@@ -25,6 +41,11 @@ impl Secret {
         Ok(Self { nonce: nonce_bytes, ciphertext })
     }
 
+    // bole-p8u
+    /// Decrypts this secret with the given 32-byte `key` and returns the plaintext.
+    ///
+    /// Returns [`crate::error::Error::DecryptionFailed`] if the key is wrong
+    /// or the ciphertext has been tampered with.
     pub fn decrypt(&self, key: &[u8; 32]) -> Result<Vec<u8>> {
         let cipher = ChaCha20Poly1305::new_from_slice(key)
             .map_err(|_| Error::Codec("invalid key length".into()))?;

@@ -28,11 +28,19 @@ fn hex_nibble(c: u8) -> Option<u8> {
     }
 }
 
+// bole-p8u
+/// A persistent [`StorageBackend`] that stores objects as zstd-compressed files
+/// on the local filesystem, sharded by the first two hex characters of each id.
+///
+/// Writes are atomic: data is written to a `.tmp` file and then renamed into
+/// place, so a crash mid-write leaves no partial objects.
 pub struct DiskBackend {
     root: PathBuf,
 }
 
 impl DiskBackend {
+    // bole-p8u
+    /// Opens (or creates) the object store directory tree rooted at `root`.
     pub async fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root).await?;

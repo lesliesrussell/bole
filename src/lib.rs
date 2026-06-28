@@ -1,3 +1,38 @@
+// bole-p8u
+//! # bole
+//!
+//! A next-generation version-control library built on content-addressed
+//! storage.  Every piece of data — files, directory trees, history nodes,
+//! secrets, and environment bundles — is stored as a BLAKE3-addressed object
+//! and retrieved by its [`ObjectId`].  This design makes deduplication,
+//! integrity checking, and structural sharing automatic.
+//!
+//! ## Core concepts
+//!
+//! | Type | Role |
+//! |------|------|
+//! | [`ObjectId`] | 32-byte BLAKE3 content address, the fundamental key |
+//! | [`ObjectStore`] | Façade over a [`StorageBackend`] for typed object I/O |
+//! | [`Snapshot`] | Immutable DAG node linking a root [`Tree`] to its parents |
+//! | [`Timeline`] | A named, mutable pointer that advances through the snapshot DAG |
+//! | [`Tag`] | A named, fixed pointer to a specific snapshot |
+//! | [`Repository`] | Unified handle bundling object store, ref store, and ACL store |
+//!
+//! ## Storage backends
+//!
+//! `bole` ships two backends: [`MemoryBackend`] for ephemeral use (tests,
+//! short-lived operations) and [`DiskBackend`] for persistent storage on the
+//! local filesystem.  Both implement [`StorageBackend`] so application code
+//! can be backend-agnostic.
+//!
+//! ## Access control
+//!
+//! Path and timeline access is governed by [`Accessor`] credentials checked
+//! against [`PathAcl`] and [`TimelineAcl`] rules stored in the repository's
+//! [`AclStore`].  Operations that require ACL checks accept an `&Accessor`
+//! parameter; internal operations that must bypass user-level checks use
+//! [`Accessor::privileged`].
+
 // bole-49r
 // bole-a7c
 // bole-s5y

@@ -10,15 +10,26 @@ use crate::error::Result;
 use crate::object::{Blob, EnvOverlay, Object, ObjectId, Secret, Snapshot, Tree, TreeEntry};
 use backend::StorageBackend;
 
+// bole-p8u
+/// The primary façade for reading and writing content-addressed objects.
+///
+/// `ObjectStore` wraps a [`StorageBackend`] and adds typed helpers so callers
+/// never have to serialise objects manually.  Every `put_*` method returns the
+/// `ObjectId` of the stored object; identical objects always produce the same
+/// id and are deduplicated automatically.
 pub struct ObjectStore {
     backend: Box<dyn StorageBackend>,
 }
 
 impl ObjectStore {
+    // bole-p8u
+    /// Creates an `ObjectStore` backed by the given [`StorageBackend`].
     pub fn new(backend: impl StorageBackend + 'static) -> Self {
         Self { backend: Box::new(backend) }
     }
 
+    // bole-p8u
+    /// Serialises `obj`, stores it if not already present, and returns its `ObjectId`.
     pub async fn put(&self, obj: &Object) -> Result<ObjectId> {
         let data = codec::serialize(obj)?;
         let id = codec::object_id(&data);
@@ -28,6 +39,8 @@ impl ObjectStore {
         Ok(id)
     }
 
+    // bole-p8u
+    /// Retrieves and deserialises the object with the given `id`, or `None` if it does not exist.
     pub async fn get(&self, id: &ObjectId) -> Result<Option<Object>> {
         match self.backend.get(id).await? {
             Some(data) => Ok(Some(codec::deserialize(&data)?)),
@@ -35,33 +48,51 @@ impl ObjectStore {
         }
     }
 
+    // bole-p8u
+    /// Returns `true` if an object with the given `id` exists in the store.
     pub async fn exists(&self, id: &ObjectId) -> Result<bool> {
         self.backend.exists(id).await
     }
 
+    // bole-p8u
+    /// Stores `data` as a [`Blob`] and returns its `ObjectId`.
     pub async fn put_blob(&self, data: Bytes) -> Result<ObjectId> {
         self.put(&Object::Blob(Blob { data })).await
     }
 
+    // bole-p8u
+    /// Stores the given entries as a [`Tree`] and returns its `ObjectId`.
     pub async fn put_tree(&self, entries: BTreeMap<String, TreeEntry>) -> Result<ObjectId> {
         self.put(&Object::Tree(Tree { entries })).await
     }
 
+    // bole-p8u
+    /// Stores `snap` as a [`Snapshot`] and returns its `ObjectId`.
     pub async fn put_snapshot(&self, snap: Snapshot) -> Result<ObjectId> {
         self.put(&Object::Snapshot(snap)).await
     }
 
     // bole-dq2
+    // bole-p8u
+    /// Returns the `ObjectId` of every object currently in the store.
     pub async fn list(&self) -> Result<Vec<ObjectId>> {
         self.backend.list().await
     }
 
     // bole-meg
+    // bole-p8u
+    /// Encrypts `plaintext` with `key`, stores the result as a [`Secret`], and returns its `ObjectId`.
+    ///
+    /// Because a fresh nonce is generated on each call, the same plaintext
+    /// stored twice will produce two different `ObjectId`s.
     pub async fn put_secret(&self, plaintext: &[u8], key: &[u8; 32]) -> Result<ObjectId> {
         let secret = Secret::encrypt(plaintext, key)?;
         self.put(&Object::Secret(secret)).await
     }
 
+    // bole-p8u
+    /// Fetches the [`Secret`] at `id`, decrypts it with `key`, and returns the plaintext,
+    /// or `None` if no object exists at that id.
     pub async fn get_secret(&self, id: &ObjectId, key: &[u8; 32]) -> Result<Option<Vec<u8>>> {
         match self.get(id).await? {
             None => Ok(None),
@@ -70,10 +101,14 @@ impl ObjectStore {
         }
     }
 
+    // bole-p8u
+    /// Stores `overlay` as an [`EnvOverlay`] and returns its `ObjectId`.
     pub async fn put_overlay(&self, overlay: EnvOverlay) -> Result<ObjectId> {
         self.put(&Object::EnvOverlay(overlay)).await
     }
 
+    // bole-p8u
+    /// Fetches and returns the [`EnvOverlay`] at `id`, or `None` if it does not exist.
     pub async fn get_overlay(&self, id: &ObjectId) -> Result<Option<EnvOverlay>> {
         match self.get(id).await? {
             None => Ok(None),

@@ -2,9 +2,16 @@
 use crate::refs::{Tag, Timeline};
 use serde::{Deserialize, Serialize};
 
+// bole-p8u
+/// A named pointer in the ref store: either a [`Tag`] (fixed pointer) or a
+/// [`Timeline`] (a mutable head that advances as snapshots are added).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Ref {
+    // bole-p8u
+    /// A named, immutable pointer to a specific snapshot.
     Tag(Tag),
+    // bole-p8u
+    /// An ordered, mutable view over a snapshot DAG.
     Timeline(Timeline),
 }
 

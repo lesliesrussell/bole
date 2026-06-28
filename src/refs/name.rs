@@ -3,10 +3,22 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+// bole-p8u
+/// A validated, slash-delimited hierarchical name for a ref (tag or timeline).
+///
+/// `RefName` enforces a minimal set of naming rules: segments must be non-empty,
+/// must not start with `.`, must not contain null bytes, and the name must not
+/// begin or end with `/`.  These rules mirror Git's ref naming restrictions to
+/// keep projection straightforward.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RefName(String);
 
 impl RefName {
+    // bole-p8u
+    /// Validates and wraps `s` as a `RefName`.
+    ///
+    /// Returns [`crate::error::Error::InvalidRefName`] if the string violates
+    /// any naming rule.
     pub fn new(s: impl Into<String>) -> Result<Self> {
         let s = s.into();
         if s.is_empty() {
@@ -36,10 +48,14 @@ impl RefName {
         Ok(Self(s))
     }
 
+    // bole-p8u
+    /// Returns the name as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    // bole-p8u
+    /// Returns the portion of the name before the last `/`, or an empty string if there is no `/`.
     pub fn prefix(&self) -> &str {
         match self.0.rfind('/') {
             Some(i) => &self.0[..i],

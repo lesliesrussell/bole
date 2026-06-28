@@ -25,34 +25,76 @@ use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
 use crate::store::{disk::DiskBackend, memory::MemoryBackend, ObjectStore};
 
 // bole-9by
+// bole-p8u
+/// A snapshot projected through an [`Accessor`]'s path ACL, containing only
+/// the paths the accessor is permitted to see.
+///
+/// Returned by [`Repository::get_snapshot_filtered`]; callers should use
+/// `visible_paths` rather than walking the full object tree directly.
 #[derive(Debug, Clone)]
 pub struct FilteredSnapshot {
+    // bole-p8u
+    /// The `ObjectId` of the underlying [`Snapshot`](crate::object::Snapshot).
     pub id: ObjectId,
+    // bole-p8u
+    /// Author field copied from the underlying snapshot.
     pub author: String,
+    // bole-p8u
+    /// Creation timestamp copied from the underlying snapshot.
     pub created_at: u64,
+    // bole-p8u
+    /// Commit message copied from the underlying snapshot.
     pub message: String,
+    // bole-p8u
+    /// Parent snapshot ids copied from the underlying snapshot.
     pub parents: Vec<ObjectId>,
+    // bole-p8u
+    /// Flat map of logical path → blob `ObjectId` for every path the accessor may read.
     pub visible_paths: BTreeMap<String, ObjectId>,
 }
 
 // bole-9by
+// bole-p8u
+/// The outcome of a pre-merge ACL check performed by [`Repository::check_merge`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum MergeCheck {
+    // bole-p8u
+    /// The merge may proceed without restriction.
     Allowed,
+    // bole-p8u
+    /// The merge would expose protected paths; an explicit write-capable accessor may still proceed.
     RequiresApproval(Vec<PathAcl>),
+    // bole-p8u
+    /// The merge is denied because the accessor lacks write access to the target timeline.
     Rejected(Vec<PathAcl>),
 }
 
 // bole-1vi
+// bole-p8u
+/// The top-level handle to a bole repository, bundling object storage, ref
+/// storage, and ACL storage behind a single unified API.
+///
+/// Construct one with [`Repository::memory`] (for ephemeral/test use) or
+/// [`Repository::disk`] (for persistent storage on the local filesystem).
 pub struct Repository {
+    // bole-p8u
+    /// The content-addressed store for all blobs, trees, snapshots, secrets, and overlays.
     pub objects: ObjectStore,
+    // bole-p8u
+    /// The store for all named refs (tags and timelines).
     pub refs: RefStore,
     // bole-9by
+    // bole-p8u
+    /// The store for path and timeline ACL protection rules.
     pub acls: AclStore,
 }
 
 // bole-1vi
 impl Repository {
+    // bole-p8u
+    /// Creates a fully in-memory repository; all data is lost when dropped.
+    ///
+    /// Useful for tests and short-lived operations.
     pub fn memory() -> Self {
         Self {
             objects: ObjectStore::new(MemoryBackend::new()),
@@ -62,6 +104,8 @@ impl Repository {
         }
     }
 
+    // bole-p8u
+    /// Opens (or creates) a persistent repository rooted at the given directory.
     pub async fn disk(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         Ok(Self {
@@ -72,6 +116,8 @@ impl Repository {
         })
     }
 
+    // bole-p8u
+    /// Copies all objects and refs from `self` into `dest`.
     pub async fn copy_to(&self, dest: &Repository) -> Result<()> {
         copy_objects(&self.objects, &dest.objects).await?;
         copy_refs(&self.refs, &dest.refs)?;
@@ -79,6 +125,11 @@ impl Repository {
     }
 
     // bole-9by
+    // bole-p8u
+    /// Loads the snapshot at `id` and filters its tree to only the paths the `accessor`
+    /// is permitted to see, returning a [`FilteredSnapshot`].
+    ///
+    /// Returns `None` if no snapshot exists at `id`.
     pub async fn get_snapshot_filtered(
         &self,
         id: ObjectId,
@@ -101,6 +152,9 @@ impl Repository {
     }
 
     // bole-9by
+    // bole-p8u
+    /// Lists all refs under `prefix`, omitting any protected timelines the `accessor`
+    /// cannot read.
     pub fn list_refs_filtered(&self, prefix: &str, accessor: &Accessor) -> Result<Vec<RefName>> {
         let all = self.refs.list(prefix)?;
         let mut out = Vec::new();
@@ -117,6 +171,13 @@ impl Repository {
     }
 
     // bole-9by
+    // bole-p8u
+    /// Checks whether merging `source` into `dest` is safe with respect to path ACLs,
+    /// without actually performing the merge.
+    ///
+    /// Returns [`MergeCheck::Allowed`] when no protected paths would be exposed,
+    /// [`MergeCheck::RequiresApproval`] when a write-capable accessor could override,
+    /// or [`MergeCheck::Rejected`] when the accessor lacks the required write access.
     pub async fn check_merge(
         &self,
         source: &RefName,
@@ -158,10 +219,20 @@ impl Repository {
     }
 
     // bole-u6p
+    // bole-p8u
+    /// Finds the nearest common ancestor snapshot of `a` and `b` in the snapshot DAG,
+    /// or `None` if the histories share no common point.
     pub async fn find_common_ancestor(&self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
         lca(&self.objects, a, b).await
     }
 
+    // bole-p8u
+    /// Computes a three-way diff between `source` and `target` using their common ancestor,
+    /// returning a [`MergeResult`] that describes conflicts and clean changes.
+    ///
+    /// The caller is responsible for checking write permissions before calling this
+    /// (or use [`Repository::check_merge`] first).  The `accessor` must hold write
+    /// access to `target`.
     pub async fn merge_timelines(
         &self,
         source: &RefName,
@@ -202,6 +273,9 @@ impl Repository {
         Ok(three_way_diff(&ancestor_tree, &target_tree, &source_tree))
     }
 
+    // bole-p8u
+    /// Moves the head of timeline `name` to `snapshot_id`, enforcing both timeline-level
+    /// and path-level write permissions from `accessor`.
     pub async fn advance_timeline(
         &self,
         name: &RefName,
@@ -240,6 +314,11 @@ impl Repository {
         Ok(())
     }
 
+    // bole-p8u
+    /// Deletes timeline `name` if it has an `expires_at` timestamp that is ≤ `now`
+    /// and no tag points at its head snapshot.
+    ///
+    /// Returns `true` if the timeline was pruned, `false` otherwise.
     pub fn prune_timeline(&self, name: &RefName, now: u64) -> Result<bool> {
         let tl = match self.refs.get_timeline(name)? {
             Some(t) => t,
@@ -275,6 +354,12 @@ impl Repository {
     }
 
     // bole-l0i
+    // bole-p8u
+    /// Combines a filtered snapshot view with a decrypted env overlay into a
+    /// [`WorkspaceView`] — the complete set of files and resolved environment
+    /// variables an accessor can see.
+    ///
+    /// Returns `None` if the snapshot does not exist.
     pub async fn compute_workspace_view(
         &self,
         snapshot_id: ObjectId,
@@ -353,6 +438,9 @@ async fn walk_tree_filtered(
 // Decode + re-encode rather than raw byte copy. Safe because postcard is
 // deterministic and BLAKE3 ids are stable, so round-tripping preserves the id.
 // If codec versioning ever changes, revisit this.
+// bole-p8u
+/// Copies every object from `from` into `to`, re-deriving ids to guarantee
+/// correctness even if the serialisation format ever changes.
 pub async fn copy_objects(from: &ObjectStore, to: &ObjectStore) -> Result<()> {
     for id in from.list().await? {
         if let Some(obj) = from.get(&id).await? {
@@ -363,6 +451,8 @@ pub async fn copy_objects(from: &ObjectStore, to: &ObjectStore) -> Result<()> {
 }
 
 // bole-1vi
+// bole-p8u
+/// Copies every ref from `from` into `to`, preserving both tags and timelines.
 pub fn copy_refs(from: &RefStore, to: &RefStore) -> Result<()> {
     for name in from.list("")? {
         if let Some(r) = from.get(&name)? {

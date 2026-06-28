@@ -4,6 +4,12 @@ use crate::object::{EntryKind, Object, ObjectId};
 use crate::store::ObjectStore;
 use std::path::Path;
 
+// bole-p8u
+/// Recursively writes the tree reachable from `snapshot_id` to the filesystem
+/// at `dest`, creating directories and files to mirror the stored path hierarchy.
+///
+/// Existing files are overwritten; directories are created as needed.  This is
+/// a read-only export — changes to the materialized files are not tracked.
 pub async fn materialize(
     objects: &ObjectStore,
     snapshot_id: ObjectId,

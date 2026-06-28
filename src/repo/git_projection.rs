@@ -11,6 +11,13 @@ use crate::object::{Object, ObjectId};
 use crate::refs::Ref;
 use crate::repo::Repository;
 
+// bole-p8u
+/// Projects all timelines visible to `accessor` from `repo` into a bare Git
+/// repository at `target_path`, creating it if it does not already exist.
+///
+/// Blobs, trees, and snapshots are translated to native Git objects; each
+/// timeline head becomes a Git branch ref.  Only paths the accessor can read
+/// are included in the projected commits.
 pub async fn project_to_git(
     repo: &Repository,
     target_path: &Path,
