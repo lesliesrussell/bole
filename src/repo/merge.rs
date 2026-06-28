@@ -124,18 +124,11 @@ pub(crate) async fn find_common_ancestor(
     let mut frontier_a: VecDeque<ObjectId> = VecDeque::new();
     let mut frontier_b: VecDeque<ObjectId> = VecDeque::new();
 
+    // bole-dua
     visited_a.insert(a);
     visited_b.insert(b);
     frontier_a.push_back(a);
     frontier_b.push_back(b);
-
-    // Check immediate overlap before any expansion
-    if visited_b.contains(&a) {
-        return Ok(Some(a));
-    }
-    if visited_a.contains(&b) {
-        return Ok(Some(b));
-    }
 
     loop {
         let grew_a = expand_frontier(store, &mut frontier_a, &mut visited_a).await?;
