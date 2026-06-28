@@ -21,3 +21,16 @@ gix = { version = "0.70", default-features = false, features = ["max-performance
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
 flate2 = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "object_store"
+harness = false
+
+[[bench]]
+name = "snapshot_ops"
+harness = false
+
+[[bench]]
+name = "git_projection"
+harness = false
