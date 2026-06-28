@@ -9,6 +9,8 @@
 mod commands;
 mod context;
 mod output;
+// bole-w3a
+mod resolve;
 
 use std::path::PathBuf;
 
@@ -45,6 +47,24 @@ enum Command {
     },
     /// Show the current repository, binding, and ref count.
     Status,
+    // bole-w3a
+    /// Manage timelines (movable named heads).
+    Timeline {
+        #[command(subcommand)]
+        cmd: commands::timeline::Cmd,
+    },
+    /// Alias for `timeline`.
+    Branch {
+        #[command(subcommand)]
+        cmd: commands::timeline::Cmd,
+    },
+    /// Alias for `timeline list`.
+    Branches,
+    /// Manage tags (immutable named pointers).
+    Tag {
+        #[command(subcommand)]
+        cmd: commands::tag::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -62,9 +82,27 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::Init { path } => commands::init::run(path, &out).await,
         Command::Status => {
-            let cwd = std::env::current_dir()?;
-            let ctx = RepoContext::discover(&cwd).await?;
+            let ctx = open().await?;
             commands::status::run(&ctx, &out).await
         }
+        // bole-w3a
+        Command::Timeline { cmd } | Command::Branch { cmd } => {
+            let ctx = open().await?;
+            commands::timeline::run(&ctx, &out, cmd).await
+        }
+        Command::Branches => {
+            let ctx = open().await?;
+            commands::timeline::run(&ctx, &out, commands::timeline::Cmd::List).await
+        }
+        Command::Tag { cmd } => {
+            let ctx = open().await?;
+            commands::tag::run(&ctx, &out, cmd).await
+        }
     }
+}
+
+/// Discovers and opens the repository from the current directory.
+async fn open() -> Result<RepoContext> {
+    let cwd = std::env::current_dir()?;
+    RepoContext::discover(&cwd).await
 }
