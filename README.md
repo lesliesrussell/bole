@@ -12,7 +12,7 @@ bole reimagines the core VCS abstraction. Instead of "files in a directory plus 
 - **ACLs** — every path and timeline participates in an access-control lattice. Private files, private timelines, and policy-driven merges are first-class, not conventions layered on top.
 - **Secrets and env overlays** — typed object-graph nodes with separate encryption and visibility. A workspace view is computed as base files + env overlays + secret bindings; `.env` files are never committed.
 
-bole is a **library crate**, not a CLI. It provides the data model and storage layer; you build applications and tools on top.
+bole is primarily a **library crate**: it provides the data model and storage layer, and you build applications and tools on top. A command-line interface (`bole-cli`, binary `bole`) ships alongside it as a thin wrapper over the library — see the [CLI reference](docs/CLI.md).
 
 ## Features (Gates 1–8)
 
@@ -109,6 +109,25 @@ let key: [u8; 32] = /* ... */;
 let secret_id = repo.objects.put_secret(b"postgres://prod:secret@db/app", &key).await?;
 let plaintext = repo.objects.get_secret(&secret_id, &key).await?.unwrap();
 ```
+
+## CLI quick start
+
+```bash
+cargo build --release -p bole-cli      # binary at target/release/bole
+
+bole init .
+echo 'fn main() {}' > src/main.rs
+SNAP=$(bole snapshot create --from-workspace -m "initial" --json | jq -r .snapshot)
+bole workspace open main --create --from "$SNAP"
+# edit files...
+bole snapshot create --from-workspace -m "changes"   # advances main
+bole snapshot list
+bole git export --to /tmp/export.git
+```
+
+See the [CLI reference](docs/CLI.md) for the full command tree (timelines, tags,
+snapshots, workspace, merge, actors, ACLs, secrets, env overlays, git export,
+and object/ref/store plumbing).
 
 ## Architecture
 
