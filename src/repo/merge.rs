@@ -99,8 +99,8 @@ pub(crate) fn three_way_diff(
                 // File is new on their side only; ours never had it → take theirs
                 merged.insert(key, t);
             }
-            // Both absent is already handled by the `our == thr` check above
-            (_, None, None) => {}
+            // bole-s78
+            (_, None, None) => unreachable!("both-None guarded by our==thr early return above"),
         }
     }
 
