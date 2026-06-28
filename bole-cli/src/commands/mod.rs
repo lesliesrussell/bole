@@ -12,3 +12,6 @@ pub mod workspace;
 // bole-ef8
 pub mod acl;
 pub mod actor;
+// bole-tme
+pub mod git;
+pub mod merge;

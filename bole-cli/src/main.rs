@@ -91,6 +91,17 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::acl::Cmd,
     },
+    // bole-tme
+    /// Check and perform timeline merges.
+    Merge {
+        #[command(subcommand)]
+        cmd: commands::merge::Cmd,
+    },
+    /// Export to a bare Git repository.
+    Git {
+        #[command(subcommand)]
+        cmd: commands::git::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -141,6 +152,15 @@ async fn run() -> Result<()> {
         Command::Acl { cmd } => {
             let ctx = open().await?;
             commands::acl::run(&ctx, &out, cmd).await
+        }
+        // bole-tme
+        Command::Merge { cmd } => {
+            let ctx = open().await?;
+            commands::merge::run(&ctx, &out, cmd).await
+        }
+        Command::Git { cmd } => {
+            let ctx = open().await?;
+            commands::git::run(&ctx, &out, cmd).await
         }
     }
 }
