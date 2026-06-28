@@ -11,6 +11,8 @@ mod context;
 mod output;
 // bole-w3a
 mod resolve;
+// bole-gvy
+mod worktree;
 
 use std::path::PathBuf;
 
@@ -65,6 +67,17 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::tag::Cmd,
     },
+    // bole-gvy
+    /// Create and inspect snapshots.
+    Snapshot {
+        #[command(subcommand)]
+        cmd: commands::snapshot::Cmd,
+    },
+    /// Bind the work tree to a timeline and materialise files.
+    Workspace {
+        #[command(subcommand)]
+        cmd: commands::workspace::Cmd,
+    },
 }
 
 #[tokio::main]
@@ -97,6 +110,15 @@ async fn run() -> Result<()> {
         Command::Tag { cmd } => {
             let ctx = open().await?;
             commands::tag::run(&ctx, &out, cmd).await
+        }
+        // bole-gvy
+        Command::Snapshot { cmd } => {
+            let ctx = open().await?;
+            commands::snapshot::run(&ctx, &out, cmd).await
+        }
+        Command::Workspace { cmd } => {
+            let ctx = open().await?;
+            commands::workspace::run(&ctx, &out, cmd).await
         }
     }
 }
