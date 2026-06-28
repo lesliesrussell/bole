@@ -150,7 +150,11 @@ async fn t6_agent_capability_enforced() {
     let name = RefName::new("agent/restricted").unwrap();
     repo.refs.create_timeline(name.clone(), snap, TimelinePolicy::Unrestricted, 1, "ephemeral".into(), None).unwrap();
 
-    // Agent can write src/** but not secrets/**
+    // bole-1fe
+    // Pass `snap` as both current head and next head intentionally: the test
+    // exercises path-level ACL enforcement in advance_timeline regardless of
+    // whether the snapshot changes. A future same-head short-circuit must not
+    // skip enforcement.
     let err = repo.advance_timeline(&name, snap, &src_write_accessor()).await.unwrap_err();
     assert!(
         matches!(err, Error::AccessDenied(_)),
