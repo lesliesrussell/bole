@@ -107,9 +107,11 @@ impl StorageBackend for DiskBackend {
         while let Some(shard) = shards.next_entry().await? {
             let prefix = shard.file_name().to_string_lossy().into_owned();
             if prefix.len() != 2 { continue; }
+            // bole-u24
             let mut entries = match tokio::fs::read_dir(shard.path()).await {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::Io(e)),
             };
             while let Some(entry) = entries.next_entry().await? {
                 let name = entry.file_name().to_string_lossy().into_owned();
