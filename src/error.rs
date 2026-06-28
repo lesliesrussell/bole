@@ -36,6 +36,9 @@ pub enum Error {
     // bole-p8u
     /// A Git projection step failed (e.g. the target path is not a valid bare repo).
     #[error("git projection failed: {0}")] GitProjection(String),
+    // bole-3w9
+    /// A timeline advance was rejected because it violates the timeline's [`TimelinePolicy`](crate::refs::TimelinePolicy).
+    #[error("policy violation: {0}")] PolicyViolation(String),
 }
 
 // bole-p8u

@@ -21,7 +21,8 @@ use crate::refs::Ref;
 // bole-l0i
 use crate::object::EnvValue;
 use workspace::WorkspaceView;
-use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
+// bole-3w9
+use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore, TimelinePolicy};
 use crate::store::{disk::DiskBackend, memory::MemoryBackend, ObjectStore};
 
 // bole-9by
@@ -308,6 +309,29 @@ impl Repository {
                     "write denied on path: {}",
                     path
                 )));
+            }
+        }
+        // bole-3w9: enforce the timeline's advancement policy before moving the head.
+        let timeline = self.refs.get_timeline(name)?.ok_or_else(|| {
+            Error::Storage(format!("timeline not found: {}", name.as_str()))
+        })?;
+        match timeline.policy {
+            TimelinePolicy::Unrestricted => {}
+            TimelinePolicy::FastForwardOnly | TimelinePolicy::Append => {
+                // A move is permitted only when the current head is an ancestor of
+                // the new head (a true fast-forward); a no-op move qualifies because
+                // lca(head, head) == head.
+                let is_fast_forward =
+                    lca(&self.objects, timeline.head, snapshot_id).await? == Some(timeline.head);
+                if !is_fast_forward {
+                    return Err(Error::PolicyViolation(format!(
+                        "timeline '{}' has policy {:?}; new head {} is not a descendant of current head {}",
+                        name.as_str(),
+                        timeline.policy,
+                        snapshot_id,
+                        timeline.head
+                    )));
+                }
             }
         }
         self.refs.advance_head(name, snapshot_id)?;
@@ -935,6 +959,85 @@ mod tests {
 
         repo.advance_timeline(&name, snap2, &full).await.unwrap();
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, snap2);
+    }
+
+    // bole-3w9
+    /// Builds a repo with three snapshots: base, a descendant `child`, and an
+    /// unrelated `sibling` (also rooted at base, so it is NOT a descendant of
+    /// child). Returns (repo, base, child, sibling) plus a full-write accessor.
+    #[cfg(test)]
+    async fn policy_fixture() -> (Repository, ObjectId, ObjectId, ObjectId, crate::acl::Accessor) {
+        use crate::acl::{Accessor, PathRole, TimelineRole, Permission};
+        use crate::object::Snapshot;
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "base".into(),
+        }).await.unwrap();
+        let child = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "child".into(),
+        }).await.unwrap();
+        // sibling parents base too -> shares the ancestor but does not descend from child
+        let sibling = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![base], author: "t".into(), created_at: 2, message: "sibling".into(),
+        }).await.unwrap();
+        let full = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+        (repo, base, child, sibling, full)
+    }
+
+    // bole-3w9
+    #[tokio::test]
+    async fn fast_forward_only_accepts_descendant() {
+        use crate::refs::RefName;
+        let (repo, base, child, _sibling, full) = policy_fixture().await;
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), base, TimelinePolicy::FastForwardOnly, 0, "persistent".into(), None).unwrap();
+        // child descends from base -> allowed.
+        repo.advance_timeline(&name, child, &full).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, child);
+    }
+
+    // bole-3w9
+    #[tokio::test]
+    async fn fast_forward_only_rejects_non_descendant() {
+        use crate::error::Error;
+        use crate::refs::RefName;
+        let (repo, base, child, sibling, full) = policy_fixture().await;
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), child, TimelinePolicy::FastForwardOnly, 0, "persistent".into(), None).unwrap();
+        // sibling does not descend from child -> rejected, head unchanged.
+        let err = repo.advance_timeline(&name, sibling, &full).await.unwrap_err();
+        assert!(matches!(err, Error::PolicyViolation(_)), "expected PolicyViolation, got {err:?}");
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, child);
+        let _ = base;
+    }
+
+    // bole-3w9
+    #[tokio::test]
+    async fn append_rejects_non_descendant() {
+        use crate::error::Error;
+        use crate::refs::RefName;
+        let (repo, _base, child, sibling, full) = policy_fixture().await;
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), child, TimelinePolicy::Append, 0, "persistent".into(), None).unwrap();
+        let err = repo.advance_timeline(&name, sibling, &full).await.unwrap_err();
+        assert!(matches!(err, Error::PolicyViolation(_)), "expected PolicyViolation, got {err:?}");
+    }
+
+    // bole-3w9
+    #[tokio::test]
+    async fn unrestricted_allows_non_descendant() {
+        use crate::refs::RefName;
+        let (repo, _base, child, sibling, full) = policy_fixture().await;
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), child, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        // Unrestricted: any snapshot is a valid new head.
+        repo.advance_timeline(&name, sibling, &full).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, sibling);
     }
 
     #[test]
