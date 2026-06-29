@@ -129,7 +129,18 @@ bole workspace show          # binding + pending changes
 bole workspace diff          # work tree vs bound head
 bole workspace materialize --snapshot <snap> --to <dir>
 bole workspace clear         # unbind
+
+# Linked worktrees — many directories sharing one .bole/ store, each bound
+# to a different timeline (like `git worktree`, minus the ref machinery):
+bole workspace add <path> --timeline <name> [--as <actor>]   # timeline must exist
+bole workspace list          # primary + linked: path, timeline, head
+bole workspace remove <path> # unregister; never deletes your files
 ```
+
+A linked worktree is a directory containing a `.bole` **file** that points at
+the primary store; its binding lives under `<store>/worktrees/<id>/`. Commands
+run from inside it resolve the shared store but its own timeline binding, so the
+primary and each linked worktree can sit on different timelines at once.
 
 ### Merge
 

@@ -50,7 +50,7 @@ bole snapshot list                            # history, newest first
 
 - Lifecycle: `init`, `status`, `repo info`
 - History: `snapshot create|show|list|parents|diff`, `timeline create|list|show|advance|delete` (alias `branch`/`branches`), `tag create|list|show|delete`
-- Work tree: `workspace open|show|diff|materialize|clear`
+- Work tree: `workspace open|show|diff|materialize|clear|add|list|remove` (add/list/remove = linked worktrees sharing one store)
 - Merge: `merge check <src> <dst>` (dry run), `merge run <src> <dst>` (advances dst when clean; reports conflicts otherwise)
 - Access: `actor create|grant-path|grant-timeline|use|show|list`, `acl path|timeline protect|unprotect|list`, `acl can-{read,write}-{path,timeline}`
 - Config: `secret put|reveal|rotate|list`, `env create|set|set-secret|show|list`

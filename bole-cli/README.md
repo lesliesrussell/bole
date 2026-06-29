@@ -196,6 +196,21 @@ Write a snapshot's files into a directory (read-only export).
 ### `bole workspace clear`
 Unbind the work tree from its timeline.
 
+### `bole workspace add <path> --timeline <name> [--as <actor>]`
+Create a **linked worktree**: a new directory bound to an existing timeline that
+shares this repo's `.bole/` store, with the timeline's head materialized into it.
+Many directories can share one store, each on a different timeline (like
+`git worktree`). The directory gets a `.bole` pointer file; the binding lives
+under `<store>/worktrees/<id>/`.
+
+### `bole workspace list`
+List the primary worktree and all linked worktrees: path, bound timeline, and
+short head (linked ones are marked).
+
+### `bole workspace remove <path>`
+Unregister a linked worktree and delete its pointer file and metadata. It
+**never** deletes your working files.
+
 ## Merge
 
 ### `bole merge check <source> <target>`

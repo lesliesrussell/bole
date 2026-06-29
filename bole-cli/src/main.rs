@@ -18,6 +18,8 @@ mod actor;
 // bole-1q9
 mod key;
 mod registry;
+// bole-hrk
+mod worktrees;
 
 use std::path::PathBuf;
 
