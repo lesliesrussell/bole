@@ -78,3 +78,5 @@ pub use repo::{FilteredSnapshot, MergeCheck};
 pub use repo::merge::{MergeConflict, MergeResult};
 // bole-l0i
 pub use repo::workspace::WorkspaceView;
+// bole-uxt
+pub use repo::ephemeral::{build_tree, diff_paths, snapshot_paths, EphemeralWorkspace, PathDiff};

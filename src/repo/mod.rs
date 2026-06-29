@@ -6,6 +6,8 @@ pub mod workspace;
 pub mod merge;
 // bole-6bd
 pub mod git_projection;
+// bole-uxt
+pub mod ephemeral;
 
 // bole-1vi
 use std::collections::BTreeMap;

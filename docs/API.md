@@ -38,8 +38,9 @@ This document describes every public type, method, and function in the `bole` cr
     - [copy\_objects / copy\_refs](#copy_objects--copy_refs)
     - [materialize](#materialize)
     - [project\_to\_git](#project_to_git)
-11. [Error handling](#error-handling)
-12. [Complete example](#complete-example)
+11. [In-memory workspaces](#in-memory-workspaces)
+12. [Error handling](#error-handling)
+13. [Complete example](#complete-example)
 
 ---
 
@@ -731,6 +732,56 @@ project_to_git(&repo, Path::new("/tmp/export.git"), &Accessor::privileged()).awa
 // Now usable as a normal Git repo:
 // git -C /tmp/export.git log --oneline
 ```
+
+---
+
+## In-memory workspaces
+
+`EphemeralWorkspace` is a pure in-RAM working tree — for agents and tools that
+edit files as buffers and produce snapshots without touching the filesystem. It
+works on any `Repository`, but pairs naturally with `Repository::memory()`.
+
+```rust
+// Construct (empty, or seeded from a snapshot)
+repo.ephemeral_workspace() -> EphemeralWorkspace<'_>
+repo.ephemeral_workspace_from(snapshot: ObjectId) -> Result<EphemeralWorkspace<'_>>
+
+// Edit
+ws.read(path: &str) -> Option<&[u8]>
+ws.write(path: impl Into<String>, bytes: impl Into<Bytes>)
+ws.remove(path: &str) -> bool
+ws.paths() -> impl Iterator<Item = &str>
+
+// Inspect / persist
+ws.diff() -> Result<PathDiff>                                   // vs the base snapshot
+ws.commit(author, message, created_at: u64) -> Result<ObjectId> // new snapshot; parent = base
+ws.base() -> Option<ObjectId>
+```
+
+`commit` stores the files as blobs and a snapshot whose parent is the current
+base, then advances the workspace's base to the new snapshot. It does **not**
+move any timeline — publish a snapshot by calling
+[`Repository::advance_timeline`](#advance_timeline) with it.
+
+```rust
+let repo = Repository::memory();
+let mut ws = repo.ephemeral_workspace();
+ws.write("src/main.rs", &b"fn main() {}"[..]);
+let snap = ws.commit("agent", "scaffold", 0).await?;
+
+let mut ws2 = repo.ephemeral_workspace_from(snap).await?;
+ws2.write("src/main.rs", &b"fn main() { run(); }"[..]);
+let d = ws2.diff().await?;          // d.modified == ["src/main.rs"]
+let snap2 = ws2.commit("agent", "wire up", 1).await?;
+```
+
+`PathDiff { added, removed, modified }` is also produced by the standalone
+primitives the CLI shares: `build_tree(objects, &map)`,
+`snapshot_paths(objects, snapshot)`, and `diff_paths(&base, &target)`.
+
+> Note: `diff` and `commit` store the current files' blobs in the object store
+> (content-addressed, so this is idempotent). The MVP seeds the full snapshot;
+> ACL-filtered seeding may come later.
 
 ---
 
