@@ -111,12 +111,18 @@ impl Label {
     pub const PUBLIC: &str = "public";       // bottom by convention
 }
 
-/// The partial order over labels. A content-addressed policy object (§3.4).
+/// A **bounded lattice** (LOCKED, decision O3 / 2026-06-29) — not a general
+/// poset. Every pair of labels has a unique join (least upper bound) and a
+/// unique meet (greatest lower bound), and the order has a unique bottom
+/// (`public`) and a unique top. A content-addressed policy object (§3.4).
 ///
 /// Stored as the set of labels plus the *covering* edges of the order
 /// (a ⋖ b means "a is immediately dominated by b"; b is strictly more
 /// restrictive). dominates/join/meet are computed by reachability over the
-/// transitive closure, cached on load.
+/// transitive closure, cached on load. Because the structure is a true lattice,
+/// join/meet are **total** — they always return a label — so every downstream
+/// rule (effective-label composition §3.2, clearance evaluation §4) can rely on
+/// them existing without an `Option`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelLattice {
     labels: BTreeSet<Label>,
@@ -127,13 +133,18 @@ pub struct LabelLattice {
 impl LabelLattice {
     /// `a ⊒ b` — a dominates (is at least as restrictive as) b. Reflexive.
     pub fn dominates(&self, a: &Label, b: &Label) -> bool;
-    /// Least upper bound (most-protective common ceiling). `None` if the order
-    /// is not a true lattice for this pair (see Open question O3).
-    pub fn join(&self, a: &Label, b: &Label) -> Option<Label>;
-    /// Greatest lower bound.
-    pub fn meet(&self, a: &Label, b: &Label) -> Option<Label>;
+    /// `a ⊐ b` — strict domination: `dominates(a, b) && a != b`. Used by the
+    /// confined (no-write-down) write rule (§4.2).
+    pub fn strictly_dominates(&self, a: &Label, b: &Label) -> bool;
+    /// Least upper bound (most-protective common ceiling). Total: always exists.
+    pub fn join(&self, a: &Label, b: &Label) -> Label;
+    /// Greatest lower bound. Total: always exists.
+    pub fn meet(&self, a: &Label, b: &Label) -> Label;
     pub fn bottom(&self) -> Label;  // the unique minimum (public)
-    pub fn validate(&self) -> Result<()>; // acyclic, has bottom, joins exist
+    pub fn top(&self) -> Label;     // the unique maximum (most restrictive)
+    /// Rejects configs that are not bounded lattices: cycles, missing/duplicate
+    /// bottom or top, or any pair lacking a unique join or meet.
+    pub fn validate(&self) -> Result<()>;
 }
 ```
 
@@ -151,26 +162,36 @@ pub enum LabelRule {
     Path { glob: String, label: Label },
     /// Any timeline whose name matches `pattern` carries `label`.
     Timeline { pattern: String, label: Label },
+    /// Any secret matching `name` (env-var name or secret id) carries `label`.
+    /// (LOCKED, decision #4 / 2026-06-29; ratifies WS3's request.) Makes secrets
+    /// first-class in the label model: WS3's `resolve_overlay` labels an
+    /// EnvOverlay's `EnvValue::Secret(id)` entries via this rule and gates them
+    /// through the same read clearance check as paths, instead of a separate
+    /// secret-ACL path.
+    Secret { name: String, label: Label },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelRuleSet { pub rules: Vec<LabelRule> }
 
 impl LabelRuleSet {
-    /// Effective label of a path = join of every matching Path rule's label,
+    /// Effective label of a path = JOIN of every matching Path rule's label,
     /// defaulting to `lattice.bottom()` (public) when nothing matches.
-    /// "Most restrictive matching rule wins", and it composes for free in a
-    /// real lattice instead of being a flat boolean.
     pub fn label_for_path(&self, lattice: &LabelLattice, path: &str) -> Label;
     pub fn label_for_timeline(&self, lattice: &LabelLattice, name: &str) -> Label;
+    /// Effective label of a secret = JOIN of every matching Secret rule's label.
+    pub fn label_for_secret(&self, lattice: &LabelLattice, name: &str) -> Label;
 }
 ```
 
-Rationale for **join of matches** (vs first-match or boolean): with overlapping
-rules (`secrets/**` → `secret`, `secrets/prod/**` → `top-secret`) the resource
-correctly takes the most restrictive applicable label. In the two-point lattice
-this collapses to exactly today's "matches any protected glob? → protected, else
-public".
+**Effective label = JOIN of all matching rules of the resource's kind** (LOCKED,
+decision O3 / 2026-06-29). When several rules match (`secrets/**` → `secret`,
+`secrets/prod/**` → `top-secret`) the resource takes the least upper bound of the
+matched labels — the most restrictive applicable label — defaulting to
+`bottom()` (public) when nothing matches. Because the structure is a true bounded
+lattice (§3.1) this join always exists and is unique, so composition is total and
+deterministic regardless of rule order. In the two-point lattice this collapses
+to exactly today's "matches any protected glob? → protected, else public".
 
 ### 3.3 Clearance
 
@@ -182,23 +203,52 @@ bitflags! {
     pub struct Capability: u8 { const READ = 0b01; const WRITE = 0b10; }
 }
 
-/// A single grant: "cleared up to `ceiling`, for these capabilities."
-/// Downward-closed: holding `ceiling = L` clears the actor for every label `L`
-/// dominates (the down-set of L).
+/// A single grant: "cleared up to `ceiling`, for these capabilities,
+/// optionally only within `scope`."
+/// Downward-closed in the lattice: holding `ceiling = L` clears the actor for
+/// every label `L` dominates (the down-set of L).
+///
+/// `scope` (LOCKED, decision O6 / 2026-06-29) makes glob/timeline scoping a
+/// **native** clearance property, not just compat sugar: a grant can be both
+/// label-bounded AND resource-scoped, e.g. "Write at label `secret`, but only
+/// under `src/**`". `None` scope = applies to every resource at/under `ceiling`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Clearance { pub ceiling: Label, pub cap: Capability }
+pub struct Clearance {
+    pub ceiling: Label,
+    pub cap: Capability,
+    pub scope: Option<ClearanceScope>,
+}
+
+/// Optional resource scope on a clearance. A scope restricts which resources the
+/// clearance applies to; it never widens the label bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClearanceScope {
+    Path(String),       // glob, matched with acl::glob::glob_matches
+    Timeline(String),   // pattern
+    Secret(String),     // secret name / id
+}
 
 /// What an actor holds. The union of the down-sets of its clearances, split by
-/// capability. Represented as an antichain of ceilings rather than the
-/// enumerated set, so it is O(grants) not O(labels).
+/// capability and constrained by per-clearance scope. Represented as an
+/// antichain of ceilings rather than the enumerated set, so it is O(grants) not
+/// O(labels).
+///
+/// `confined` (LOCKED, decision O1 / 2026-06-29) opts the whole actor into the
+/// no-write-down `*`-property defined in §4.2 — intended for untrusted agents.
+/// Default `false`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ClearanceSet { pub clearances: Vec<Clearance> }
+pub struct ClearanceSet {
+    pub clearances: Vec<Clearance>,
+    pub confined: bool,
+}
 ```
 
-A `PathRole { glob, Read }` of today maps to: the rule `glob → protected` plus a
-`Clearance { ceiling: protected, cap: READ }`. The glob lives in the rule (it is
-"what is sensitive"); the capability lives in the clearance (it is "who may
-touch it"). This split is the crux of the de-confusion.
+A `PathRole { glob, Read }` of today lowers natively into a single scoped
+`Clearance { ceiling: protected, cap: READ, scope: Some(Path(glob)) }` — no
+special-case compat layer needed (§7.2 is simplified accordingly). The label
+bound lives in `ceiling` ("how sensitive"), the verb in `cap` ("read vs write"),
+and the resource selector in `scope` ("which resources"). This split is the crux
+of the de-confusion.
 
 ### 3.4 Content-addressed policy objects
 
@@ -269,38 +319,97 @@ objects + policy ref, not a parallel source of truth:
 
 ## 4. Evaluation rules
 
-### 4.1 Read rule (locked by foundations: confidentiality dominance)
-
-> An actor may **read** a resource iff it holds a **Read-capable** clearance
-> whose ceiling **dominates** the resource's effective label.
+A clearance is now scoped (§3.3), so evaluation matches against both the
+resource's **effective label** and its **identity** (`ResourceRef`):
 
 ```rust
-fn can_read(&self, resource_label: &Label) -> bool {
+/// Identifies the concrete resource being checked, for scope matching.
+pub enum ResourceRef<'a> { Path(&'a str), Timeline(&'a str), Secret(&'a str) }
+
+/// A scoped clearance *applies* to a resource iff its scope is absent or matches
+/// the resource's kind and selector.
+fn scope_applies(scope: &Option<ClearanceScope>, r: ResourceRef) -> bool {
+    match (scope, r) {
+        (None, _) => true,
+        (Some(ClearanceScope::Path(g)),     ResourceRef::Path(p))     => glob_matches(g, p),
+        (Some(ClearanceScope::Timeline(g)), ResourceRef::Timeline(t)) => glob_matches(g, t),
+        (Some(ClearanceScope::Secret(s)),   ResourceRef::Secret(n))   => glob_matches(s, n),
+        _ => false, // a path-scoped clearance never applies to a timeline, etc.
+    }
+}
+```
+
+### 4.1 Read rule (locked by foundations: confidentiality dominance)
+
+> An actor may **read** a resource iff it holds a **Read-capable** clearance that
+> **applies in scope** and whose ceiling **dominates** the resource's effective
+> label.
+
+```rust
+fn can_read(&self, label: &Label, r: ResourceRef) -> bool {
     self.clearances.iter().any(|c|
         c.cap.contains(Capability::READ) &&
-        self.lattice.dominates(&c.ceiling, resource_label))
+        scope_applies(&c.scope, r) &&
+        self.lattice.dominates(&c.ceiling, label))
 }
 ```
 
 This is "no read up": you cannot read a resource more restrictive than your
 clearance. In the two-point lattice, `dominates(protected, protected)` requires a
 clearance ceiling of `protected`; an actor with only `public` (the empty/default
-`Accessor`) cannot read protected paths — identical to today.
+`Accessor`) cannot read protected paths — identical to today. `confined` does not
+affect reads.
 
-### 4.2 Write rule — **chosen: clearance-dominates (capped), with flow enforced separately**
+### 4.2 Write rule — **chosen: clearance-dominates (capped, scoped), with optional confinement and flow enforced separately**
 
-> An actor may **write** a resource iff it holds a **Write-capable** clearance
-> whose ceiling **dominates** the resource's effective label.
+> **Base rule (all actors).** An actor may **write** a resource iff it holds a
+> **Write-capable** clearance that **applies in scope** and whose ceiling
+> **dominates** the resource's effective label.
+>
+> **Confinement rule (LOCKED, decision O1 / 2026-06-29; applies only when the
+> actor's `ClearanceSet.confined == true`).** A confined actor may additionally
+> **not** write any resource whose effective label it *strictly* dominates. It
+> may only write at-or-incomparable labels (equal to, or unordered against, every
+> label its clearances reach), never strictly downward — the Bell–LaPadula
+> `*`-property restricted to this actor.
 
 ```rust
-fn can_write(&self, resource_label: &Label) -> bool {
-    self.clearances.iter().any(|c|
+fn can_write(&self, label: &Label, r: ResourceRef) -> bool {
+    // Base: some write-capable, in-scope clearance dominates the label.
+    let dominated = self.clearances.iter().any(|c|
         c.cap.contains(Capability::WRITE) &&
-        self.lattice.dominates(&c.ceiling, resource_label))
+        scope_applies(&c.scope, r) &&
+        self.lattice.dominates(&c.ceiling, label));
+    if !dominated { return false; }
+
+    // Confinement (*-property): forbid declassifying writes — writing to a
+    // resource strictly below this actor's reach. `strictly_dominates(a, b)` is
+    // `dominates(a, b) && a != b`. A confined actor may only write where some
+    // write-capable clearance is at-or-incomparable to the target label.
+    if self.clearances.confined {
+        let writes_down = self.clearances.iter().all(|c|
+            !c.cap.contains(Capability::WRITE)
+            || self.lattice.strictly_dominates(&c.ceiling, label));
+        if writes_down { return false; }
+    }
+    true
 }
 ```
 
-**The three candidates and why this one:**
+Precisely: a confined actor is denied a write whenever **every** write-capable
+clearance it holds *strictly* dominates the target label (i.e. the target sits
+strictly below all of the actor's write reach — the definition of writing down).
+It is allowed when at least one write-capable clearance has a ceiling **equal to**
+or **incomparable with** the target label. Reads are unaffected; default
+(`confined == false`) actors use the base rule only. This is the intended
+containment for **untrusted agents**: an agent cleared to *read* `secret` cannot
+launder that content into a `public` path, because writing `public` (strictly
+below `secret`) is denied. It **composes with, and does not replace,**
+`check_merge`'s confidentiality leak scan (§6): per-write confinement stops an
+agent authoring a declassifying snapshot in the first place, while the merge scan
+remains the cross-timeline flow backstop for all actors including unconfined ones.
+
+**The three candidates and why the base rule is clearance-dominates:**
 
 - **Biba / integrity "no write up"** (a low subject can't write a high object,
   on an *integrity* lattice). Rejected as the core rule: bole has exactly one
@@ -340,15 +449,16 @@ fn can_write(&self, resource_label: &Label) -> bool {
   rule) vs *may protected content move to a less-protected place* (the flow /
   merge check + hooks).
 
-**Security note (honest tradeoff, surfaced as O1).** Clearance-dominates does
-not by itself prevent a *malicious* high-cleared actor from declassifying (read
-`secret`, write the bytes into a `public` path). That is intentional: bole's
-threat model is mistakes and least-privilege, not a confined adversary, and the
-write rule that would prevent it (strict no-write-down) is unusable for everyday
-multi-level work. For untrusted automation we offer an **optional** per-clearance
-`confined` flag (future, see O1) that *additionally* enforces no-write-down for
-that actor only — opt-in containment without taxing normal users. The
-cross-resource leak case (merge) stays covered by `check_merge`.
+**Security note (the tradeoff and how confinement closes it).** The *base*
+clearance-dominates rule does not by itself prevent a *malicious* high-cleared
+actor from declassifying (read `secret`, write the bytes into a `public` path):
+bole's default threat model is mistakes and least-privilege, not a confined
+adversary, and forcing strict no-write-down on *everyone* is unusable for
+everyday multi-level work (a `secret`-cleared developer must still edit the public
+README). The locked answer is the per-actor `confined` opt-in defined above:
+untrusted actors (agents) get strict no-write-down, normal users keep the base
+rule. The cross-resource leak case (merge) stays covered by `check_merge` for all
+actors regardless of confinement.
 
 ### 4.3 How the Accessor evaluates against a resource's labels
 
@@ -361,24 +471,36 @@ pub struct Accessor {
 
 impl Accessor {
     pub fn can_read_path(&self, path: &str) -> bool {
-        self.can_read(&self.rules.label_for_path(&self.lattice, path))
+        self.can_read(&self.rules.label_for_path(&self.lattice, path),
+                      ResourceRef::Path(path))
     }
     pub fn can_write_path(&self, path: &str) -> bool {
-        self.can_write(&self.rules.label_for_path(&self.lattice, path))
+        self.can_write(&self.rules.label_for_path(&self.lattice, path),
+                       ResourceRef::Path(path))
     }
     pub fn can_read_timeline(&self, name: &str) -> bool {
-        self.can_read(&self.rules.label_for_timeline(&self.lattice, name))
+        self.can_read(&self.rules.label_for_timeline(&self.lattice, name),
+                      ResourceRef::Timeline(name))
     }
     pub fn can_write_timeline(&self, name: &str) -> bool {
-        self.can_write(&self.rules.label_for_timeline(&self.lattice, name))
+        self.can_write(&self.rules.label_for_timeline(&self.lattice, name),
+                       ResourceRef::Timeline(name))
+    }
+    /// New, for WS3's resolve_overlay: gate a secret by its Secret-rule label.
+    pub fn can_read_secret(&self, name: &str) -> bool {
+        self.can_read(&self.rules.label_for_secret(&self.lattice, name),
+                      ResourceRef::Secret(name))
     }
     /// Read-everything, no write — the privileged() of today.
     pub fn privileged(lattice: Arc<LabelLattice>, rules: Arc<LabelRuleSet>) -> Self;
 }
 ```
 
-The four `can_*` method names and semantics are preserved so `repo/mod.rs` call
-sites are untouched except for how the `Accessor` is constructed (§6, §7).
+The four legacy `can_*_path`/`can_*_timeline` method names and semantics are
+preserved so `repo/mod.rs` call sites are untouched except for how the `Accessor`
+is constructed (§6, §7); `can_read_secret` is additive for WS3. All of them honor
+both the clearance scope and the `confined` flag automatically because they
+delegate to the scoped `can_read`/`can_write` core.
 
 ---
 
@@ -523,9 +645,18 @@ No call-site signatures in `repo/mod.rs` change. `Accessor` keeps its four
 - **`advance_timeline`** → write-cap check on the timeline label, then per-path
   write-cap check (both via the new dominance rule), then the inline
   `TimelinePolicy` `match` is **replaced** by `registry.evaluate(Advance{…})`.
-  `PolicyDecision::Deny` → `Error::PolicyViolation` (same error type as today);
-  `RequiresApproval` → `Error::PolicyViolation` with the approval reason (or a
-  new `Error::ApprovalRequired` — O2).
+  Because the per-path write check now flows through the scoped/confined
+  `can_write` core (§4.2), a `confined` agent cannot advance a timeline with a
+  snapshot that contains a declassifying write — the down-write is rejected here,
+  before the head moves. `PolicyDecision::Deny` → `Error::PolicyViolation` (same
+  error type as today); `RequiresApproval` → `Error::PolicyViolation` with the
+  approval reason (or a new `Error::ApprovalRequired` — O2).
+
+- **`compute_workspace_view`** → unchanged shape, but env-overlay resolution now
+  gates each `EnvValue::Secret(id)` through `accessor.can_read_secret(name)` using
+  `LabelRule::Secret` (decision #4). This is the seam WS3's `resolve_overlay`
+  builds on; default (no secret rules) leaves every secret at `public`, so current
+  behaviour is preserved.
 
 ---
 
@@ -555,25 +686,20 @@ lattice; nothing is deleted in this WS.
   with `cover {(public, protected)}`, and an empty rule set.
 - `AclStore::set_path_acl { glob }` ≡ insert `LabelRule::Path { glob, protected }`.
   `path_is_protected(p)` ≡ `label_for_path(p) == protected`.
-- `Accessor::with_path_role(PathRole { glob, Read })` ≡ ensure the rule
-  `glob → protected` exists *and* add `Clearance { ceiling: protected,
-  cap: READ }`. (In the builder, the glob in the role is what selects which
-  resources the clearance covers; the two-point model has only one non-trivial
-  label, so any protected resource the role's glob matches is covered. The
-  builder records the (glob, permission) pair and the new evaluator treats a
-  `protected` resource as readable iff some Read role's glob matches it — exactly
-  the current semantics, now phrased as: clearance for `protected` gated by the
-  role glob.)
-- `Accessor::privileged()` ≡ a Read clearance with ceiling = lattice top over
-  all rules — read everything, no write, as today.
+- `Accessor::with_path_role(PathRole { glob, perm })` lowers **natively** (no
+  special case, decision O6) into a scoped clearance:
+  `Clearance { ceiling: protected, cap: perm.into(), scope: Some(Path(glob)) }`
+  (plus, for `AclStore`-driven protection, the rule `glob → protected`). The
+  role's glob becomes the clearance `scope`; the new scoped evaluator (§4.3)
+  reproduces exactly the current semantics — a `protected` resource is readable
+  iff some Read clearance whose scope-glob matches it dominates `protected`.
+  `TimelineRole` lowers identically with `scope: Some(Timeline(pattern))`.
+- `Accessor::privileged()` ≡ a Read clearance with ceiling = lattice top,
+  `scope: None` — read everything, no write, as today.
 
-> Note: in the full model a clearance is by ceiling label, not by glob. The
-> two-point compatibility layer preserves the *glob-scoped* role behaviour by
-> keeping the role's glob as the selector; the general lattice path uses
-> label-scoped clearances. Both coexist: a role is sugar for "a clearance whose
-> reachable resources are those its glob matches at the `protected` label." This
-> is the one place the compat shim is genuinely a special case, and it is
-> documented as such.
+Because clearance scoping is now a first-class field (§3.3), `PathRole` /
+`TimelineRole` are a thin backward-compat *surface* that lowers losslessly into
+scoped clearances; there is no longer any special-case shim in the evaluator.
 
 ### 7.3 Migration mechanics
 
@@ -620,20 +746,32 @@ scope here.
 ## 9. Testing strategy
 
 - **Lattice algebra (property tests):** `dominates` is a partial order
-  (reflexive, antisymmetric, transitive); `join`/`meet` agree with `dominates`;
-  `validate` rejects cycles and missing bottom. Random small lattices.
+  (reflexive, antisymmetric, transitive); `join`/`meet` are total and agree with
+  `dominates`; `validate` **rejects non-bounded-lattice configs** — cycles,
+  missing/duplicate top or bottom, and any pair lacking a unique join/meet
+  (locks O3). Random small lattices including diamonds.
 - **Two-point equivalence (the compat guarantee):** a generated oracle that runs
   the *old* `Accessor`/`AclStore` logic and the *new* engine over the same
   glob/path/role inputs and asserts identical `can_read_path/…` results. This is
   the gate that protects the 247 tests; keep all current `acl` and `repo` tests
-  unmodified and green.
+  unmodified and green. Includes asserting `PathRole`/`TimelineRole` lower to
+  scoped clearances with identical observable behaviour (O6).
 - **Read rule:** no-read-up across ≥3-level chains and a diamond lattice.
-- **Write rule:** clearance-dominates accepts multi-level writers; confirm a
-  `secret`-cleared actor can write `public`; confirm an uncleared actor cannot
-  write `protected`. Negative test documenting that declassification is *not*
-  blocked by the write rule (locks the chosen tradeoff so a future change is a
-  conscious one).
-- **Effective label:** join-of-matches with overlapping rules; default-public.
+- **Write rule (base):** clearance-dominates accepts multi-level writers; confirm
+  an unconfined `secret`-cleared actor can write `public`; confirm an uncleared
+  actor cannot write `protected`.
+- **Write rule (confined, O1):** a `confined` actor cleared to read/write
+  `secret` is **denied** a write to `public` (strict no-write-down); is allowed a
+  write at `secret` (equal) and at an incomparable label; reads are unaffected by
+  `confined`. Includes the agent-laundering scenario: confined agent reads
+  `secret`, attempts to write the bytes to a `public` path → denied at the write,
+  before any merge.
+- **Scoped clearances (O6):** a `Clearance` scoped to `src/**` permits writes
+  under `src/**` but not elsewhere at the same label; a path-scoped clearance
+  never satisfies a timeline check.
+- **Effective label:** JOIN of all matching rules with overlapping path rules;
+  default-public; secret rules (decision #4) label a secret by name and gate
+  `can_read_secret`.
 - **PolicyHook:** `TimelinePolicyHook` reproduces every current
   `advance_timeline` policy test verbatim; `ApprovalHook` blocks then allows a
   `release/**` merge as approvals accrue; most-restrictive composition of two
@@ -645,15 +783,33 @@ scope here.
 
 ---
 
-## 10. Open questions (need the maintainer's call — not silently decided)
+## 10. Resolved decisions (maintainer, 2026-06-29)
 
-- **O1 — Declassification containment.** The chosen write rule
-  (clearance-dominates) deliberately does *not* stop a high-cleared actor from
-  copying protected content into a public path; cross-resource leaks are caught
-  only at merge. Do we ship the optional per-clearance **`confined` (strict
-  no-write-down)** flag in WS1 for untrusted agents, defer it to WS3
-  (secrets/env, where agent confinement lives), or not build it? *Recommendation:
-  reserve the field now, implement in WS3.*
+These were open forks; the maintainer has locked them and they are now folded
+into the body above. One-line rationale each.
+
+- **O3 — TRUE bounded lattice (not a general poset).** §3.1, §3.2. *Rationale:
+  guaranteeing a unique join/meet for every pair makes effective-label
+  composition total and order-independent — a resource matching multiple rules
+  takes the JOIN of the matched labels — and lets clearance/evaluation rely on
+  meet/join existing without `Option`.*
+- **O1 — SHIP the `confined` / no-write-down opt-in now.** §3.3 (`ClearanceSet.confined`),
+  §4.2 (write predicate). *Rationale: declassification by a high-cleared actor is
+  a real risk for untrusted agents; the opt-in gives strict `*`-property
+  containment for those actors without taxing normal multi-level users, and it
+  composes with `check_merge`'s leak scan rather than replacing it.*
+- **O6 — NATIVE glob/timeline-scoped clearances.** §3.3 (`Clearance.scope`,
+  `ClearanceScope`), §4 (scope-aware evaluation), §7.2 (roles lower into scoped
+  clearances). *Rationale: a grant should be able to be both label-bounded and
+  resource-scoped natively; this also removes the only special-case compat shim,
+  since `PathRole`/`TimelineRole` now lower losslessly.*
+- **#4 — `LabelRule::Secret` kind.** §3.2 (`LabelRule::Secret`,
+  `label_for_secret`), §4.3 (`can_read_secret`). *Rationale: makes secrets
+  first-class in the label model so WS3's `resolve_overlay` gates secret values
+  through the same clearance check as paths/timelines instead of a separate
+  secret-ACL path.*
+
+## 11. Open questions (still need the maintainer's call — deferred)
 
 - **O2 — How `RequiresApproval` surfaces from `advance_timeline`.** `merge` has
   `MergeCheck::RequiresApproval`, but `advance_timeline` returns `Result<()>`.
@@ -661,13 +817,6 @@ scope here.
   `advance_timeline` to return an enum like `check_merge` does? The latter is a
   signature change (touches §7.1's "stays"). *Recommendation: add the error
   variant; keep the signature.*
-
-- **O3 — Must the order be a true lattice, or a general poset?** A real lattice
-  guarantees `join`/`meet` exist (well-defined "most restrictive of matching
-  rules"). A bare poset is more flexible but makes effective-label undefined when
-  two matching rules have no upper bound. *Recommendation: require a true lattice
-  (`validate` enforces unique bottom + existing joins); reject configs that
-  aren't.* Confirm.
 
 - **O4 — Approval / signature attestation format.** The two-approval hook needs a
   way to record and verify approvals. This overlaps WS5's signing/authority
@@ -682,12 +831,3 @@ scope here.
   warn-and-skip. Pure-data hooks (a small expression language) would remove the
   "unknown kind" problem but are a much larger surface. *Recommendation:
   fail-closed on unknown hook kinds; revisit a policy DSL post-WS5.*
-
-- **O6 — Clearance scoping in the general model.** The two-point compat layer
-  keeps role *globs* as selectors (§7.2). In the full lattice, is a clearance
-  purely label-scoped (`ceiling` only), or do we also support glob-scoped
-  clearances natively (e.g. "Write, but only under `src/**`, at label `secret`")?
-  The former is cleaner; the latter is what some current roles express.
-  *Recommendation: label-scoped clearances are canonical; glob-scoped roles
-  remain a compat-only sugar.* Confirm whether native glob-scoped clearances are
-  wanted long-term.

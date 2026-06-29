@@ -19,6 +19,28 @@ the cross-cutting model.
    surface, and the 247 passing tests must keep working. New models are
    introduced as supersets with documented migrations, not breaking rewrites.
 
+### WS1 access-model decisions (locked 2026-06-29)
+
+These resolve the WS1 gating questions; the WS1 spec carries the detail.
+
+- **True lattice, not a general poset.** Labels form a bounded lattice with a
+  unique join and meet for every pair. A resource matching multiple label rules
+  takes the **join** of the matched labels.
+- **Ship `confined` / no-write-down now.** A `confined` actor may not write to
+  any resource whose label it strictly dominates (no declassification downward),
+  on top of the default clearance-dominates write rule. For untrusted agents;
+  composes with `check_merge`'s leak scan.
+- **Native glob-scoped clearances.** A clearance may carry an optional
+  path-glob / timeline-pattern scope. The existing `PathRole`/`TimelineRole`
+  lower into scoped clearances for backward compatibility.
+- **`LabelRule::Secret` ratified.** Secrets are first-class in the label model
+  (label-by-name/id), alongside path-glob and timeline-pattern rules; WS3's
+  `resolve_overlay` relies on it.
+
+Still open (deferred by the maintainer): how `RequiresApproval` surfaces from
+`advance_timeline` (WS1-O2), attestation/signature format (WS1-O4, overlaps
+WS5), and fail-closed behavior on unknown hook kinds across replicas (WS1-O5).
+
 ## Vocabulary — access & policy (WS1, referenced by WS3/WS5/WS6/WS7)
 
 - **Label** — an opaque marker drawn from a partial order. The order is declared
