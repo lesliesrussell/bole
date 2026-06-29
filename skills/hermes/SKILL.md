@@ -71,6 +71,16 @@ target · 64 hex chars = object id · `<name>` = timeline head or tag target.
 segments, including mid-pattern (`a/**/z`); trailing `**` is descendants-only
 (`src/**` ≠ bare `src`); matching is case-sensitive.
 
+## In-process agents (library, not CLI)
+
+If you drive the bole **library** directly (Rust, in-process) instead of the
+CLI, you can work entirely in RAM: `Repository::memory()` plus
+`repo.ephemeral_workspace()` (or `ephemeral_workspace_from(snapshot)`) gives a
+`read`/`write`/`remove`/`diff`/`commit` worktree over in-memory buffers — no
+`.bole/`, no filesystem. `commit` returns a snapshot id (it does not move a
+timeline; call `advance_timeline` for that). See `docs/API.md` → *In-memory
+workspaces*.
+
 ## When unsure
 
 Run `bole <command> --help`, or read `docs/CLI.md` (full reference) and
