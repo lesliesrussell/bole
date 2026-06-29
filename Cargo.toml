@@ -21,6 +21,8 @@ thiserror = "1"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 gix = { version = "0.70", default-features = false, features = ["max-performance-safe"] }
+# bole-fo2
+bitflags = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

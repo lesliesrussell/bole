@@ -1,5 +1,7 @@
 // bole-mhs
 pub mod backend;
+// bole-fo2
+pub mod clearance;
 pub mod disk;
 pub mod glob;
 pub mod memory;
