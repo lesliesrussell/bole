@@ -14,7 +14,11 @@ use crate::error::Result;
 use backend::AclBackend;
 use glob::glob_matches;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+// bole-fo2
+use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+use crate::acl::lattice::{Label, LabelLattice};
+use crate::acl::rules::{LabelRule, LabelRuleSet};
+use std::sync::Arc;
 
 // bole-p8u
 /// Whether a role grants read or write access.
@@ -70,84 +74,189 @@ pub struct TimelineAcl {
     pub pattern: String,
 }
 
-// bole-mhs
-// bole-p8u
-/// The set of path and timeline roles held by a single actor.
+// bole-fo2
+/// Converts the legacy permission enum into the orthogonal capability bit.
+impl From<Permission> for Capability {
+    fn from(p: Permission) -> Self {
+        match p {
+            Permission::Read => Capability::READ,
+            Permission::Write => Capability::WRITE,
+        }
+    }
+}
+
+// bole-fo2
+/// Identifies the concrete resource being checked, for scope matching.
+#[derive(Debug, Clone, Copy)]
+pub enum ResourceRef<'a> {
+    Path(&'a str),
+    Timeline(&'a str),
+    Secret(&'a str),
+}
+
+// bole-fo2
+/// A scoped clearance *applies* to a resource iff its scope is absent or matches
+/// the resource's kind and selector.
+fn scope_applies(scope: &Option<ClearanceScope>, r: ResourceRef) -> bool {
+    match (scope, r) {
+        (None, _) => true,
+        (Some(ClearanceScope::Path(g)), ResourceRef::Path(p)) => glob_matches(g, p),
+        (Some(ClearanceScope::Timeline(g)), ResourceRef::Timeline(t)) => glob_matches(g, t),
+        (Some(ClearanceScope::Secret(s)), ResourceRef::Secret(n)) => glob_matches(s, n),
+        _ => false,
+    }
+}
+
+// bole-fo2
+/// The runtime credential and evaluator. Binds a label lattice, a rule set, and
+/// an actor's clearance set, and answers `can_read`/`can_write` for a resource's
+/// effective label and identity.
 ///
-/// `Accessor` is the runtime credential object: it is constructed with the
-/// roles an actor has been granted and then passed to repository operations
-/// that enforce access control.  An empty `Accessor` has no permissions.
-#[derive(Debug, Clone, Default)]
+/// The legacy `new`/`with_path_role`/`with_timeline_role`/`privileged`
+/// constructors lower natively into scoped clearances over the two-point lattice,
+/// preserving the historical glob-ACL behaviour exactly.
+#[derive(Debug, Clone)]
 pub struct Accessor {
-    // bole-p8u
-    /// Path-level grants held by this accessor.
-    pub path_roles: HashSet<PathRole>,
-    // bole-p8u
-    /// Timeline-level grants held by this accessor.
-    pub timeline_roles: HashSet<TimelineRole>,
+    lattice: Arc<LabelLattice>,
+    rules: Arc<LabelRuleSet>,
+    clearances: ClearanceSet,
+}
+
+impl Default for Accessor {
+    fn default() -> Self {
+        Self {
+            lattice: Arc::new(LabelLattice::two_point()),
+            rules: Arc::new(LabelRuleSet::default()),
+            clearances: ClearanceSet::default(),
+        }
+    }
 }
 
 impl Accessor {
-    // bole-p8u
-    /// Creates an `Accessor` with no roles.
-    pub fn new() -> Self { Self::default() }
+    /// Creates an empty `Accessor` over the default two-point lattice: no
+    /// clearances, so it reads/writes nothing until granted a role.
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    // bole-p8u
-    /// Returns `self` with `role` added to the path role set (builder-style).
+    /// Builds an `Accessor` directly from a lattice, rule set, and clearance set
+    /// (the native, label-aware path used by tests and the repository).
+    pub fn from_parts(
+        lattice: Arc<LabelLattice>,
+        rules: Arc<LabelRuleSet>,
+        clearances: ClearanceSet,
+    ) -> Self {
+        Self { lattice, rules, clearances }
+    }
+
+    /// Lowers a `PathRole` into a `protected`-rule + a path-scoped clearance.
     pub fn with_path_role(mut self, role: PathRole) -> Self {
-        self.path_roles.insert(role);
+        let rules = Arc::make_mut(&mut self.rules);
+        rules.rules.push(LabelRule::Path {
+            glob: role.glob.clone(),
+            label: Label::protected(),
+        });
+        self.clearances.clearances.push(Clearance {
+            ceiling: Label::protected(),
+            cap: role.permission.into(),
+            scope: Some(ClearanceScope::Path(role.glob)),
+        });
         self
     }
 
-    // bole-p8u
-    /// Returns `self` with `role` added to the timeline role set (builder-style).
+    /// Lowers a `TimelineRole` into a `protected`-rule + a timeline-scoped clearance.
     pub fn with_timeline_role(mut self, role: TimelineRole) -> Self {
-        self.timeline_roles.insert(role);
+        let rules = Arc::make_mut(&mut self.rules);
+        rules.rules.push(LabelRule::Timeline {
+            pattern: role.pattern.clone(),
+            label: Label::protected(),
+        });
+        self.clearances.clearances.push(Clearance {
+            ceiling: Label::protected(),
+            cap: role.permission.into(),
+            scope: Some(ClearanceScope::Timeline(role.pattern)),
+        });
         self
     }
 
-    // bole-qv5
-    // bole-p8u
-    /// Returns an `Accessor` that can read all paths and all timelines.
-    ///
-    /// Intended for internal repository operations that must bypass per-user
-    /// ACL checks (e.g. walking the full tree during a merge).  Does NOT
-    /// grant write access.
+    /// Read-everything, no write — the privileged() of today. A Read clearance
+    /// with ceiling = lattice top and no scope.
     pub fn privileged() -> Self {
-        Self::new()
-            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read })
-            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Read })
+        let lattice = Arc::new(LabelLattice::two_point());
+        let top = lattice.top();
+        Self {
+            lattice,
+            rules: Arc::new(LabelRuleSet::default()),
+            clearances: ClearanceSet {
+                clearances: vec![Clearance { ceiling: top, cap: Capability::READ, scope: None }],
+                confined: false,
+            },
+        }
     }
 
-    // bole-p8u
-    /// Returns `true` if this accessor holds a `Read` role whose glob matches `path`.
+    /// Read iff some Read-capable, in-scope clearance's ceiling dominates `label`.
+    pub fn can_read(&self, label: &Label, r: ResourceRef) -> bool {
+        self.clearances.clearances.iter().any(|c| {
+            c.cap.contains(Capability::READ)
+                && scope_applies(&c.scope, r)
+                && self.lattice.dominates(&c.ceiling, label)
+        })
+    }
+
+    /// Write iff some Write-capable, in-scope clearance's ceiling dominates
+    /// `label`; for confined actors, additionally forbid writing strictly down.
+    pub fn can_write(&self, label: &Label, r: ResourceRef) -> bool {
+        let dominated = self.clearances.clearances.iter().any(|c| {
+            c.cap.contains(Capability::WRITE)
+                && scope_applies(&c.scope, r)
+                && self.lattice.dominates(&c.ceiling, label)
+        });
+        if !dominated {
+            return false;
+        }
+        if self.clearances.confined {
+            let writes_down = self.clearances.clearances.iter().all(|c| {
+                !c.cap.contains(Capability::WRITE)
+                    || self.lattice.strictly_dominates(&c.ceiling, label)
+            });
+            if writes_down {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True if this accessor may read `path` under its own rule set.
     pub fn can_read_path(&self, path: &str) -> bool {
-        self.path_roles.iter().any(|r|
-            r.permission == Permission::Read && glob_matches(&r.glob, path)
-        )
+        self.can_read(&self.rules.label_for_path(&self.lattice, path), ResourceRef::Path(path))
     }
 
-    // bole-p8u
-    /// Returns `true` if this accessor holds a `Write` role whose glob matches `path`.
+    /// True if this accessor may write `path` under its own rule set.
     pub fn can_write_path(&self, path: &str) -> bool {
-        self.path_roles.iter().any(|r|
-            r.permission == Permission::Write && glob_matches(&r.glob, path)
-        )
+        self.can_write(&self.rules.label_for_path(&self.lattice, path), ResourceRef::Path(path))
     }
 
-    // bole-p8u
-    /// Returns `true` if this accessor holds a `Read` role whose pattern matches the timeline `name`.
+    /// True if this accessor may read timeline `name` under its own rule set.
     pub fn can_read_timeline(&self, name: &str) -> bool {
-        self.timeline_roles.iter().any(|r|
-            r.permission == Permission::Read && glob_matches(&r.pattern, name)
+        self.can_read(
+            &self.rules.label_for_timeline(&self.lattice, name),
+            ResourceRef::Timeline(name),
         )
     }
 
-    // bole-p8u
-    /// Returns `true` if this accessor holds a `Write` role whose pattern matches the timeline `name`.
+    /// True if this accessor may write timeline `name` under its own rule set.
     pub fn can_write_timeline(&self, name: &str) -> bool {
-        self.timeline_roles.iter().any(|r|
-            r.permission == Permission::Write && glob_matches(&r.pattern, name)
+        self.can_write(
+            &self.rules.label_for_timeline(&self.lattice, name),
+            ResourceRef::Timeline(name),
+        )
+    }
+
+    /// New, for WS3's resolve_overlay: gate a secret by its Secret-rule label.
+    pub fn can_read_secret(&self, name: &str) -> bool {
+        self.can_read(
+            &self.rules.label_for_secret(&self.lattice, name),
+            ResourceRef::Secret(name),
         )
     }
 }
@@ -326,5 +435,117 @@ mod tests {
 
         store.remove_timeline_acl("leslie/private/**").unwrap();
         assert!(!store.timeline_is_protected("leslie/private/exp-foo").unwrap());
+    }
+
+    // bole-fo2
+    #[test]
+    fn scoped_read_write_dominance_three_level() {
+        use super::{Accessor, ResourceRef};
+        use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use std::sync::Arc;
+
+        let l = |s: &str| Label(s.into());
+        let lat = Arc::new(LabelLattice::new(
+            [l("public"), l("internal"), l("secret")],
+            [(l("public"), l("internal")), (l("internal"), l("secret"))],
+        ));
+        let clr = ClearanceSet {
+            clearances: vec![Clearance {
+                ceiling: l("secret"),
+                cap: Capability::READ | Capability::WRITE,
+                scope: Some(ClearanceScope::Path("src/**".into())),
+            }],
+            confined: false,
+        };
+        let a = Accessor::from_parts(lat, Arc::new(LabelRuleSet::default()), clr);
+
+        // In scope: read/write up to secret.
+        assert!(a.can_read(&l("internal"), ResourceRef::Path("src/x")));
+        assert!(a.can_write(&l("internal"), ResourceRef::Path("src/x")));
+        assert!(a.can_read(&l("secret"), ResourceRef::Path("src/x")));
+        // Out of scope: nothing.
+        assert!(!a.can_read(&l("secret"), ResourceRef::Path("docs/x")));
+        assert!(!a.can_write(&l("internal"), ResourceRef::Path("docs/x")));
+        // Wrong resource kind never matches a path scope.
+        assert!(!a.can_read(&l("public"), ResourceRef::Timeline("src/x")));
+    }
+
+    // bole-fo2
+    #[test]
+    fn confined_denies_write_down_allows_equal_and_incomparable() {
+        use super::{Accessor, ResourceRef};
+        use crate::acl::clearance::{Capability, Clearance, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use std::sync::Arc;
+
+        let l = |s: &str| Label(s.into());
+        // Diamond: bottom ⊑ {a, b} ⊑ top; a and b incomparable.
+        let lat = Arc::new(LabelLattice::new(
+            [l("bottom"), l("a"), l("b"), l("top")],
+            [
+                (l("bottom"), l("a")),
+                (l("bottom"), l("b")),
+                (l("a"), l("top")),
+                (l("b"), l("top")),
+            ],
+        ));
+        let clr = ClearanceSet {
+            clearances: vec![Clearance {
+                ceiling: l("a"),
+                cap: Capability::READ | Capability::WRITE,
+                scope: None,
+            }],
+            confined: true,
+        };
+        let agent = Accessor::from_parts(lat.clone(), Arc::new(LabelRuleSet::default()), clr);
+
+        // Write-down (a strictly dominates bottom) -> denied for confined.
+        assert!(!agent.can_write(&l("bottom"), ResourceRef::Path("x")));
+        // Write-equal (a == a) -> allowed.
+        assert!(agent.can_write(&l("a"), ResourceRef::Path("x")));
+        // Write-incomparable (a vs b) -> base rule: a does not dominate b, so the
+        // base dominance check already denies it.
+        assert!(!agent.can_write(&l("b"), ResourceRef::Path("x")));
+        // Reads are unaffected by confinement: can read everything a dominates.
+        assert!(agent.can_read(&l("bottom"), ResourceRef::Path("x")));
+        assert!(agent.can_read(&l("a"), ResourceRef::Path("x")));
+    }
+
+    // bole-fo2
+    #[test]
+    fn confined_allows_incomparable_when_clearance_covers_it() {
+        use super::{Accessor, ResourceRef};
+        use crate::acl::clearance::{Capability, Clearance, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use std::sync::Arc;
+
+        let l = |s: &str| Label(s.into());
+        let lat = Arc::new(LabelLattice::new(
+            [l("bottom"), l("a"), l("b"), l("top")],
+            [
+                (l("bottom"), l("a")),
+                (l("bottom"), l("b")),
+                (l("a"), l("top")),
+                (l("b"), l("top")),
+            ],
+        ));
+        // Two write clearances at incomparable ceilings a and b.
+        let clr = ClearanceSet {
+            clearances: vec![
+                Clearance { ceiling: l("a"), cap: Capability::WRITE, scope: None },
+                Clearance { ceiling: l("b"), cap: Capability::WRITE, scope: None },
+            ],
+            confined: true,
+        };
+        let agent = Accessor::from_parts(lat, Arc::new(LabelRuleSet::default()), clr);
+        // Target b: the b-clearance is equal (not strictly dominating), so the
+        // confined no-write-down rule permits it (not every clearance writes down).
+        assert!(agent.can_write(&l("b"), ResourceRef::Path("x")));
+        // Target bottom: BOTH clearances strictly dominate it -> denied.
+        assert!(!agent.can_write(&l("bottom"), ResourceRef::Path("x")));
     }
 }
