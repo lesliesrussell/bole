@@ -313,6 +313,22 @@ impl AclStore {
     pub fn timeline_is_protected(&self, name: &str) -> Result<bool> {
         Ok(self.backend.list_timeline_acls()?.iter().any(|a| glob_matches(&a.pattern, name)))
     }
+
+    // bole-fo2
+    /// Returns the active label lattice (default two-point).
+    pub fn lattice(&self) -> Result<LabelLattice> {
+        self.backend.get_lattice()
+    }
+    // bole-fo2
+    /// Returns the active label rule set (derived from path/timeline ACLs).
+    pub fn label_ruleset(&self) -> Result<LabelRuleSet> {
+        self.backend.get_label_ruleset()
+    }
+    // bole-fo2
+    /// Returns an actor's stored clearance grant, if any.
+    pub fn grant(&self, actor: &str) -> Result<Option<crate::acl::policy_object::ClearanceGrant>> {
+        self.backend.get_grant(actor)
+    }
 }
 
 // bole-mhs

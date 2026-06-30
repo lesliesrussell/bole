@@ -187,4 +187,27 @@ mod tests {
         b.set_path_acl(&acl).unwrap();
         assert_eq!(b.get_path_acl("a/b/**").unwrap(), Some(acl));
     }
+
+    // bole-fo2
+    #[test]
+    fn old_disk_acls_project_into_two_point_ruleset() {
+        use crate::acl::backend::AclBackend;
+        use crate::acl::lattice::Label;
+        use crate::acl::rules::LabelRule;
+        let dir = TempDir::new().unwrap();
+        {
+            let b = DiskAclBackend::open(dir.path()).unwrap();
+            b.set_path_acl(&PathAcl { glob: "secrets/**".into() }).unwrap();
+            b.set_timeline_acl(&TimelineAcl { pattern: "leslie/private/**".into() }).unwrap();
+        }
+        let b2 = DiskAclBackend::open(dir.path()).unwrap();
+        let rs = b2.get_label_ruleset().unwrap();
+        assert!(rs.rules.iter().any(|r| matches!(
+            r, LabelRule::Path { glob, label } if glob == "secrets/**" && *label == Label::protected()
+        )));
+        assert!(rs.rules.iter().any(|r| matches!(
+            r, LabelRule::Timeline { pattern, label }
+                if pattern == "leslie/private/**" && *label == Label::protected()
+        )));
+    }
 }
