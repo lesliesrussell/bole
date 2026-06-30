@@ -31,6 +31,8 @@ pub use env::{EnvOverlay, EnvValue};
 pub use secret::Secret;
 
 use serde::{Deserialize, Serialize};
+// bole-fo2
+use crate::acl::policy_object::PolicyObject;
 
 // bole-p8u
 /// The tagged union of every object type that the store can persist.
@@ -56,4 +58,7 @@ pub enum Object {
     // bole-p8u
     /// A typed bundle of environment variable values.
     EnvOverlay(EnvOverlay),
+    // bole-fo2
+    /// A content-addressed access-policy payload (lattice, rules, grant, or root).
+    Policy(PolicyObject),
 }

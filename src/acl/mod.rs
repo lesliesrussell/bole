@@ -7,6 +7,8 @@ pub mod disk;
 pub mod lattice;
 // bole-fo2
 pub mod rules;
+// bole-fo2
+pub mod policy_object;
 pub mod glob;
 pub mod memory;
 
