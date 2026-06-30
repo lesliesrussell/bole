@@ -3,6 +3,8 @@ pub mod backend;
 // bole-fo2
 pub mod clearance;
 pub mod disk;
+// bole-fo2
+pub mod lattice;
 pub mod glob;
 pub mod memory;
 
