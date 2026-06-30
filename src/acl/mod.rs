@@ -5,6 +5,8 @@ pub mod clearance;
 pub mod disk;
 // bole-fo2
 pub mod lattice;
+// bole-fo2
+pub mod rules;
 pub mod glob;
 pub mod memory;
 
