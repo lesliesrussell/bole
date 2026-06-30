@@ -9,6 +9,8 @@ pub mod lattice;
 pub mod rules;
 // bole-fo2
 pub mod policy_object;
+// bole-fo2
+pub mod hook;
 pub mod glob;
 pub mod memory;
 
