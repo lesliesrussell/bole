@@ -5,6 +5,8 @@ use crate::acl::{PathAcl, TimelineAcl};
 use crate::acl::lattice::{Label, LabelLattice};
 use crate::acl::policy_object::ClearanceGrant;
 use crate::acl::rules::{LabelRule, LabelRuleSet};
+// bole-9mz
+use crate::acl::SecretAcl;
 
 pub trait AclBackend: Send + Sync {
     fn get_path_acl(&self, glob: &str) -> Result<Option<PathAcl>>;
@@ -38,7 +40,28 @@ pub trait AclBackend: Send + Sync {
         for a in self.list_timeline_acls()? {
             rules.push(LabelRule::Timeline { pattern: a.pattern, label: Label::protected() });
         }
+        // bole-9mz
+        for a in self.list_secret_acls()? {
+            rules.push(LabelRule::Secret { name: a.name, label: Label::protected() });
+        }
         Ok(LabelRuleSet { rules })
+    }
+
+    // bole-9mz
+    /// Secret-protection rules. Default empty (no secret is protected). Backends
+    /// that persist secret ACLs override these.
+    fn list_secret_acls(&self) -> Result<Vec<SecretAcl>> {
+        Ok(Vec::new())
+    }
+    // bole-9mz
+    /// Adds or replaces a secret-protection rule. Default no-op.
+    fn set_secret_acl(&self, _acl: &SecretAcl) -> Result<()> {
+        Ok(())
+    }
+    // bole-9mz
+    /// Removes a secret-protection rule by name. Default no-op.
+    fn delete_secret_acl(&self, _name: &str) -> Result<()> {
+        Ok(())
     }
     // bole-fo2
     /// Persist a new rule set. Default no-op (two-point backends derive it).

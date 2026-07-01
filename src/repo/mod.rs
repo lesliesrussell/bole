@@ -27,6 +27,8 @@ use merge::{MergeResult, three_way_diff, find_common_ancestor as lca};
 use crate::refs::Ref;
 // bole-l0i
 use crate::object::EnvValue;
+// bole-9mz
+use crate::crypto::key_provider::{KeyProvider, ProviderChain};
 use workspace::WorkspaceView;
 // bole-3w9
 use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
@@ -498,6 +500,102 @@ impl Repository {
             env.insert(var, resolved);
         }
         Ok(Some(WorkspaceView { files: filtered.visible_paths, env }))
+    }
+
+    // bole-9mz
+    /// Resolve an overlay to a concrete environment, decrypting `Secret` refs
+    /// through `chain`. Access-checked per WS1: each secret entry is gated by the
+    /// effective label of its env-var name (public/bottom is readable by all;
+    /// otherwise the actor must `can_read` it). Fails closed on an uncleared
+    /// secret with `Error::AccessDenied` naming the var but never the value —
+    /// unless `skip_unauthorized`, which omits the var instead. Plain entries are
+    /// always included. Non-UTF-8 secret bytes → `Error::Codec`.
+    pub async fn resolve_overlay(
+        &self,
+        overlay_id: &ObjectId,
+        chain: &ProviderChain,
+        accessor: &Accessor,
+        skip_unauthorized: bool,
+    ) -> Result<BTreeMap<String, String>> {
+        let overlay = self
+            .objects
+            .get_overlay(overlay_id)
+            .await?
+            .ok_or_else(|| Error::Storage(format!("overlay not found: {overlay_id}")))?;
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+        let mut out = BTreeMap::new();
+        for (var, value) in overlay.entries {
+            match value {
+                EnvValue::Plain(s) => {
+                    out.insert(var, s);
+                }
+                EnvValue::Secret(id) => {
+                    let label = rules.label_for_secret(&lattice, &var);
+                    let cleared = label == lattice.bottom()
+                        || accessor.can_read(&label, ResourceRef::Secret(&var));
+                    if !cleared {
+                        if skip_unauthorized {
+                            continue;
+                        }
+                        return Err(Error::AccessDenied(format!(
+                            "not cleared to resolve secret for env var '{var}'"
+                        )));
+                    }
+                    let bytes = self
+                        .objects
+                        .get_secret_resolved(&id, chain)
+                        .await?
+                        .ok_or_else(|| Error::Storage(format!("secret not found: {id}")))?;
+                    let s = String::from_utf8(bytes).map_err(|_| {
+                        Error::Codec(format!("secret for env var '{var}' is not valid UTF-8"))
+                    })?;
+                    out.insert(var, s);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // bole-9mz
+    /// Rotate the master key for the given secret objects: re-wrap each v2
+    /// secret's data key from `old` to `new` (value bytes untouched), and upgrade
+    /// any v1 secret it encounters to v2 under `new`. Returns `(old_id, new_id)`
+    /// for each rekeyed secret (a new wrap ⇒ a new `ObjectId`); callers repoint
+    /// registries/overlays. Old objects are left for WS4 GC.
+    pub async fn rekey(
+        &self,
+        ids: &[ObjectId],
+        old: &ProviderChain,
+        new: &dyn KeyProvider,
+    ) -> Result<Vec<(ObjectId, ObjectId)>> {
+        let mut mapping = Vec::with_capacity(ids.len());
+        for id in ids {
+            let new_id = match self.objects.get(id).await? {
+                Some(Object::SecretV2(s)) => {
+                    let rewrapped = s.rewrap(old, new).await?;
+                    self.objects.put(&Object::SecretV2(rewrapped)).await?
+                }
+                Some(Object::Secret(v1)) => {
+                    // Legacy upgrade: decrypt via a legacy key, re-encrypt as v2.
+                    let mut pt = None;
+                    for k in old.legacy_keys() {
+                        if let Ok(bytes) = v1.decrypt(k) {
+                            pt = Some(bytes);
+                            break;
+                        }
+                    }
+                    let pt = pt.ok_or(Error::DecryptionFailed)?;
+                    self.objects
+                        .put_secret_enveloped(&pt, new, crate::object::SecretAad::v2(None))
+                        .await?
+                }
+                Some(_) => return Err(Error::Codec(format!("not a secret: {id}"))),
+                None => return Err(Error::Storage(format!("secret not found: {id}"))),
+            };
+            mapping.push((*id, new_id));
+        }
+        Ok(mapping)
     }
 }
 
@@ -1290,5 +1388,114 @@ mod tests {
         let _ = BTreeSet::<u8>::new();
         let r2 = repo.check_merge(&source, &dest, &writer).await.unwrap();
         assert_eq!(r2, MergeCheck::Allowed);
+    }
+
+    // bole-9mz
+    #[tokio::test]
+    async fn resolve_overlay_gates_secrets_by_clearance() {
+        use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use crate::acl::{Accessor, SecretAcl};
+        use crate::crypto::key_provider::{LocalKeyProvider, ProviderChain};
+        use crate::object::{EnvOverlay, EnvValue, SecretAad};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let repo = Repository::memory();
+        repo.acls.set_secret_acl(SecretAcl { name: "DB_URL".into() }).unwrap();
+
+        let provider = LocalKeyProvider::new([7u8; 32], "env");
+        let secret_id = repo
+            .objects
+            .put_secret_enveloped(b"postgres://secret", &provider, SecretAad::v2(Some(Label::protected())))
+            .await
+            .unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("LOG_LEVEL".into(), EnvValue::Plain("info".into()));
+        entries.insert("DB_URL".into(), EnvValue::Secret(secret_id));
+        let overlay_id = repo.objects.put_overlay(EnvOverlay { entries }).await.unwrap();
+
+        let chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([7u8; 32], "env")));
+
+        // Uncleared → fail closed, and the value never leaks into the error.
+        let none = Accessor::new();
+        let err = repo.resolve_overlay(&overlay_id, &chain, &none, false).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::AccessDenied(_)), "got {err:?}");
+        assert!(!format!("{err}").contains("postgres"));
+
+        // skip_unauthorized → omit the secret var, keep the plain var.
+        let skipped = repo.resolve_overlay(&overlay_id, &chain, &none, true).await.unwrap();
+        assert_eq!(skipped.get("LOG_LEVEL").map(String::as_str), Some("info"));
+        assert!(!skipped.contains_key("DB_URL"));
+
+        // Cleared (Read up to protected, secret-scoped) → full resolution.
+        let lat = Arc::new(LabelLattice::two_point());
+        let clr = ClearanceSet {
+            clearances: vec![Clearance {
+                ceiling: Label::protected(),
+                cap: Capability::READ,
+                scope: Some(ClearanceScope::Secret("**".into())),
+            }],
+            confined: false,
+        };
+        let cleared = Accessor::from_parts(lat, Arc::new(LabelRuleSet::default()), clr);
+        let env = repo.resolve_overlay(&overlay_id, &chain, &cleared, false).await.unwrap();
+        assert_eq!(env.get("DB_URL").map(String::as_str), Some("postgres://secret"));
+        assert_eq!(env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+    }
+
+    // bole-9mz
+    #[tokio::test]
+    async fn rekey_rotates_master_key_preserving_plaintext() {
+        use crate::crypto::key_provider::{LocalKeyProvider, ProviderChain};
+        use crate::object::SecretAad;
+
+        let repo = Repository::memory();
+        let mk_a = LocalKeyProvider::new([1u8; 32], "env");
+        let id = repo.objects.put_secret_enveloped(b"val", &mk_a, SecretAad::v2(None)).await.unwrap();
+
+        let old = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "env")));
+        let mk_b = LocalKeyProvider::new([2u8; 32], "env");
+        let mapping = repo.rekey(&[id], &old, &mk_b).await.unwrap();
+        assert_eq!(mapping.len(), 1);
+        let (old_id, new_id) = mapping[0];
+        assert_eq!(old_id, id);
+        assert_ne!(new_id, id);
+
+        let new_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "env")));
+        assert_eq!(
+            repo.objects.get_secret_resolved(&new_id, &new_chain).await.unwrap().unwrap(),
+            b"val"
+        );
+        // The old master key can no longer open the rekeyed object.
+        assert!(repo.objects.get_secret_resolved(&new_id, &old).await.is_err());
+    }
+
+    // bole-9mz
+    #[tokio::test]
+    async fn rekey_upgrades_v1_to_v2() {
+        use crate::crypto::key_provider::{LocalKeyProvider, ProviderChain};
+        use crate::object::Object;
+
+        let repo = Repository::memory();
+        let legacy = [4u8; 32];
+        let id = repo.objects.put_secret(b"legacy", &legacy).await.unwrap();
+
+        let mut old = ProviderChain::new();
+        old.push_legacy_key(legacy);
+        let mk = LocalKeyProvider::new([5u8; 32], "env");
+        let mapping = repo.rekey(&[id], &old, &mk).await.unwrap();
+        let (_, new_id) = mapping[0];
+
+        match repo.objects.get(&new_id).await.unwrap().unwrap() {
+            Object::SecretV2(_) => {}
+            other => panic!("expected v2, got {other:?}"),
+        }
+        let chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([5u8; 32], "env")));
+        assert_eq!(
+            repo.objects.get_secret_resolved(&new_id, &chain).await.unwrap().unwrap(),
+            b"legacy"
+        );
     }
 }

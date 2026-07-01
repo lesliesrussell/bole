@@ -48,7 +48,7 @@ pub mod acl;
 pub mod crypto;
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{
-    Accessor, AclStore, PathAcl, PathRole, Permission, TimelineAcl, TimelineRole,
+    Accessor, AclStore, PathAcl, PathRole, Permission, SecretAcl, TimelineAcl, TimelineRole,
 };
 
 pub(crate) mod codec;

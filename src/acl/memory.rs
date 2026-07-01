@@ -1,5 +1,7 @@
 // bole-mhs
 use crate::acl::{backend::AclBackend, PathAcl, TimelineAcl};
+// bole-9mz
+use crate::acl::SecretAcl;
 use crate::error::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -8,6 +10,8 @@ use std::sync::{Arc, RwLock};
 pub struct MemoryAclBackend {
     path_acls: Arc<RwLock<HashMap<String, PathAcl>>>,
     timeline_acls: Arc<RwLock<HashMap<String, TimelineAcl>>>,
+    // bole-9mz
+    secret_acls: Arc<RwLock<HashMap<String, SecretAcl>>>,
 }
 
 impl MemoryAclBackend {
@@ -42,6 +46,20 @@ impl AclBackend for MemoryAclBackend {
     }
     fn list_timeline_acls(&self) -> Result<Vec<TimelineAcl>> {
         Ok(self.timeline_acls.read().unwrap().values().cloned().collect())
+    }
+    // bole-9mz
+    fn list_secret_acls(&self) -> Result<Vec<SecretAcl>> {
+        Ok(self.secret_acls.read().unwrap().values().cloned().collect())
+    }
+    // bole-9mz
+    fn set_secret_acl(&self, acl: &SecretAcl) -> Result<()> {
+        self.secret_acls.write().unwrap().insert(acl.name.clone(), acl.clone());
+        Ok(())
+    }
+    // bole-9mz
+    fn delete_secret_acl(&self, name: &str) -> Result<()> {
+        self.secret_acls.write().unwrap().remove(name);
+        Ok(())
     }
 }
 

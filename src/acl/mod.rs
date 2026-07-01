@@ -78,6 +78,15 @@ pub struct TimelineAcl {
     pub pattern: String,
 }
 
+// bole-9mz
+/// A secret-protection rule: any secret whose env-var name matches `name`
+/// carries the `protected` label, so resolving it requires clearance (WS1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretAcl {
+    /// The glob pattern that identifies protected secret names.
+    pub name: String,
+}
+
 // bole-fo2
 /// Converts the legacy permission enum into the orthogonal capability bit.
 impl From<Permission> for Capability {
@@ -330,6 +339,22 @@ impl AclStore {
     /// Returns an actor's stored clearance grant, if any.
     pub fn grant(&self, actor: &str) -> Result<Option<crate::acl::policy_object::ClearanceGrant>> {
         self.backend.get_grant(actor)
+    }
+
+    // bole-9mz
+    /// Adds or replaces the secret ACL described by `acl`.
+    pub fn set_secret_acl(&self, acl: SecretAcl) -> Result<()> {
+        self.backend.set_secret_acl(&acl)
+    }
+    // bole-9mz
+    /// Removes the secret ACL whose name equals `name`.
+    pub fn remove_secret_acl(&self, name: &str) -> Result<()> {
+        self.backend.delete_secret_acl(name)
+    }
+    // bole-9mz
+    /// Returns all registered secret ACL rules.
+    pub fn list_secret_acls(&self) -> Result<Vec<SecretAcl>> {
+        self.backend.list_secret_acls()
     }
 }
 
