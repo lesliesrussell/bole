@@ -95,6 +95,9 @@ pub struct Repository {
     // bole-p8u
     /// The store for path and timeline ACL protection rules.
     pub acls: AclStore,
+    // bole-fo2
+    /// Declarative policy hook bindings resolved into the registry per call.
+    hooks: Vec<crate::acl::policy_object::HookSpec>,
 }
 
 // bole-1vi
@@ -109,6 +112,8 @@ impl Repository {
             refs: RefStore::new(MemoryRefBackend::new()),
             // bole-9by
             acls: AclStore::new(MemoryAclBackend::new()),
+            // bole-fo2
+            hooks: Vec::new(),
         }
     }
 
@@ -121,14 +126,26 @@ impl Repository {
             refs: RefStore::new(DiskRefBackend::open(root)?),
             // bole-9by
             acls: AclStore::new(DiskAclBackend::open(root)?),
+            // bole-fo2
+            hooks: Vec::new(),
         })
     }
 
     // bole-fo2
-    /// Builds the active policy registry. Always includes the built-in
-    /// `TimelinePolicyHook`; declarative hooks are added in a later task.
-    fn policy_registry(&self) -> PolicyRegistry {
-        PolicyRegistry::new()
+    /// Registers a declarative policy hook binding.
+    pub fn register_hook(&mut self, spec: crate::acl::policy_object::HookSpec) {
+        self.hooks.push(spec);
+    }
+
+    // bole-fo2
+    /// Builds the active policy registry: the built-in `TimelinePolicyHook` plus
+    /// every resolved declarative hook (fail-closed on unknown kinds).
+    fn policy_registry(&self) -> Result<PolicyRegistry> {
+        let mut reg = PolicyRegistry::new();
+        for spec in &self.hooks {
+            reg.push(crate::acl::hook::resolve_hook(spec)?);
+        }
+        Ok(reg)
     }
 
     // bole-p8u
@@ -240,8 +257,31 @@ impl Repository {
                 leaking.push(acl.clone());
             }
         }
+        // bole-fo2
+        // After the leak scan, run registered Merge hooks (most restrictive wins).
+        let registry = self.policy_registry()?;
+        let ctx = PolicyContext {
+            event: PolicyEvent::Merge {
+                source,
+                target: dest,
+                old_head: source_head,
+                result_head: source_head,
+            },
+            accessor,
+            objects: &self.objects,
+            refs: &self.refs,
+            now: 0,
+        };
+        let hook_decision = registry.evaluate(&ctx).await;
+
+        if let PolicyDecision::Deny(_) = hook_decision {
+            return Ok(MergeCheck::Rejected(leaking));
+        }
         if leaking.is_empty() {
-            Ok(MergeCheck::Allowed)
+            match hook_decision {
+                PolicyDecision::RequiresApproval { .. } => Ok(MergeCheck::RequiresApproval(leaking)),
+                _ => Ok(MergeCheck::Allowed),
+            }
         } else if accessor.can_write_timeline(dest.as_str()) {
             Ok(MergeCheck::RequiresApproval(leaking))
         } else {
@@ -352,7 +392,7 @@ impl Repository {
         let timeline = self.refs.get_timeline(name)?.ok_or_else(|| {
             Error::Storage(format!("timeline not found: {}", name.as_str()))
         })?;
-        let registry = self.policy_registry();
+        let registry = self.policy_registry()?;
         let ctx = PolicyContext {
             event: PolicyEvent::Advance {
                 timeline: name,
@@ -1201,5 +1241,54 @@ mod tests {
         let err = repo.advance_timeline(&name, next, &agent).await.unwrap_err();
         assert!(matches!(err, crate::error::Error::AccessDenied(_)), "got {err:?}");
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, base);
+    }
+
+    // bole-fo2
+    #[tokio::test]
+    async fn merge_into_release_requires_two_approvals() {
+        use crate::acl::hook::approval_ref_prefix;
+        use crate::acl::policy_object::HookSpec;
+        use crate::acl::{Accessor, TimelineRole, Permission};
+        use crate::object::{EntryKind, ObjectId, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use crate::MergeCheck;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut repo = Repository::memory();
+        repo.register_hook(HookSpec {
+            kind: "approval".into(),
+            pattern: "release/**".into(),
+            params: BTreeMap::from([("needed".to_string(), 2u64)]),
+        });
+
+        // A clean source (no protected paths) merging into release/1.0.
+        let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("src/lib.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let snap = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into(),
+        }).await.unwrap();
+        let source = RefName::new("feature/x").unwrap();
+        let dest = RefName::new("release/1.0").unwrap();
+        repo.refs.create_timeline(source.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(dest.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let writer = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "release/**".into(), permission: Permission::Write });
+
+        // No approvals yet -> RequiresApproval.
+        let r1 = repo.check_merge(&source, &dest, &writer).await.unwrap();
+        assert!(matches!(r1, MergeCheck::RequiresApproval(_)), "got {r1:?}");
+
+        // Record two approval refs, then -> Allowed.
+        let prefix = approval_ref_prefix(dest.as_str());
+        for approver in ["alice", "bob"] {
+            let rn = RefName::new(format!("{prefix}{approver}")).unwrap();
+            repo.refs.create_tag(rn, ObjectId::new([7u8; 32]), None, 0).unwrap();
+        }
+        let _ = BTreeSet::<u8>::new();
+        let r2 = repo.check_merge(&source, &dest, &writer).await.unwrap();
+        assert_eq!(r2, MergeCheck::Allowed);
     }
 }

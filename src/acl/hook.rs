@@ -1,6 +1,10 @@
 // bole-fo2
 use crate::acl::Accessor;
-use crate::error::Result;
+// bole-fo2
+use crate::error::{Error, Result};
+// bole-fo2
+use crate::acl::glob::glob_matches;
+use crate::acl::policy_object::HookSpec;
 use crate::object::{Object, ObjectId};
 use crate::refs::{RefName, RefStore, TimelinePolicy};
 use crate::store::ObjectStore;
@@ -176,6 +180,79 @@ impl PolicyHook for TimelinePolicyHook {
 }
 
 // bole-fo2
+/// The ref-namespace prefix under which approval attestations for `target` live.
+/// Placeholder storage (O4): real signed attestations are WS5's job.
+pub fn approval_ref_prefix(target: &str) -> String {
+    format!("refs/approval/{}/", target)
+}
+
+// bole-fo2
+/// Counts recorded approval refs for `target`.
+pub fn count_approvals(refs: &RefStore, target: &str) -> Result<u32> {
+    let prefix = approval_ref_prefix(target);
+    let n = refs.list(&prefix)?.len();
+    Ok(n as u32)
+}
+
+// bole-fo2
+/// "Merges into `<pattern>` need `needed` approvals." Checks `Merge` events whose
+/// target matches `pattern`; blocks until enough approval refs exist.
+pub struct ApprovalHook {
+    pub pattern: String,
+    pub needed: u32,
+}
+
+#[async_trait::async_trait]
+impl PolicyHook for ApprovalHook {
+    fn name(&self) -> &str {
+        "approval"
+    }
+
+    async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
+        if let PolicyEvent::Merge { target, .. } = &ctx.event {
+            if glob_matches(&self.pattern, target.as_str()) {
+                let approvals = match count_approvals(ctx.refs, target.as_str()) {
+                    Ok(n) => n,
+                    Err(e) => return PolicyDecision::Deny(format!("approval lookup failed: {e}")),
+                };
+                if approvals < self.needed {
+                    return PolicyDecision::RequiresApproval {
+                        reason: format!(
+                            "{} needs {} approvals, has {}",
+                            target.as_str(),
+                            self.needed,
+                            approvals
+                        ),
+                        needed: self.needed - approvals,
+                    };
+                }
+            }
+        }
+        PolicyDecision::Allow
+    }
+}
+
+// bole-fo2
+/// Resolves a declarative `HookSpec` into a hook instance. Fail-closed: an
+/// unknown `kind` is rejected rather than silently skipped (decision O5).
+pub fn resolve_hook(spec: &HookSpec) -> Result<Box<dyn PolicyHook>> {
+    match spec.kind.as_str() {
+        "approval" => {
+            let needed = *spec.params.get("needed").unwrap_or(&1) as u32;
+            Ok(Box::new(ApprovalHook {
+                pattern: spec.pattern.clone(),
+                needed,
+            }))
+        }
+        "timeline-policy" => Ok(Box::new(TimelinePolicyHook)),
+        other => Err(Error::PolicyViolation(format!(
+            "unknown policy hook kind '{}' (fail-closed)",
+            other
+        ))),
+    }
+}
+
+// bole-fo2
 #[cfg(test)]
 mod tests {
     use super::{PolicyContext, PolicyDecision, PolicyEvent, PolicyHook, PolicyRegistry, TimelinePolicyHook};
@@ -260,5 +337,28 @@ mod tests {
             accessor: &accessor, objects: &objects, refs: &refs, now: 0,
         };
         assert!(matches!(hook.check(&ctx_non).await, PolicyDecision::Deny(_)));
+    }
+
+    // bole-fo2
+    #[tokio::test]
+    async fn approval_hook_blocks_then_allows() {
+        use super::{approval_ref_prefix, ApprovalHook};
+        let objects = ObjectStore::new(MemoryBackend::new());
+        let refs = RefStore::new(MemoryRefBackend::new());
+        let source = RefName::new("feature/x").unwrap();
+        let target = RefName::new("release/1.0").unwrap();
+        let accessor = Accessor::privileged();
+        let head = objects.put_tree(BTreeMap::new()).await.unwrap();
+
+        let hook = ApprovalHook { pattern: "release/**".into(), needed: 1 };
+        let ctx = PolicyContext {
+            event: PolicyEvent::Merge { source: &source, target: &target, old_head: head, result_head: head },
+            accessor: &accessor, objects: &objects, refs: &refs, now: 0,
+        };
+        assert!(matches!(hook.check(&ctx).await, PolicyDecision::RequiresApproval { .. }));
+
+        let rn = RefName::new(format!("{}alice", approval_ref_prefix(target.as_str()))).unwrap();
+        refs.create_tag(rn, head, None, 0).unwrap();
+        assert_eq!(hook.check(&ctx).await, PolicyDecision::Allow);
     }
 }
