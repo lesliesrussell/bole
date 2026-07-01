@@ -13,6 +13,8 @@ pub mod policy_object;
 pub mod hook;
 // bole-0tp
 pub mod authority;
+// bole-fz1
+pub mod attestation;
 pub mod glob;
 pub mod memory;
 

@@ -57,6 +57,11 @@ pub use acl::authority::{
     reconcile, verify_chain, PolicyResolution, PolicySigner, PolicyVerdict, RootSignature,
     SignatureStore, TrustAnchor, TrustStore,
 };
+// bole-fz1
+pub use acl::attestation::{
+    count_valid_approvals, verify_attestation, Approver, ApproverRegistry, Attestation,
+    AttestationSigner, SignedApprovalHook,
+};
 
 pub(crate) mod codec;
 

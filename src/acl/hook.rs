@@ -180,14 +180,23 @@ impl PolicyHook for TimelinePolicyHook {
 }
 
 // bole-fo2
-/// The ref-namespace prefix under which approval attestations for `target` live.
-/// Placeholder storage (O4): real signed attestations are WS5's job.
+/// The ref-namespace prefix under which placeholder approval refs for `target`
+/// live.
+///
+/// **Superseded by [`crate::acl::attestation`] (bole-fz1):** a bare ref cannot
+/// prove *who* approved or *which head*. Prefer signed [`Attestation`]s counted
+/// by [`count_valid_approvals`]. This ref-counting path remains only for the
+/// `HookSpec`-resolvable `"approval"` hook kind.
+///
+/// [`Attestation`]: crate::acl::attestation::Attestation
+/// [`count_valid_approvals`]: crate::acl::attestation::count_valid_approvals
 pub fn approval_ref_prefix(target: &str) -> String {
     format!("refs/approval/{}/", target)
 }
 
 // bole-fo2
-/// Counts recorded approval refs for `target`.
+/// Counts recorded placeholder approval refs for `target`. Superseded by
+/// [`crate::acl::attestation::count_valid_approvals`] (verifies signatures).
 pub fn count_approvals(refs: &RefStore, target: &str) -> Result<u32> {
     let prefix = approval_ref_prefix(target);
     let n = refs.list(&prefix)?.len();
@@ -195,8 +204,11 @@ pub fn count_approvals(refs: &RefStore, target: &str) -> Result<u32> {
 }
 
 // bole-fo2
-/// "Merges into `<pattern>` need `needed` approvals." Checks `Merge` events whose
-/// target matches `pattern`; blocks until enough approval refs exist.
+/// "Merges into `<pattern>` need `needed` approvals", counted as bare refs.
+///
+/// **Superseded by [`crate::acl::attestation::SignedApprovalHook`]** (bole-fz1),
+/// which requires distinct *signed* approvals of the exact result head. This
+/// unsigned variant is retained only for the `HookSpec`-resolvable path.
 pub struct ApprovalHook {
     pub pattern: String,
     pub needed: u32,
