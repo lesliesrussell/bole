@@ -8,7 +8,8 @@ use clap::Subcommand;
 
 use crate::context::{Pointer, RepoContext};
 use crate::output::Output;
-use crate::{resolve, worktree, worktrees};
+use bole::{DiskWorkspace, Workspace};
+use crate::{resolve, worktrees};
 
 /// Workspace subcommands.
 #[derive(Subcommand)]
@@ -137,9 +138,9 @@ async fn show(ctx: &RepoContext, out: &Output) -> Result<()> {
     // Pending changes against the bound head.
     let pending = match head {
         Some(h) => {
-            let base = worktree::snapshot_blobs(&ctx.repo.objects, h).await?;
-            let target = worktree::collect_blobs(&ctx.repo.objects, &ctx.work_dir).await?;
-            Some(worktree::diff(&base, &target))
+            // bole-1kz
+            let ws = DiskWorkspace::bound(&ctx.repo, &ctx.work_dir, h);
+            Some(ws.diff().await?)
         }
         None => None,
     };
@@ -189,9 +190,9 @@ async fn diff(ctx: &RepoContext, out: &Output) -> Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("no timeline bound; use `bole workspace open <timeline>`"))?;
     let head = resolve::timeline_head(ctx, name).await?;
-    let base = worktree::snapshot_blobs(&ctx.repo.objects, head).await?;
-    let target = worktree::collect_blobs(&ctx.repo.objects, &ctx.work_dir).await?;
-    let d = worktree::diff(&base, &target);
+    // bole-1kz
+    let ws = DiskWorkspace::bound(&ctx.repo, &ctx.work_dir, head);
+    let d = ws.diff().await?;
     out.emit(
         || {
             let mut lines = Vec::new();

@@ -2,7 +2,7 @@
 //! `bole snapshot` — create and inspect snapshots.
 
 use anyhow::{bail, Context as _, Result};
-use bole::{Object, Snapshot};
+use bole::{DiskWorkspace, Object, Snapshot, Workspace};
 use clap::Subcommand;
 
 use crate::context::RepoContext;
@@ -90,25 +90,24 @@ async fn create(
         bail!("snapshot create requires --from-workspace");
     }
     let state = ctx.load_state()?;
-    let parents = match &state.current_timeline {
-        Some(name) => vec![resolve::timeline_head(ctx, name).await?],
-        None => vec![],
+    // bole-1kz
+    // A DiskWorkspace bound to the current head is the one model for
+    // "walk the work dir and commit it"; base becomes the sole parent.
+    let base = match &state.current_timeline {
+        Some(name) => Some(resolve::timeline_head(ctx, name).await?),
+        None => None,
     };
-
-    let blobs = worktree::collect_blobs(&ctx.repo.objects, &ctx.work_dir).await?;
-    let root = worktree::build_root_tree(&ctx.repo.objects, &blobs).await?;
-    let snap_id = ctx
-        .repo
-        .objects
-        .put_snapshot(Snapshot {
-            root,
-            parents,
-            author: author.unwrap_or_else(default_author),
-            created_at: resolve::now(),
-            message,
-        })
+    let author = author.unwrap_or_else(default_author);
+    let mut ws = match base {
+        Some(b) => DiskWorkspace::bound(&ctx.repo, &ctx.work_dir, b),
+        None => DiskWorkspace::new(&ctx.repo, &ctx.work_dir),
+    };
+    let snap_id = ws
+        .commit(&author, &message, resolve::now())
         .await
         .context("storing snapshot")?;
+    // bole-1kz
+    let file_count = worktree::snapshot_blobs(&ctx.repo.objects, snap_id).await?.len();
 
     // Advance the bound timeline so the snapshot is reachable, unless opted out.
     let advanced = match &state.current_timeline {
@@ -127,12 +126,12 @@ async fn create(
 
     out.emit(
         || match &advanced {
-            Some(tl) => format!("snapshot {} ({} files), {tl} advanced", short(&snap_id), blobs.len()),
-            None => format!("snapshot {} ({} files)", short(&snap_id), blobs.len()),
+            Some(tl) => format!("snapshot {} ({} files), {tl} advanced", short(&snap_id), file_count),
+            None => format!("snapshot {} ({} files)", short(&snap_id), file_count),
         },
         || serde_json::json!({
             "snapshot": snap_id.to_string(),
-            "files": blobs.len(),
+            "files": file_count,
             "advanced": advanced,
         }),
     );
