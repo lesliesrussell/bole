@@ -12,6 +12,10 @@
 //! bole-6qy / bole-0tp / bole-6h7.
 
 pub mod negotiate;
+// bole-6qy
+pub mod wire;
+pub mod transport;
+pub mod session;
 
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};
