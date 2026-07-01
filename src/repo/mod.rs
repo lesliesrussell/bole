@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use crate::acl::disk::DiskAclBackend;
 use crate::acl::memory::MemoryAclBackend;
-use crate::acl::{Accessor, AclStore, PathAcl, PathRole, Permission};
+use crate::acl::{Accessor, AclStore, PathAcl};
 // bole-fo2
 use crate::acl::ResourceRef;
 use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent, PolicyRegistry};
@@ -977,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn merge_timelines_requires_write_cap() {
         use crate::acl::{Accessor, TimelineRole, Permission};
-        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
         use crate::refs::{RefName, TimelinePolicy};
         use std::collections::BTreeMap;
         use bytes::Bytes;
@@ -1010,7 +1010,7 @@ mod tests {
     #[tokio::test]
     async fn merge_timelines_three_way_diff() {
         use crate::acl::{Accessor, TimelineRole, Permission};
-        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
         use crate::refs::{RefName, TimelinePolicy};
         use std::collections::BTreeMap;
         use bytes::Bytes;
@@ -1120,7 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn advance_timeline_requires_write_cap_on_timeline() {
         use crate::acl::Accessor;
-        use crate::object::{ObjectId, Snapshot, TreeEntry, EntryKind};
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
         use crate::refs::{RefName, TimelinePolicy};
         use std::collections::BTreeMap;
         use bytes::Bytes;

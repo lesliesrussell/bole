@@ -50,7 +50,9 @@ pub struct RepoContext {
     // bole-hrk
     /// Where this worktree's binding is stored (primary or linked).
     state_path: PathBuf,
-    /// `None` for the primary worktree, `Some(id)` for a linked one.
+    /// `None` for the primary worktree, `Some(id)` for a linked one. Recorded as
+    /// part of the worktree model; not read on the current code paths.
+    #[allow(dead_code)]
     pub worktree_id: Option<String>,
 }
 
