@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 use crate::codec;
 use crate::error::Result;
 use crate::object::{Blob, EnvOverlay, Object, ObjectId, Secret, Snapshot, Tree, TreeEntry};
+// bole-9mz
+use crate::object::{SecretAad, SecretV2};
+use crate::crypto::key_provider::{KeyProvider, ProviderChain};
 use backend::StorageBackend;
 
 // bole-p8u
@@ -97,6 +100,42 @@ impl ObjectStore {
         match self.get(id).await? {
             None => Ok(None),
             Some(Object::Secret(s)) => Ok(Some(s.decrypt(key)?)),
+            Some(_) => Err(crate::error::Error::Codec("not a secret".into())),
+        }
+    }
+
+    // bole-9mz
+    /// Envelope-encrypts `plaintext` under `provider` (v2) and stores it.
+    pub async fn put_secret_enveloped(
+        &self,
+        plaintext: &[u8],
+        provider: &dyn KeyProvider,
+        aad: SecretAad,
+    ) -> Result<ObjectId> {
+        let s = SecretV2::encrypt_envelope(plaintext, provider, aad).await?;
+        self.put(&Object::SecretV2(s)).await
+    }
+
+    // bole-9mz
+    /// Fetches and decrypts a secret at `id` using `chain`, resolving both v2
+    /// envelope secrets (via the provider chain) and legacy v1 secrets (via the
+    /// chain's legacy raw keys). Fails closed if nothing in the chain can open it.
+    pub async fn get_secret_resolved(
+        &self,
+        id: &ObjectId,
+        chain: &ProviderChain,
+    ) -> Result<Option<Vec<u8>>> {
+        match self.get(id).await? {
+            None => Ok(None),
+            Some(Object::SecretV2(s)) => Ok(Some(s.decrypt(chain).await?)),
+            Some(Object::Secret(s)) => {
+                for k in chain.legacy_keys() {
+                    if let Ok(pt) = s.decrypt(k) {
+                        return Ok(Some(pt));
+                    }
+                }
+                Err(crate::error::Error::DecryptionFailed)
+            }
             Some(_) => Err(crate::error::Error::Codec("not a secret".into())),
         }
     }
@@ -239,6 +278,41 @@ mod tests {
         let id = crate::object::ObjectId::new([9u8; 32]);
         let got = s.get_secret(&id, &key).await.unwrap();
         assert!(got.is_none());
+    }
+
+    // bole-9mz
+    #[tokio::test]
+    async fn enveloped_secret_roundtrip_and_mixed_chain() {
+        use crate::crypto::key_provider::{LocalKeyProvider, ProviderChain};
+        use crate::object::SecretAad;
+        let s = store();
+
+        // v1 secret under a legacy raw key.
+        let legacy_key = [1u8; 32];
+        let v1_id = s.put_secret(b"legacy-value", &legacy_key).await.unwrap();
+
+        // v2 secrets under two different master keys.
+        let mk_a = LocalKeyProvider::new([2u8; 32], "env");
+        let mk_b = LocalKeyProvider::new([3u8; 32], "env");
+        let a_id = s.put_secret_enveloped(b"a-value", &mk_a, SecretAad::v2(None)).await.unwrap();
+        let b_id = s.put_secret_enveloped(b"b-value", &mk_b, SecretAad::v2(None)).await.unwrap();
+
+        // A chain holding both providers + the legacy key resolves all three.
+        let mut chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "env")));
+        chain.push_provider(Box::new(LocalKeyProvider::new([3u8; 32], "env")));
+        chain.push_legacy_key(legacy_key);
+
+        assert_eq!(s.get_secret_resolved(&v1_id, &chain).await.unwrap().unwrap(), b"legacy-value");
+        assert_eq!(s.get_secret_resolved(&a_id, &chain).await.unwrap().unwrap(), b"a-value");
+        assert_eq!(s.get_secret_resolved(&b_id, &chain).await.unwrap().unwrap(), b"b-value");
+
+        // A chain missing MK-B fails closed on b_id.
+        let short_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "env")));
+        assert!(s.get_secret_resolved(&b_id, &short_chain).await.is_err());
+
+        // Missing object → None.
+        let missing = crate::object::ObjectId::new([9u8; 32]);
+        assert!(s.get_secret_resolved(&missing, &chain).await.unwrap().is_none());
     }
 
     #[tokio::test]

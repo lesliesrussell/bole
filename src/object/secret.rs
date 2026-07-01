@@ -138,6 +138,21 @@ impl SecretV2 {
             .decrypt(nonce, Payload { msg: self.ciphertext.as_slice(), aad: &aad_bytes })
             .map_err(|_| Error::DecryptionFailed)
     }
+
+    /// Master-key rotation: unwrap the DK with `old`, re-wrap it with `new`, and
+    /// return a new `SecretV2` with the SAME `nonce`/`ciphertext`/`aad` — the
+    /// value AEAD is never recomputed (O(1) wrap, not O(bytes) re-encryption).
+    pub async fn rewrap(&self, old: &ProviderChain, new: &dyn KeyProvider) -> Result<SecretV2> {
+        let aad_bytes = self.aad.to_bytes()?;
+        let dk = old.unwrap(&self.wrapped_dk, &aad_bytes).await?;
+        let wrapped_dk = new.wrap_dk(&dk, &aad_bytes).await?;
+        Ok(SecretV2 {
+            wrapped_dk,
+            nonce: self.nonce,
+            ciphertext: self.ciphertext.clone(),
+            aad: self.aad.clone(),
+        })
+    }
 }
 
 // bole-hto
@@ -215,5 +230,24 @@ mod tests {
         y.wrapped_dk = x.wrapped_dk.clone();
         let chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([9u8; 32], "env")));
         assert!(matches!(y.decrypt(&chain).await.unwrap_err(), Error::DecryptionFailed));
+    }
+
+    #[tokio::test]
+    async fn rewrap_preserves_value_bytes_and_plaintext() {
+        let a = LocalKeyProvider::new([1u8; 32], "env");
+        let s = SecretV2::encrypt_envelope(b"val", &a, SecretAad::v2(None)).await.unwrap();
+        let chain_a = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "env")));
+        let b = LocalKeyProvider::new([2u8; 32], "env");
+
+        let s2 = s.rewrap(&chain_a, &b).await.unwrap();
+        // Only the wrap changes; the value AEAD is untouched.
+        assert_eq!(s2.nonce, s.nonce);
+        assert_eq!(s2.ciphertext, s.ciphertext);
+        assert_ne!(s2.wrapped_dk, s.wrapped_dk);
+
+        // Decrypts under the new MK; the old MK can no longer unwrap it.
+        let chain_b = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "env")));
+        assert_eq!(s2.decrypt(&chain_b).await.unwrap(), b"val");
+        assert!(s2.decrypt(&chain_a).await.is_err());
     }
 }
