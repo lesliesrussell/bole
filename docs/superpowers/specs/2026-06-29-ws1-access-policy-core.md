@@ -508,13 +508,20 @@ delegate to the scoped `can_read`/`can_write` core.
 
 ### 5.1 Trait
 
+> **Reconciled with the shipped implementation (bole-43t):** `check` is **async**
+> (`#[async_trait]`), not the synchronous signature originally sketched below.
+> Reproducing the timeline fast-forward rule (`TimelinePolicyHook`) requires
+> walking snapshot ancestry, and `ObjectStore::get` is `async`, so the hook must
+> `.await`. `async_trait` is already a crate dependency. The trait as shipped:
+
 ```rust
 /// A predicate evaluated at a write decision point, for rules the label lattice
 /// cannot express. Hooks run AFTER the label read/write check passes; they can
 /// only further restrict, never widen, access (monotone deny).
+#[async_trait::async_trait]
 pub trait PolicyHook: Send + Sync {
     fn name(&self) -> &str;
-    fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision;
+    async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision;
 }
 
 pub enum PolicyEvent<'a> {
