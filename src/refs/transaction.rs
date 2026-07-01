@@ -30,6 +30,8 @@ pub enum RefOp {
         expires_at: Option<u64>,
     },
     AdvanceHead { name: RefName, new_head: ObjectId },
+    /// Unconditional upsert to an absolute ref value (e.g. remote-tracking refs).
+    Set { name: RefName, value: Ref },
     Delete { name: RefName },
     /// CAS: the ref must currently equal `expected` (`None` = absent).
     Expect { name: RefName, expected: Option<Ref> },
@@ -71,6 +73,10 @@ impl<'a> RefTransaction<'a> {
     }
     pub fn advance_head(&mut self, name: RefName, new_head: ObjectId) -> &mut Self {
         self.ops.push(RefOp::AdvanceHead { name, new_head });
+        self
+    }
+    pub fn set(&mut self, name: RefName, value: Ref) -> &mut Self {
+        self.ops.push(RefOp::Set { name, value });
         self
     }
     pub fn delete_ref(&mut self, name: RefName) -> &mut Self {
@@ -157,6 +163,9 @@ pub(crate) fn resolve(
                 }
                 None => return Err(Error::Storage(format!("ref not found: {}", name.as_str()))),
             },
+            RefOp::Set { name, value } => {
+                overlay.insert(name.clone(), Some(value.clone()));
+            }
             RefOp::Delete { name } => {
                 overlay.insert(name.clone(), None);
             }

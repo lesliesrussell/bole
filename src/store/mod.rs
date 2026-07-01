@@ -99,6 +99,25 @@ impl ObjectStore {
         self.backend.compact().await
     }
 
+    // bole-cy6
+    /// Returns an object's canonical (postcard) bytes — the exact wire/pack
+    /// payload — or `None` if absent. `ObjectId == BLAKE3(these bytes)`.
+    pub async fn get_raw(&self, id: &ObjectId) -> Result<Option<Bytes>> {
+        self.backend.get(id).await
+    }
+
+    // bole-cy6
+    /// Stores canonical bytes under their content id (idempotent). The caller is
+    /// responsible for having verified the bytes decode and self-identify (the
+    /// sync receive path verifies each pack frame before landing).
+    pub async fn put_raw(&self, canonical: &[u8]) -> Result<ObjectId> {
+        let id = codec::object_id(canonical);
+        if !self.backend.exists(&id).await? {
+            self.backend.put(&id, canonical).await?;
+        }
+        Ok(id)
+    }
+
     // bole-81z
     /// Removes every object not in `reachable`, honouring `grace_secs` against
     /// the unix-seconds clock `now`. Returns the number removed. Used by GC.
