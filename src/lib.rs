@@ -44,6 +44,9 @@ pub mod store;
 pub mod repo;
 // bole-mhs
 pub mod acl;
+// bole-9mz
+pub mod crypto;
+pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{
     Accessor, AclStore, PathAcl, PathRole, Permission, TimelineAcl, TimelineRole,
 };
