@@ -1,6 +1,6 @@
 # bole — access-controlled version control for multi-actor workflows
 
-bole is a version control library for multi-actor, access-controlled workflows. Unlike Git — where access control lives outside the repository in a hosting platform or filesystem permissions — bole encodes actor identities, visibility labels, and operation policies as first-class objects in the same content-addressed store as your files and history. That means a real **label lattice** with scoped clearances, **ACL-filtered snapshot views**, **policy-hook-gated** timeline advancement and merges, and **envelope-encrypted secrets** stored alongside source files with access gated by the same rules — making bole a foundation for agent-safe workflows where every actor's capability is declared, enforced, and auditable without a separate service. Distributed sync (content-addressed pack transfer with compare-and-swap on heads) and a git import/export round-trip make it interoperable; networked transports, signed policy verification, and KMS integration are the active roadmap.
+bole is a version control library for multi-actor, access-controlled workflows. Unlike Git — where access control lives outside the repository in a hosting platform or filesystem permissions — bole encodes actor identities, visibility labels, and operation policies as first-class objects in the same content-addressed store as your files and history. That means a real **label lattice** with scoped clearances, **ACL-filtered snapshot views**, **policy-hook-gated** timeline advancement and merges, and **envelope-encrypted secrets** stored alongside source files with access gated by the same rules — making bole a foundation for agent-safe workflows where every actor's capability is declared, enforced, and auditable without a separate service. Distributed sync (content-addressed pack transfer with compare-and-swap on heads, over TCP or HTTP), signed policy verification with a per-repo trust store, and a git import/export round-trip make it interoperable; TLS/SSH transports and cloud KMS adapters are the remaining incremental work.
 
 ## What bole is
 
@@ -189,21 +189,28 @@ Benchmarks cover object store put/get, snapshot operations, and git projection a
 
 ## Status and roadmap
 
-The design direction is realized in library form; several workstreams landed their core with networked/crypto follow-ups still open. This table is the canonical honesty record.
+The design direction is realized in library form. This table is the canonical honesty record.
 
 | Capability | Today | Notes / follow-up |
 |-----------|-------|-------------------|
 | Content-addressed object store, timelines, tags, ff/append/unrestricted policy | Realized | — |
 | Real label lattice + scoped clearances (glob ACLs as degenerate case) | Realized | WS1 (`bole-fo2`) |
-| PolicyHook — approval-gated merge/advance | Realized | WS1 (`bole-fo2`); signed attestation for approvals is roadmap |
+| PolicyHook — policy-gated merge/advance | Realized | WS1 (`bole-fo2`) |
+| Signed approval attestations (Ed25519, head-bound) | Realized | `bole-fz1` |
 | Workspace trait (in-memory + disk-backed) | Realized | WS2 (`bole-1kz`) |
-| Envelope-encrypted secrets (per-secret data key + master key), `env resolve` / `run` / `rekey` | Realized | WS3 (`bole-9mz`); KMS provider is roadmap (`bole-vw9`) |
+| Envelope-encrypted secrets (per-secret data key + master key), `env resolve` / `run` / `secret rekey` | Realized | WS3 (`bole-9mz`) |
+| KMS integration slot (`KmsClient` + `KmsKeyProvider`, feature `kms`) | Realized | `bole-vw9`; cloud/HSM adapters are third-party `KmsClient` impls |
 | Pack format + mark-sweep GC + atomic multi-ref transactions | Realized | WS4 (`bole-81z`) + `bole-sk6` |
-| Distributed sync — fetch/push/clone with CAS on heads | Realized (in-process core) | WS5 (`bole-cy6`); networked transports (`bole-6qy`), signed policy verification (`bole-0tp`), authn mapping (`bole-6h7`) are roadmap |
-| Git import / round-trip + identity map | Realized (library) | WS6 (`bole-mtq`); `bole git import` CLI verb is roadmap (`bole-58u`) |
+| Distributed sync — fetch/push/clone with CAS on heads | Realized | WS5 (`bole-cy6`) |
+| Networked transports — TCP + minimal HTTP over the sync session | Realized | `bole-6qy` (wire/session) + `bole-vih` (TCP/HTTP); TLS/SSH are further work |
+| Policy authority — signed `PolicyRoot` chain, `TrustStore`, highest-rooted-wins | Realized | `bole-0tp` |
+| Sync authn — principal → actor → `Accessor`, signed refs | Realized | `bole-6h7` |
+| Git import / round-trip + identity map, `bole git import` | Realized | WS6 (`bole-mtq`) + `bole-58u` (CLI) |
 | Linked-worktree hardening (`prune`/`repair`/`list --check`) | Realized | WS7 (`bole-3hj`) |
 
-Present-tense claims above describe what runs today; items marked "roadmap" are not yet shipped.
+Present-tense claims above describe what runs today. Remaining open work is
+incremental: TLS/proxy-grade HTTP and an SSH transport, cloud/HSM `KmsClient`
+adapters, and deeper sync CLI porcelain.
 
 ## License
 

@@ -212,10 +212,18 @@ Keys are 64 hex characters (32 bytes), supplied via `--key-env <VAR>` (default
 `BOLE_KEY`) or `--key-file <path>`. Key material is never stored in the
 repository.
 
+Secrets are stored as envelope-encrypted objects: a random per-secret data key
+encrypts the value, and that data key is wrapped by the master key resolved from
+the flags above. `secret rekey` rotates the master key by re-wrapping data keys —
+the value ciphertext is never touched.
+
 ```bash
 bole secret put <name> --from-stdin | --from-file <path>
 bole secret reveal <name>
-bole secret rotate <name> --from-stdin | --from-file <path>
+bole secret rotate <name> --from-stdin | --from-file <path>   # new value
+bole secret rekey [--all | <name>...] \                       # rotate the master key
+    --from-key-env <VAR> [--from-key-file <path>] \
+    --to-key-env <VAR>   [--to-key-file <path>]
 bole secret list
 ```
 
@@ -226,14 +234,38 @@ bole env create <name>
 bole env set <name> <var> <value>
 bole env set-secret <name> <var> <secret-name>
 bole env show <name>         # secret-backed values shown as <secret>
+bole env resolve <name> [--reveal] [--skip-unauthorized]   # concrete env; redacts by default
 bole env list
 ```
 
-### Git export
+`env resolve` redacts secret-backed values by default (safe to paste); `--reveal`
+decrypts them, which is access-checked — an actor not cleared for a secret's
+label is refused (or the var is omitted with `--skip-unauthorized`).
+
+### Run a command with an overlay
 
 ```bash
-bole git export --to <path>  # one-way projection to a bare Git repo
+bole run --env <name> [--clean] [--skip-unauthorized] [key flags] -- <cmd> [args...]
 ```
+
+Resolves the overlay (access-checked) and executes `<cmd>` with its variables
+injected. Defaults to inheriting the parent environment; `--clean` starts from an
+empty one. Secrets live only in the child's environment block; bole's own output
+never prints them.
+
+### Git export / import
+
+```bash
+bole git export --to <path>          # one-way projection to a bare Git repo
+bole git import <path> \             # import branches + tags from a local Git repo
+    [--branch <name>]... \           #   only these branches (default: all)
+    [--timeline-policy ff|append|unrestricted] \
+    [--label-ruleset <file>] \       #   apply WS1 path protection rules on import
+    [--dry-run] [--force]            #   --force allows a non-fast-forward re-import
+```
+
+Import keeps an identity map under `.bole/git-map/` so re-importing after upstream
+pushes only translates new commits and advances the affected timelines.
 
 ### Plumbing
 
@@ -248,9 +280,15 @@ bole ref list [<prefix>]
 bole ref get <name>
 bole ref delete <name>
 
-bole store stats
-bole store fsck
+bole store stats                       # object/ref counts (cheap on packs)
+bole store fsck                        # verify every object decodes
+bole store repack                      # consolidate loose objects into a pack
+bole store gc [--grace-secs <n>]       # collect unreachable objects (refs + registries as roots)
 ```
+
+`store repack` folds loose objects into an immutable pack; `store gc` mark-sweeps
+from the ref store plus the secret/env registries, protecting objects written
+within the grace window (default 2h).
 
 ---
 

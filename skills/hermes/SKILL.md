@@ -47,6 +47,10 @@ Commands discover the repo by walking up from the current directory (like Git).
 - **`workspace prune` / `workspace repair`** clean up stale or moved linked
   worktree registrations; run them after moving directories or the store
   (`workspace list --check` flags staleness).
+- **More commands:** `env resolve <name> [--reveal]` and `run --env <name> -- <cmd>`
+  (access-checked env injection), `secret rekey` (rotate the master key),
+  `git import <path>` (import a Git repo), `store repack` / `store gc`
+  (consolidate loose objects / collect garbage).
 
 ## Core workflow
 

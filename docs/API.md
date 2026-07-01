@@ -39,8 +39,9 @@ This document describes every public type, method, and function in the `bole` cr
     - [materialize](#materialize)
     - [project\_to\_git](#project_to_git)
 11. [In-memory workspaces](#in-memory-workspaces)
-12. [Error handling](#error-handling)
-13. [Complete example](#complete-example)
+12. [Extended API](#extended-api) — secrets, packs/GC, ref transactions, sync, policy authority, git import
+13. [Error handling](#error-handling)
+14. [Complete example](#complete-example)
 
 ---
 
@@ -803,6 +804,76 @@ primitives the CLI shares: `build_tree(objects, &map)`,
 > Note: `diff` and `commit` store the current files' blobs in the object store
 > (content-addressed, so this is idempotent). The MVP seeds the full snapshot;
 > ACL-filtered seeding may come later.
+
+---
+
+## Extended API
+
+The sections above cover the original surface. These modules were added by the
+roadmap workstreams; each is summarised here with its key entry points.
+
+### Envelope secrets and key providers (`bole::crypto`, `bole::SecretV2`)
+
+Secrets are envelope-encrypted: a random per-secret **data key** encrypts the
+value; the data key is **wrapped** under a **master key** provided by a
+`KeyProvider`.
+
+- `KeyProvider` (trait) — `active_key_ref()`, `wrap_dk(dk, aad)`, `unwrap_dk(wrapped, aad)`.
+- `LocalKeyProvider::new(master_key, ref_prefix)` — a master key held in memory.
+- `ProviderChain` — the read-side resolver: active provider first, then fallbacks,
+  plus legacy raw v1 keys. `with_provider` / `push_provider` / `push_legacy_key`.
+- `SecretV2::encrypt_envelope(plaintext, provider, aad)` / `decrypt(chain)` /
+  `rewrap(old_chain, new_provider)` (master-key rotation, value untouched).
+- `SecretAad::v2(label)` binds `{version, label}` into the AEAD.
+- `ObjectStore::put_secret_enveloped` / `get_secret_resolved` and
+  `Repository::resolve_overlay(overlay, chain, accessor, skip_unauthorized)` /
+  `rekey(ids, old_chain, new_provider)`.
+- KMS slot (feature `kms`): `crypto::kms::{KmsClient, KmsKeyProvider, LocalKmsClient}`.
+
+### Storage: packs, GC, and cheap counts (`bole::store`)
+
+`Repository::disk` uses a `PackedDiskBackend` — loose objects first, then immutable
+packs. A loose-only repo behaves exactly as before.
+
+- `ObjectStore::count()` — distinct object count (cheap on packs).
+- `ObjectStore::compact()` — consolidate loose objects into a pack.
+- `Repository::gc(extra_roots, grace_secs, now)` — mark-sweep from ref roots plus
+  `extra_roots` (registry-rooted objects), honouring a grace window.
+- `store::pack` — the self-verifying pack format (also the sync wire payload).
+
+### Atomic ref transactions (`bole::RefTransaction`)
+
+`Repository::transaction()` (or `RefStore::transaction()`) returns a builder:
+`create_tag` / `move_tag` / `create_timeline` / `advance_head` / `delete_ref` /
+`set`, plus CAS preconditions `expect` and `advance_head_if`. `commit()` applies
+all-or-nothing (a write-ahead journal on disk; idempotent replay on `open`).
+
+### Distributed sync (`bole::sync`)
+
+- In-process core on `Repository`: `fetch(remote, from, accessor)`,
+  `push(remote, to, timelines, accessor)`, `clone_from(from, accessor)`.
+- `sync::negotiate::missing_closure` — the have/want missing-object walk.
+- `sync::wire` — the `Message` protocol codec; `sync::transport::{Conn, InProcessConn, TcpConn}`;
+  `sync::session::{serve, client_fetch, client_push}` — the transport-agnostic state machine.
+- `sync::http::{http_fetch, http_push, serve_http_once}` — a minimal HTTP transport.
+- `sync::authn::{Principal, ActorMap, accessor_for, RefSigner, verify_ref_op}` — map a
+  connection principal to a WS1 `Accessor`; sign/verify ref updates.
+
+### Policy authority and signed approvals (`bole::acl`)
+
+- `acl::authority::{TrustStore, TrustAnchor, PolicySigner, verify_chain, reconcile}` —
+  Ed25519-signed `PolicyRoot` chains verified to a trusted root (fail-closed),
+  highest-rooted-wins conflict resolution.
+- `acl::attestation::{Approver, ApproverRegistry, AttestationSigner, Attestation,
+  verify_attestation, count_valid_approvals, SignedApprovalHook}` — signed,
+  head-bound merge approvals.
+
+### Git import (`bole::repo::git_import`)
+
+`git_import(repo, source, identity_map_dir, ImportOptions)` imports branches/tags
+from a local Git repo, with an `IdentityMap` sidecar for incremental round-trips.
+`git_projection::project_to_git` (export) gains `project_to_git_mapped` and
+annotated-tag export.
 
 ---
 
