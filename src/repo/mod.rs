@@ -83,6 +83,44 @@ pub enum MergeCheck {
     Rejected(Vec<PathAcl>),
 }
 
+// bole-7rn
+/// One capability's decision within an [`AccessExplanation`]: the verdict, a
+/// human-readable reason, and the per-clearance evaluation behind it.
+#[derive(Debug, Clone)]
+pub struct Decision {
+    /// Whether the capability is granted.
+    pub allowed: bool,
+    /// A short human-readable justification for the verdict.
+    pub reason: String,
+    /// Set when a dominating write clearance existed but the confined
+    /// no-write-down rule refused the write.
+    pub confined_write_down_block: bool,
+    /// The per-clearance evaluation trace (empty when the decision was made by a
+    /// repo-level short-circuit rather than a clearance).
+    pub clearances: Vec<crate::acl::ClearanceEval>,
+}
+
+// bole-7rn
+/// A full decision trace for `(actor, snapshot, path)`: whether the path exists
+/// in the snapshot, its effective label and the rules that set it, and the read
+/// and write decisions with their reasons. Answers "why can/can't this actor
+/// see or write this path?" from the same logic the enforcement path uses.
+#[derive(Debug, Clone)]
+pub struct AccessExplanation {
+    /// The path that was explained.
+    pub path: String,
+    /// Whether the path is present in the snapshot's (unfiltered) tree.
+    pub present: bool,
+    /// The path's effective label (JOIN of matching rules; bottom if none).
+    pub label: crate::acl::lattice::Label,
+    /// The globs of the label rules that contributed to `label`.
+    pub matched_rules: Vec<String>,
+    /// The read decision.
+    pub read: Decision,
+    /// The write decision.
+    pub write: Decision,
+}
+
 // bole-1vi
 // bole-p8u
 /// The top-level handle to a bole repository, bundling object storage, ref
@@ -356,6 +394,110 @@ impl Repository {
         let target_tree = self.tree_as_map(target_root).await?;
         // ours = target (being merged into), theirs = source
         Ok(three_way_diff(&ancestor_tree, &target_tree, &source_tree))
+    }
+
+    // bole-7rn
+    /// Explains an actor's read and write access to `path` at `snapshot`,
+    /// returning a full decision trace rather than a bare boolean.
+    ///
+    /// The verdicts match enforcement exactly: read applies the same
+    /// public/bottom short-circuit as [`Repository::get_snapshot_filtered`]'s
+    /// tree walk, and write mirrors [`Repository::advance_timeline`]'s per-path
+    /// check. The trace exposes the effective label, the rules that set it, and
+    /// every clearance the actor holds — the answer to "why is this hidden?".
+    pub async fn explain_path(
+        &self,
+        accessor: &Accessor,
+        snapshot: ObjectId,
+        path: &str,
+    ) -> Result<AccessExplanation> {
+        use crate::acl::glob::glob_matches;
+
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+
+        // Effective label + the Path rules that contributed to it.
+        let label = rules.label_for_path(&lattice, path);
+        let matched_rules: Vec<String> = rules
+            .rules
+            .iter()
+            .filter_map(|r| match r {
+                crate::acl::rules::LabelRule::Path { glob, .. } if glob_matches(glob, path) => {
+                    Some(glob.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        // Is the path actually present in the snapshot's unfiltered tree?
+        let present = match self.objects.get(&snapshot).await? {
+            Some(Object::Snapshot(s)) => self.tree_as_map(s.root).await?.contains_key(path),
+            _ => return Err(Error::Storage(format!("snapshot not found: {snapshot}"))),
+        };
+
+        let (read_trace, write_trace) = accessor.explain(&label, ResourceRef::Path(path));
+        let is_public = label == lattice.bottom();
+
+        // Read mirrors walk_tree_filtered: bottom-labelled paths are visible to
+        // everyone; otherwise a clearance must grant it.
+        let read = if is_public {
+            Decision {
+                allowed: true,
+                reason: "path label is public (lattice bottom); readable by all actors".into(),
+                confined_write_down_block: false,
+                clearances: read_trace.clearances,
+            }
+        } else if read_trace.allowed {
+            Decision {
+                allowed: true,
+                reason: format!("granted: a read clearance dominates label `{}`", label.0),
+                confined_write_down_block: false,
+                clearances: read_trace.clearances,
+            }
+        } else {
+            Decision {
+                allowed: false,
+                reason: format!(
+                    "denied: no in-scope read clearance dominates label `{}`",
+                    label.0
+                ),
+                confined_write_down_block: false,
+                clearances: read_trace.clearances,
+            }
+        };
+
+        // Write mirrors advance_timeline's per-path check: no public
+        // short-circuit — an explicit write clearance is always required.
+        let write = if write_trace.allowed {
+            Decision {
+                allowed: true,
+                reason: format!("granted: a write clearance dominates label `{}`", label.0),
+                confined_write_down_block: false,
+                clearances: write_trace.clearances,
+            }
+        } else if write_trace.confined_write_down_block {
+            Decision {
+                allowed: false,
+                reason: format!(
+                    "denied: confined actor may not write down to label `{}`",
+                    label.0
+                ),
+                confined_write_down_block: true,
+                clearances: write_trace.clearances,
+            }
+        } else {
+            Decision {
+                allowed: false,
+                reason: format!(
+                    "denied: no in-scope write clearance dominates label `{}`",
+                    label.0
+                ),
+                confined_write_down_block: false,
+                clearances: write_trace.clearances,
+            }
+        };
+
+        Ok(AccessExplanation { path: path.to_string(), present, label, matched_rules, read, write })
     }
 
     // bole-p8u

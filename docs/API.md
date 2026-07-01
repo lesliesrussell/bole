@@ -30,6 +30,7 @@ This document describes every public type, method, and function in the `bole` cr
 9. [Repository methods](#repository-methods)
    - [advance\_timeline](#advance_timeline)
    - [get\_snapshot\_filtered](#get_snapshot_filtered)
+   - [explain\_path](#explain_path)
    - [list\_refs\_filtered](#list_refs_filtered)
    - [check\_merge](#check_merge)
    - [merge\_timelines](#merge_timelines)
@@ -591,6 +592,25 @@ if let Some(view) = repo.get_snapshot_filtered(snap_id, &reader).await? {
     for (path, blob_id) in &view.visible_paths {
         println!("{path}: {blob_id}");
     }
+}
+```
+
+### explain\_path
+
+Where `get_snapshot_filtered` tells you *what* an actor sees, `explain_path`
+tells you *why*. It returns an `AccessExplanation`: whether the path is present
+in the snapshot, its effective label and the rules that set it, and a `Decision`
+for both read and write — each with a verdict, a human-readable `reason`, and the
+per-clearance `ClearanceEval` trace (scope match, capability, dominance) with the
+deciding clearance flagged. The read verdict applies the same public/bottom
+short-circuit as the filtered tree walk; the write verdict mirrors
+`advance_timeline`'s per-path check.
+
+```rust
+let exp = repo.explain_path(&accessor, snap_id, "secrets/prod.key").await?;
+println!("{}", exp.read.reason);   // e.g. "denied: no in-scope read clearance dominates label `protected`"
+for c in &exp.read.clearances {
+    if c.decisive { println!("granted by clearance with ceiling {}", c.ceiling.0); }
 }
 ```
 

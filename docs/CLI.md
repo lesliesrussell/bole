@@ -204,7 +204,15 @@ bole acl can-read-path --actor <name> <path>
 bole acl can-write-path --actor <name> <path>
 bole acl can-read-timeline --actor <name> <timeline>
 bole acl can-write-timeline --actor <name> <timeline>
+bole acl explain-path --actor <name> [--snapshot <snap>] <path>
 ```
+
+`can-*` answer a bare yes/no. `explain-path` returns the full decision trace for a
+path at a snapshot (default: bound timeline head): whether the path is present,
+its effective label, the protection rules that set that label, and — for both
+read and write — the verdict, a reason, and every clearance the actor holds with
+the deciding one flagged. This is the answer to "why is this path hidden from
+this actor?". Add `--json` for the machine-readable trace.
 
 ### Secrets
 

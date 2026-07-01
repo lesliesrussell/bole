@@ -50,7 +50,8 @@ pub mod crypto;
 pub mod sync;
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{
-    Accessor, AclStore, PathAcl, PathRole, Permission, SecretAcl, TimelineAcl, TimelineRole,
+    Accessor, AclStore, CapabilityTrace, ClearanceEval, PathAcl, PathRole, Permission, SecretAcl,
+    TimelineAcl, TimelineRole,
 };
 // bole-0tp
 pub use acl::authority::{
@@ -90,7 +91,7 @@ pub use repo::{copy_objects, materialize::materialize, Repository};
 // bole-6bd
 pub use repo::git_projection::project_to_git;
 // bole-9by
-pub use repo::{FilteredSnapshot, MergeCheck};
+pub use repo::{AccessExplanation, Decision, FilteredSnapshot, MergeCheck};
 // bole-9lj
 pub use repo::merge::{MergeConflict, MergeResult};
 // bole-l0i

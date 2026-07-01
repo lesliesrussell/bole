@@ -124,6 +124,54 @@ fn scope_applies(scope: &Option<ClearanceScope>, r: ResourceRef) -> bool {
     }
 }
 
+// bole-7rn
+/// Renders a clearance scope for a decision trace: `None` (any) or the
+/// kind-tagged glob it is restricted to.
+fn render_scope(scope: &Option<ClearanceScope>) -> Option<String> {
+    scope.as_ref().map(|s| match s {
+        ClearanceScope::Path(g) => format!("path:{g}"),
+        ClearanceScope::Timeline(g) => format!("timeline:{g}"),
+        ClearanceScope::Secret(g) => format!("secret:{g}"),
+    })
+}
+
+// bole-7rn
+/// The evaluation of a single clearance against one capability request, as it
+/// contributes to a [`CapabilityTrace`]. Every field mirrors a term the
+/// enforcement logic in [`Accessor::can_read`]/[`Accessor::can_write`] tests.
+#[derive(Debug, Clone)]
+pub struct ClearanceEval {
+    /// The clearance's ceiling label.
+    pub ceiling: Label,
+    /// The clearance's scope, rendered as `kind:glob`, or `None` for any resource.
+    pub scope: Option<String>,
+    /// Whether the clearance's scope covers the resource under evaluation.
+    pub scope_applies: bool,
+    /// Whether the clearance carries the requested capability bit.
+    pub grants_capability: bool,
+    /// Whether the ceiling dominates the resource's effective label.
+    pub dominates: bool,
+    /// Whether the ceiling *strictly* dominates the label (relevant to no-write-down).
+    pub strictly_dominates: bool,
+    /// Whether this clearance is the one that granted access (`false` on a denial).
+    pub decisive: bool,
+}
+
+// bole-7rn
+/// The trace of a single capability decision (read *or* write) for one
+/// resource: the verdict plus the per-clearance evaluation that produced it.
+#[derive(Debug, Clone)]
+pub struct CapabilityTrace {
+    /// The final verdict for this capability at the accessor level (before any
+    /// repo-level public short-circuit).
+    pub allowed: bool,
+    /// Set when a dominating write clearance existed but the confined
+    /// no-write-down rule refused the write.
+    pub confined_write_down_block: bool,
+    /// One entry per clearance the accessor holds.
+    pub clearances: Vec<ClearanceEval>,
+}
+
 // bole-fo2
 /// The runtime credential and evaluator. Binds a label lattice, a rule set, and
 /// an actor's clearance set, and answers `can_read`/`can_write` for a resource's
@@ -274,6 +322,77 @@ impl Accessor {
         self.can_read(
             &self.rules.label_for_secret(&self.lattice, name),
             ResourceRef::Secret(name),
+        )
+    }
+
+    // bole-7rn
+    /// Evaluates one capability against `label`/`r` and produces a full trace:
+    /// how each held clearance fared and which one (if any) was decisive. The
+    /// verdict here is exactly [`can_read`]/[`can_write`]'s, term for term —
+    /// this method is the same logic instrumented, not a re-implementation.
+    fn eval_cap(&self, label: &Label, r: ResourceRef, cap: Capability) -> CapabilityTrace {
+        let mut evals: Vec<ClearanceEval> = self
+            .clearances
+            .clearances
+            .iter()
+            .map(|c| ClearanceEval {
+                ceiling: c.ceiling.clone(),
+                scope: render_scope(&c.scope),
+                scope_applies: scope_applies(&c.scope, r),
+                grants_capability: c.cap.contains(cap),
+                dominates: self.lattice.dominates(&c.ceiling, label),
+                strictly_dominates: self.lattice.strictly_dominates(&c.ceiling, label),
+                decisive: false,
+            })
+            .collect();
+
+        // A clearance qualifies iff it carries the capability, is in scope, and
+        // its ceiling dominates the label — the three conjuncts of `can_*`.
+        let dominated = evals
+            .iter()
+            .any(|e| e.grants_capability && e.scope_applies && e.dominates);
+
+        let mut confined_write_down_block = false;
+        let allowed = if !dominated {
+            false
+        } else if cap.contains(Capability::WRITE) && self.clearances.confined {
+            // Confined no-write-down: every write clearance must strictly dominate.
+            let writes_down = self
+                .clearances
+                .clearances
+                .iter()
+                .all(|c| !c.cap.contains(Capability::WRITE) || self.lattice.strictly_dominates(&c.ceiling, label));
+            if writes_down {
+                confined_write_down_block = true;
+                false
+            } else {
+                true
+            }
+        } else {
+            true
+        };
+
+        // Flag the first qualifying clearance as decisive when access is granted.
+        if allowed {
+            if let Some(e) = evals
+                .iter_mut()
+                .find(|e| e.grants_capability && e.scope_applies && e.dominates)
+            {
+                e.decisive = true;
+            }
+        }
+
+        CapabilityTrace { allowed, confined_write_down_block, clearances: evals }
+    }
+
+    // bole-7rn
+    /// Produces the `(read, write)` capability traces for `label`/`r`. Callers
+    /// that also apply a repo-level public short-circuit (e.g. filtered views)
+    /// layer that on top of the read trace.
+    pub fn explain(&self, label: &Label, r: ResourceRef) -> (CapabilityTrace, CapabilityTrace) {
+        (
+            self.eval_cap(label, r, Capability::READ),
+            self.eval_cap(label, r, Capability::WRITE),
         )
     }
 }

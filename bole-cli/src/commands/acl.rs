@@ -8,6 +8,7 @@ use clap::Subcommand;
 use crate::actor;
 use crate::context::RepoContext;
 use crate::output::Output;
+use crate::resolve;
 
 /// ACL subcommands.
 #[derive(Subcommand)]
@@ -46,6 +47,16 @@ pub enum Cmd {
         actor: String,
         timeline: String,
     },
+    /// Explain an actor's read/write access to a path at a snapshot: the
+    /// effective label, the rules that set it, and the deciding clearance.
+    ExplainPath {
+        #[arg(long)]
+        actor: String,
+        /// Snapshot to evaluate against (default: bound timeline head).
+        #[arg(long, default_value = "@")]
+        snapshot: String,
+        path: String,
+    },
 }
 
 /// Protect/unprotect/list operations shared by path and timeline rules.
@@ -80,6 +91,9 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
         Cmd::CanWritePath { actor, path } => can(ctx, out, &actor, "write_path", &path),
         Cmd::CanReadTimeline { actor, timeline } => can(ctx, out, &actor, "read_timeline", &timeline),
         Cmd::CanWriteTimeline { actor, timeline } => can(ctx, out, &actor, "write_timeline", &timeline),
+        Cmd::ExplainPath { actor, snapshot, path } => {
+            explain_path(ctx, out, &actor, &snapshot, &path).await
+        }
     }
 }
 
@@ -134,6 +148,77 @@ fn emit_list(out: &Output, rules: Vec<String>) {
         },
         || serde_json::json!(rules),
     );
+}
+
+// bole-7rn
+/// Emits a full read/write decision trace for an actor against a path.
+async fn explain_path(
+    ctx: &RepoContext,
+    out: &Output,
+    actor_name: &str,
+    snapshot_spec: &str,
+    path: &str,
+) -> Result<()> {
+    let acc = actor::get(ctx, actor_name)?.to_accessor();
+    let state = ctx.load_state()?;
+    let snap = resolve::snapshot(ctx, &state, snapshot_spec).await?;
+    let exp = ctx.repo.explain_path(&acc, snap, path).await?;
+
+    let actor_name = actor_name.to_string();
+    out.emit(
+        || {
+            let mut s = format!("path:    {}\n", exp.path);
+            s.push_str(&format!("present: {}\n", exp.present));
+            s.push_str(&format!("label:   {}\n", exp.label.0));
+            s.push_str(&format!(
+                "rules:   {}\n",
+                if exp.matched_rules.is_empty() {
+                    "(none — public)".to_string()
+                } else {
+                    exp.matched_rules.join(", ")
+                }
+            ));
+            s.push_str(&format!(
+                "read:    {} — {}\n",
+                if exp.read.allowed { "ALLOW" } else { "DENY" },
+                exp.read.reason
+            ));
+            s.push_str(&format!(
+                "write:   {} — {}",
+                if exp.write.allowed { "ALLOW" } else { "DENY" },
+                exp.write.reason
+            ));
+            s
+        },
+        || {
+            let decision_json = |d: &bole::Decision| {
+                serde_json::json!({
+                    "allowed": d.allowed,
+                    "reason": d.reason,
+                    "confined_write_down_block": d.confined_write_down_block,
+                    "clearances": d.clearances.iter().map(|c| serde_json::json!({
+                        "ceiling": c.ceiling.0,
+                        "scope": c.scope,
+                        "scope_applies": c.scope_applies,
+                        "grants_capability": c.grants_capability,
+                        "dominates": c.dominates,
+                        "strictly_dominates": c.strictly_dominates,
+                        "decisive": c.decisive,
+                    })).collect::<Vec<_>>(),
+                })
+            };
+            serde_json::json!({
+                "actor": actor_name,
+                "path": exp.path,
+                "present": exp.present,
+                "label": exp.label.0,
+                "matched_rules": exp.matched_rules,
+                "read": decision_json(&exp.read),
+                "write": decision_json(&exp.write),
+            })
+        },
+    );
+    Ok(())
 }
 
 fn can(ctx: &RepoContext, out: &Output, actor_name: &str, kind: &str, target: &str) -> Result<()> {
