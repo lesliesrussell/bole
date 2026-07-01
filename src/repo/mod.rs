@@ -6,6 +6,8 @@ pub mod workspace;
 pub mod merge;
 // bole-6bd
 pub mod git_projection;
+// bole-mtq
+pub mod git_import;
 // bole-uxt
 pub mod ephemeral;
 
