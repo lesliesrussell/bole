@@ -1,5 +1,7 @@
 // bole-4fp
 use crate::acl::{backend::AclBackend, PathAcl, TimelineAcl};
+// bole-6l2
+use crate::acl::SecretAcl;
 use crate::error::{Error, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,8 @@ impl DiskAclBackend {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(root.join("acls").join("paths"))?;
         fs::create_dir_all(root.join("acls").join("timelines"))?;
+        // bole-6l2
+        fs::create_dir_all(root.join("acls").join("secrets"))?;
         Ok(Self { root })
     }
 
@@ -28,6 +32,11 @@ impl DiskAclBackend {
 
     fn timeline_acl_file(&self, pattern: &str) -> PathBuf {
         self.root.join("acls").join("timelines").join(sanitize(pattern))
+    }
+
+    // bole-6l2
+    fn secret_acl_file(&self, name: &str) -> PathBuf {
+        self.root.join("acls").join("secrets").join(sanitize(name))
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> Result<()> {
@@ -121,6 +130,27 @@ impl AclBackend for DiskAclBackend {
             |_name, data| postcard::from_bytes(data).map_err(|e| Error::Codec(e.to_string())),
         )
     }
+
+    // bole-6l2
+    fn set_secret_acl(&self, acl: &SecretAcl) -> Result<()> {
+        let data = postcard::to_allocvec(acl).map_err(|e| Error::Codec(e.to_string()))?;
+        self.atomic_write(&self.secret_acl_file(&acl.name), &data)
+    }
+
+    fn delete_secret_acl(&self, name: &str) -> Result<()> {
+        match fs::remove_file(self.secret_acl_file(name)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    fn list_secret_acls(&self) -> Result<Vec<SecretAcl>> {
+        self.list_dir(
+            self.root.join("acls").join("secrets"),
+            |_name, data| postcard::from_bytes(data).map_err(|e| Error::Codec(e.to_string())),
+        )
+    }
 }
 
 // bole-4fp
@@ -208,6 +238,31 @@ mod tests {
         assert!(rs.rules.iter().any(|r| matches!(
             r, LabelRule::Timeline { pattern, label }
                 if pattern == "leslie/private/**" && *label == Label::protected()
+        )));
+    }
+
+    // bole-6l2
+    #[test]
+    fn secret_acls_persist_across_reopen_and_project() {
+        use crate::acl::backend::AclBackend;
+        use crate::acl::lattice::Label;
+        use crate::acl::rules::LabelRule;
+        use crate::acl::SecretAcl;
+        let dir = TempDir::new().unwrap();
+        {
+            let b = DiskAclBackend::open(dir.path()).unwrap();
+            b.set_secret_acl(&SecretAcl { name: "DB_URL".into() }).unwrap();
+            b.set_secret_acl(&SecretAcl { name: "prod/*".into() }).unwrap();
+            b.delete_secret_acl("prod/*").unwrap();
+        }
+        // Reopen: the surviving secret ACL persisted and projects into the ruleset.
+        let b2 = DiskAclBackend::open(dir.path()).unwrap();
+        let list = b2.list_secret_acls().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "DB_URL");
+        let rs = b2.get_label_ruleset().unwrap();
+        assert!(rs.rules.iter().any(|r| matches!(
+            r, LabelRule::Secret { name, label } if name == "DB_URL" && *label == Label::protected()
         )));
     }
 }
