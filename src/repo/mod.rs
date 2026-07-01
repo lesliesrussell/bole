@@ -15,6 +15,11 @@ use std::path::Path;
 use crate::acl::disk::DiskAclBackend;
 use crate::acl::memory::MemoryAclBackend;
 use crate::acl::{Accessor, AclStore, PathAcl, PathRole, Permission};
+// bole-fo2
+use crate::acl::ResourceRef;
+use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent, PolicyRegistry};
+use crate::acl::lattice::LabelLattice;
+use crate::acl::rules::LabelRuleSet;
 use crate::error::{Error, Result};
 use crate::object::{EntryKind, Object, ObjectId};
 // bole-u6p
@@ -24,7 +29,7 @@ use crate::refs::Ref;
 use crate::object::EnvValue;
 use workspace::WorkspaceView;
 // bole-3w9
-use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore, TimelinePolicy};
+use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
 use crate::store::{disk::DiskBackend, memory::MemoryBackend, ObjectStore};
 
 // bole-9by
@@ -119,6 +124,13 @@ impl Repository {
         })
     }
 
+    // bole-fo2
+    /// Builds the active policy registry. Always includes the built-in
+    /// `TimelinePolicyHook`; declarative hooks are added in a later task.
+    fn policy_registry(&self) -> PolicyRegistry {
+        PolicyRegistry::new()
+    }
+
     // bole-p8u
     /// Copies all objects and refs from `self` into `dest`.
     pub async fn copy_to(&self, dest: &Repository) -> Result<()> {
@@ -143,7 +155,10 @@ impl Repository {
             _ => return Ok(None),
         };
         let mut visible_paths = BTreeMap::new();
-        walk_tree_filtered(&self.objects, &self.acls, snap.root, "", accessor, &mut visible_paths).await?;
+        // bole-fo2
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+        walk_tree_filtered(&self.objects, &lattice, &rules, snap.root, "", accessor, &mut visible_paths).await?;
         Ok(Some(FilteredSnapshot {
             id,
             author: snap.author,
@@ -159,14 +174,16 @@ impl Repository {
     /// Lists all refs under `prefix`, omitting any protected timelines the `accessor`
     /// cannot read.
     pub fn list_refs_filtered(&self, prefix: &str, accessor: &Accessor) -> Result<Vec<RefName>> {
+        // bole-fo2
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
         let all = self.refs.list(prefix)?;
         let mut out = Vec::new();
         for name in all {
-            if self.acls.timeline_is_protected(name.as_str())? {
-                if accessor.can_read_timeline(name.as_str()) {
-                    out.push(name);
-                }
-            } else {
+            let label = rules.label_for_timeline(&lattice, name.as_str());
+            if label == lattice.bottom()
+                || accessor.can_read(&label, ResourceRef::Timeline(name.as_str()))
+            {
                 out.push(name);
             }
         }
@@ -200,15 +217,26 @@ impl Repository {
         let mut visible = BTreeMap::new();
         // bole-hc1
         // bole-g21
-        walk_tree_filtered(&self.objects, &self.acls, source_tree, "", &Accessor::privileged(), &mut visible).await?;
-        // bole-l55
-        // Find all paths in source that are protected but dest doesn't enforce them
-        let dest_is_protected = self.acls.timeline_is_protected(dest.as_str())?;
+        // bole-fo2
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+        walk_tree_filtered(&self.objects, &lattice, &rules, source_tree, "", &Accessor::privileged(), &mut visible).await?;
+        // bole-fo2
+        // A path leaks if its effective label is NOT dominated by the dest
+        // timeline's effective label — i.e. content would flow to a strictly
+        // less-protected place. Reported as the matching PathAcl(s), as before.
+        let dest_label = rules.label_for_timeline(&lattice, dest.as_str());
         let mut leaking: Vec<PathAcl> = Vec::new();
         let path_acls = self.acls.list_path_acls()?;
         for acl in &path_acls {
-            let any_match = visible.keys().any(|p| crate::acl::glob::glob_matches(&acl.glob, p));
-            if any_match && !dest_is_protected && !leaking.iter().any(|l| l.glob == acl.glob) {
+            let any_leak = visible.keys().any(|p| {
+                crate::acl::glob::glob_matches(&acl.glob, p)
+                    && {
+                        let plabel = rules.label_for_path(&lattice, p);
+                        !lattice.dominates(&dest_label, &plabel)
+                    }
+            });
+            if any_leak && !leaking.iter().any(|l| l.glob == acl.glob) {
                 leaking.push(acl.clone());
             }
         }
@@ -285,7 +313,12 @@ impl Repository {
         snapshot_id: ObjectId,
         accessor: &Accessor,
     ) -> Result<()> {
-        if !accessor.can_write_timeline(name.as_str()) {
+        // bole-fo2
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+        // Timeline write check via the dominance rule.
+        let tl_label = rules.label_for_timeline(&lattice, name.as_str());
+        if !accessor.can_write(&tl_label, ResourceRef::Timeline(name.as_str())) {
             return Err(Error::AccessDenied(format!(
                 "write denied on timeline: {}",
                 name.as_str()
@@ -295,10 +328,13 @@ impl Repository {
             Some(Object::Snapshot(s)) => s,
             _ => return Err(Error::Storage(format!("snapshot not found: {}", snapshot_id))),
         };
+        // bole-fo2
+        // Per-path write check (also enforces the confined no-write-down rule).
         let mut paths = BTreeMap::new();
         walk_tree_filtered(
             &self.objects,
-            &self.acls,
+            &lattice,
+            &rules,
             snap.root,
             "",
             &Accessor::privileged(),
@@ -306,34 +342,33 @@ impl Repository {
         )
         .await?;
         for path in paths.keys() {
-            if !accessor.can_write_path(path) {
-                return Err(Error::AccessDenied(format!(
-                    "write denied on path: {}",
-                    path
-                )));
+            let label = rules.label_for_path(&lattice, path);
+            if !accessor.can_write(&label, ResourceRef::Path(path)) {
+                return Err(Error::AccessDenied(format!("write denied on path: {}", path)));
             }
         }
-        // bole-3w9: enforce the timeline's advancement policy before moving the head.
+        // bole-fo2
+        // The inline TimelinePolicy match is replaced by the policy registry.
         let timeline = self.refs.get_timeline(name)?.ok_or_else(|| {
             Error::Storage(format!("timeline not found: {}", name.as_str()))
         })?;
-        match timeline.policy {
-            TimelinePolicy::Unrestricted => {}
-            TimelinePolicy::FastForwardOnly | TimelinePolicy::Append => {
-                // A move is permitted only when the current head is an ancestor of
-                // the new head (a true fast-forward); a no-op move qualifies because
-                // lca(head, head) == head.
-                let is_fast_forward =
-                    lca(&self.objects, timeline.head, snapshot_id).await? == Some(timeline.head);
-                if !is_fast_forward {
-                    return Err(Error::PolicyViolation(format!(
-                        "timeline '{}' has policy {:?}; new head {} is not a descendant of current head {}",
-                        name.as_str(),
-                        timeline.policy,
-                        snapshot_id,
-                        timeline.head
-                    )));
-                }
+        let registry = self.policy_registry();
+        let ctx = PolicyContext {
+            event: PolicyEvent::Advance {
+                timeline: name,
+                old_head: timeline.head,
+                new_head: snapshot_id,
+            },
+            accessor,
+            objects: &self.objects,
+            refs: &self.refs,
+            now: 0,
+        };
+        match registry.evaluate(&ctx).await {
+            PolicyDecision::Allow => {}
+            PolicyDecision::Deny(reason) => return Err(Error::PolicyViolation(reason)),
+            PolicyDecision::RequiresApproval { reason, .. } => {
+                return Err(Error::PolicyViolation(reason))
             }
         }
         self.refs.advance_head(name, snapshot_id)?;
@@ -367,9 +402,13 @@ impl Repository {
 
     async fn tree_as_map(&self, tree_id: ObjectId) -> Result<BTreeMap<String, ObjectId>> {
         let mut map = BTreeMap::new();
+        // bole-fo2
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
         walk_tree_filtered(
             &self.objects,
-            &self.acls,
+            &lattice,
+            &rules,
             tree_id,
             "",
             &Accessor::privileged(),
@@ -422,10 +461,14 @@ impl Repository {
     }
 }
 
-// bole-9by
+// bole-fo2
+// Visible iff the path's effective label is the lattice bottom (public — visible
+// to all) or the accessor's clearances dominate it in scope. This collapses the
+// old `path_is_protected` gate into the dominance check.
 async fn walk_tree_filtered(
     objects: &ObjectStore,
-    acls: &AclStore,
+    lattice: &LabelLattice,
+    rules: &LabelRuleSet,
     tree_id: ObjectId,
     prefix: &str,
     accessor: &Accessor,
@@ -443,16 +486,18 @@ async fn walk_tree_filtered(
         };
         match entry.kind {
             EntryKind::Blob => {
-                if acls.path_is_protected(&full_path)? {
-                    if accessor.can_read_path(&full_path) {
-                        out.insert(full_path, entry.id);
-                    }
-                } else {
+                let label = rules.label_for_path(lattice, &full_path);
+                if label == lattice.bottom()
+                    || accessor.can_read(&label, ResourceRef::Path(&full_path))
+                {
                     out.insert(full_path, entry.id);
                 }
             }
             EntryKind::Tree => {
-                Box::pin(walk_tree_filtered(objects, acls, entry.id, &full_path, accessor, out)).await?;
+                Box::pin(walk_tree_filtered(
+                    objects, lattice, rules, entry.id, &full_path, accessor, out,
+                ))
+                .await?;
             }
         }
     }
@@ -1099,5 +1144,62 @@ mod tests {
         ).unwrap();
         assert!(!repo.prune_timeline(&name, 99999).unwrap());
         assert!(repo.refs.get_timeline(&name).unwrap().is_some());
+    }
+
+    // bole-fo2
+    #[tokio::test]
+    async fn confined_agent_cannot_advance_declassifying_snapshot() {
+        use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+        use crate::acl::lattice::Label;
+        use crate::acl::rules::LabelRuleSet;
+        use crate::acl::{Accessor, PathAcl};
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let repo = Repository::memory();
+        // The repo protects secrets/**; everything else is public (bottom).
+        repo.acls.set_path_acl(PathAcl { glob: "secrets/**".into() }).unwrap();
+
+        // Snapshot writes a PUBLIC path (declassifying target for a confined,
+        // protected-cleared agent).
+        let blob = repo.objects.put_blob(Bytes::from("leak")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("public/notes.md".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "base".into(),
+        }).await.unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        let next = repo.objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "next".into(),
+        }).await.unwrap();
+
+        // A confined agent cleared to WRITE at `protected`, scoped to everything.
+        let lattice = Arc::new(crate::acl::lattice::LabelLattice::two_point());
+        let clr = ClearanceSet {
+            clearances: vec![
+                Clearance {
+                    ceiling: Label::protected(),
+                    cap: Capability::WRITE,
+                    scope: Some(ClearanceScope::Path("**".into())),
+                },
+                Clearance {
+                    ceiling: Label::protected(),
+                    cap: Capability::WRITE,
+                    scope: Some(ClearanceScope::Timeline("**".into())),
+                },
+            ],
+            confined: true,
+        };
+        let agent = Accessor::from_parts(lattice, Arc::new(LabelRuleSet::default()), clr);
+
+        // Writing the public path strictly below `protected` is a declassifying
+        // write -> denied before the head moves.
+        let err = repo.advance_timeline(&name, next, &agent).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::AccessDenied(_)), "got {err:?}");
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, base);
     }
 }

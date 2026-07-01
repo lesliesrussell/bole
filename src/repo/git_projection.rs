@@ -47,6 +47,9 @@ pub async fn project_to_git(
     let ordered = collect_topo(&repo.objects, starts).await?;
 
     // Pass 3: write blobs, trees, commits; build bole → git id map
+    // bole-fo2
+    let lattice = repo.acls.lattice()?;
+    let rules = repo.acls.label_ruleset()?;
     let mut id_map: HashMap<ObjectId, gix::ObjectId> = HashMap::new();
     for snap_id in &ordered {
         let snap = match repo.objects.get(snap_id).await? {
@@ -54,8 +57,9 @@ pub async fn project_to_git(
             _ => continue,
         };
         let mut flat = BTreeMap::new();
+        // bole-fo2
         super::walk_tree_filtered(
-            &repo.objects, &repo.acls, snap.root, "", accessor, &mut flat,
+            &repo.objects, &lattice, &rules, snap.root, "", accessor, &mut flat,
         ).await?;
         let git_tree = write_git_tree_level(&flat, &repo.objects, &git_repo).await?;
 
