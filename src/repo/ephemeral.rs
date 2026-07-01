@@ -15,6 +15,8 @@
 //! [`commit`]: EphemeralWorkspace::commit
 
 use std::collections::BTreeMap;
+// bole-1kz
+use std::path::PathBuf;
 
 use bytes::Bytes;
 
@@ -22,6 +24,12 @@ use crate::error::{Error, Result};
 use crate::object::{EntryKind, Object, ObjectId, Snapshot, Tree, TreeEntry};
 use crate::repo::Repository;
 use crate::store::ObjectStore;
+
+// bole-1kz
+/// The repository metadata directory name. A `DiskWorkspace` walk excludes it,
+/// whether it is a directory (primary worktree) or a pointer file (linked
+/// worktree). Mirrors the CLI's `context::REPO_DIR`.
+pub const REPO_DIR: &str = ".bole";
 
 /// A path-level diff between two flat `path → blob id` maps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -329,6 +337,139 @@ impl<'a> EphemeralWorkspace<'a> {
     }
 }
 
+// bole-1kz
+/// A filesystem-backed [`Workspace`]. Lazy: files are read from disk on demand,
+/// and the directory walk is deferred to `paths`/`diff`/`commit`. Writes are
+/// write-through (they hit the filesystem immediately). Construction is cheap
+/// and reads no files.
+pub struct DiskWorkspace<'a> {
+    repo: &'a Repository,
+    root: PathBuf,
+    base: Option<ObjectId>,
+}
+
+impl<'a> DiskWorkspace<'a> {
+    /// Creates a workspace rooted at `root` with no base snapshot.
+    pub fn new(repo: &'a Repository, root: impl Into<PathBuf>) -> Self {
+        Self { repo, root: root.into(), base: None }
+    }
+
+    /// Creates a workspace rooted at `root` with `snapshot` as the base.
+    pub fn bound(repo: &'a Repository, root: impl Into<PathBuf>, snapshot: ObjectId) -> Self {
+        Self { repo, root: root.into(), base: Some(snapshot) }
+    }
+
+    /// Absolute on-disk path for a workspace-relative `path`.
+    fn abs(&self, path: &str) -> PathBuf {
+        self.root.join(path)
+    }
+
+    /// The single disk-walk implementation: stores each non-excluded regular
+    /// file as a blob and returns `path → blob id` with forward-slash paths
+    /// relative to `root`. Skips `.bole` (dir or pointer file) and all symlinks.
+    async fn collect(&self) -> Result<BTreeMap<String, ObjectId>> {
+        let mut out = BTreeMap::new();
+        // Iterative walk to avoid async recursion.
+        let mut stack = vec![self.root.clone()];
+        while let Some(current) = stack.pop() {
+            let mut rd = tokio::fs::read_dir(&current).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                let file_type = entry.file_type().await?;
+                // OQ4: skip all symlinks (never follow out of the workspace).
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if file_type.is_file() {
+                    // A linked worktree's `.bole` is a pointer file, not content.
+                    if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
+                        continue;
+                    }
+                    let bytes = tokio::fs::read(&path).await?;
+                    let id = self.repo.objects.put_blob(Bytes::from(bytes)).await?;
+                    let rel = path
+                        .strip_prefix(&self.root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(rel, id);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+// bole-1kz
+#[async_trait::async_trait]
+impl Workspace for DiskWorkspace<'_> {
+    fn base(&self) -> Option<ObjectId> {
+        self.base
+    }
+
+    async fn read(&self, path: &str) -> Result<Option<Bytes>> {
+        match tokio::fs::read(self.abs(path)).await {
+            Ok(b) => Ok(Some(Bytes::from(b))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    async fn write(&mut self, path: &str, bytes: Bytes) -> Result<()> {
+        let abs = self.abs(path);
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&abs, &bytes).await?;
+        Ok(())
+    }
+
+    async fn remove(&mut self, path: &str) -> Result<bool> {
+        match tokio::fs::remove_file(self.abs(path)).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::Io(e)),
+        }
+    }
+
+    async fn paths(&self) -> Result<Vec<String>> {
+        Ok(self.collect().await?.into_keys().collect())
+    }
+
+    async fn diff(&self) -> Result<PathDiff> {
+        let base = match self.base {
+            Some(b) => snapshot_paths(&self.repo.objects, b).await?,
+            None => BTreeMap::new(),
+        };
+        let target = self.collect().await?;
+        Ok(diff_paths(&base, &target))
+    }
+
+    async fn commit(&mut self, author: &str, message: &str, created_at: u64) -> Result<ObjectId> {
+        let files = self.collect().await?;
+        let root = build_tree(&self.repo.objects, &files).await?;
+        let parents = self.base.map(|b| vec![b]).unwrap_or_default();
+        let id = self
+            .repo
+            .objects
+            .put_snapshot(Snapshot {
+                root,
+                parents,
+                author: author.into(),
+                created_at,
+                message: message.into(),
+            })
+            .await?;
+        self.base = Some(id);
+        Ok(id)
+    }
+}
+
 impl Repository {
     // bole-uxt
     /// Opens an empty in-memory workspace over this repository.
@@ -433,5 +574,95 @@ mod tests {
         let base = ws.base().unwrap();
         let paths = snapshot_paths(&repo.objects, base).await.unwrap();
         assert!(paths.contains_key("b.txt"));
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn disk_workspace_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let mut ws = DiskWorkspace::new(&repo, dir.path());
+        ws.write("sub/a.txt", Bytes::from_static(b"hi")).await.unwrap();
+        // Write-through: the file is on disk and readable immediately.
+        assert_eq!(ws.read("sub/a.txt").await.unwrap(), Some(Bytes::from_static(b"hi")));
+        assert_eq!(ws.read("nope").await.unwrap(), None);
+        let id = ws.commit("t", "m", 0).await.unwrap();
+        let paths = snapshot_paths(&repo.objects, id).await.unwrap();
+        assert!(paths.contains_key("sub/a.txt"));
+        assert_eq!(ws.base(), Some(id));
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn disk_workspace_diff_add_modify_remove() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let mut ws = DiskWorkspace::new(&repo, dir.path());
+        ws.write("a.txt", Bytes::from_static(b"1")).await.unwrap();
+        ws.write("b.txt", Bytes::from_static(b"keep")).await.unwrap();
+        let base = ws.commit("t", "base", 0).await.unwrap();
+
+        // Seed a bound workspace, then mutate the disk directly.
+        let mut ws2 = DiskWorkspace::bound(&repo, dir.path(), base);
+        ws2.write("c.txt", Bytes::from_static(b"new")).await.unwrap(); // added
+        ws2.write("a.txt", Bytes::from_static(b"2")).await.unwrap();   // modified
+        assert!(ws2.remove("b.txt").await.unwrap());                    // removed
+        assert!(!ws2.remove("b.txt").await.unwrap());                   // already gone
+
+        let d = ws2.diff().await.unwrap();
+        assert_eq!(d.added, vec!["c.txt"]);
+        assert_eq!(d.modified, vec!["a.txt"]);
+        assert_eq!(d.removed, vec!["b.txt"]);
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn disk_workspace_excludes_bole_dir_and_file() {
+        let repo = Repository::memory();
+
+        // Primary worktree: `.bole` is a directory with content.
+        let dir = tempfile::TempDir::new().unwrap();
+        tokio::fs::create_dir(dir.path().join(".bole")).await.unwrap();
+        tokio::fs::write(dir.path().join(".bole/store"), b"x").await.unwrap();
+        tokio::fs::write(dir.path().join("keep.txt"), b"y").await.unwrap();
+        let ws = DiskWorkspace::new(&repo, dir.path());
+        assert_eq!(ws.paths().await.unwrap(), vec!["keep.txt".to_string()]);
+
+        // Linked worktree: `.bole` is a pointer file, not content.
+        let dir2 = tempfile::TempDir::new().unwrap();
+        tokio::fs::write(dir2.path().join(".bole"), b"{\"store\":\"..\"}").await.unwrap();
+        tokio::fs::write(dir2.path().join("k.txt"), b"z").await.unwrap();
+        let ws2 = DiskWorkspace::new(&repo, dir2.path());
+        assert_eq!(ws2.paths().await.unwrap(), vec!["k.txt".to_string()]);
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn disk_workspace_commit_chains_base() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let mut ws = DiskWorkspace::new(&repo, dir.path());
+        ws.write("a.txt", Bytes::from_static(b"1")).await.unwrap();
+        let s1 = ws.commit("t", "one", 0).await.unwrap();
+        ws.write("a.txt", Bytes::from_static(b"2")).await.unwrap();
+        let s2 = ws.commit("t", "two", 1).await.unwrap();
+
+        let snap2 = match repo.objects.get(&s2).await.unwrap().unwrap() {
+            Object::Snapshot(s) => s,
+            _ => panic!("expected snapshot"),
+        };
+        assert_eq!(snap2.parents, vec![s1]);
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn disk_workspace_trait_object_dispatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::memory();
+        let mut dw = DiskWorkspace::new(&repo, dir.path());
+        let w: &mut dyn Workspace = &mut dw;
+        w.write("f.txt", Bytes::from_static(b"q")).await.unwrap();
+        let id = w.commit("t", "m", 0).await.unwrap();
+        assert!(snapshot_paths(&repo.objects, id).await.unwrap().contains_key("f.txt"));
     }
 }
