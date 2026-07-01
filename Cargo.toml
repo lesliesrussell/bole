@@ -9,6 +9,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# bole-vw9
+[features]
+# Enables the KMS integration slot (KmsClient trait + KmsKeyProvider + a
+# software reference adapter). Real cloud/HSM adapters implement KmsClient.
+kms = []
+
 [dependencies]
 tokio = { version = "1", features = ["fs", "sync", "rt", "io-util", "net"] }
 blake3 = "1"
