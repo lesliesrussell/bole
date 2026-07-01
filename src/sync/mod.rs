@@ -16,6 +16,8 @@ pub mod negotiate;
 pub mod wire;
 pub mod transport;
 pub mod session;
+// bole-vih
+pub mod http;
 
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};

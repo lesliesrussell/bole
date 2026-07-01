@@ -77,7 +77,7 @@ async fn serve_push(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor)
 // bole-6qy
 /// Server-side: authorize + fast-forward-gate each op, then CAS all survivors in
 /// one `RefTransaction`; a concurrent-winner conflict reports NonFastForward.
-async fn apply_push_ops(
+pub(crate) async fn apply_push_ops(
     repo: &Repository,
     accessor: &Accessor,
     ops: &[RefUpdateOp],
@@ -269,7 +269,7 @@ fn tracking_ref(remote_name: &str, name: &RefName) -> Result<RefName> {
 }
 
 // bole-6qy
-fn advertise(repo: &Repository, accessor: &Accessor) -> Result<Vec<RefAdvert>> {
+pub(crate) fn advertise(repo: &Repository, accessor: &Accessor) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
     for name in repo.list_refs_filtered("", accessor)? {
         match repo.refs.get(&name)? {
@@ -282,7 +282,7 @@ fn advertise(repo: &Repository, accessor: &Accessor) -> Result<Vec<RefAdvert>> {
 }
 
 // bole-6qy
-async fn build_pack(repo: &Repository, ids: &[ObjectId]) -> Result<Vec<u8>> {
+pub(crate) async fn build_pack(repo: &Repository, ids: &[ObjectId]) -> Result<Vec<u8>> {
     let mut builder = PackBuilder::new();
     for id in ids {
         if let Some(bytes) = repo.objects.get_raw(id).await? {
