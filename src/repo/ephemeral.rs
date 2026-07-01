@@ -149,10 +149,83 @@ pub fn diff_paths(
 /// Files live in RAM as byte buffers; nothing is written to the filesystem.
 /// [`commit`](Self::commit) stores blobs and a snapshot in the repository's
 /// object store and returns the new snapshot id.
+// bole-1kz
+/// A mutable, path-keyed byte store that can be diffed against a base snapshot
+/// and committed to the object graph.
+///
+/// Two implementations exist: [`EphemeralWorkspace`] (in-memory) and
+/// [`DiskWorkspace`] (filesystem-backed). The work tree is not a second model —
+/// it is one model with a filesystem backing. All methods are async so the disk
+/// implementation can cross the I/O boundary uniformly; `#[async_trait]` keeps
+/// `dyn Workspace` usable.
+#[async_trait::async_trait]
+pub trait Workspace {
+    /// The snapshot this workspace considers its starting point; the sole parent
+    /// when [`commit`](Self::commit) creates a new snapshot.
+    fn base(&self) -> Option<ObjectId>;
+
+    /// The bytes at `path`, or `None` if absent (owned copy).
+    async fn read(&self, path: &str) -> Result<Option<Bytes>>;
+
+    /// Creates or overwrites `path` with `bytes`.
+    async fn write(&mut self, path: &str, bytes: Bytes) -> Result<()>;
+
+    /// Deletes `path`. Returns `true` if it existed.
+    async fn remove(&mut self, path: &str) -> Result<bool>;
+
+    /// All paths in the workspace, in sorted order.
+    async fn paths(&self) -> Result<Vec<String>>;
+
+    /// Diffs the current workspace state against the base snapshot. Stores blobs
+    /// in the object store (content-addressed, idempotent).
+    async fn diff(&self) -> Result<PathDiff>;
+
+    /// Commits the current workspace state as a new snapshot whose parent is
+    /// [`base`](Self::base), advances `base` to it, and returns its id. Does not
+    /// advance any timeline.
+    async fn commit(&mut self, author: &str, message: &str, created_at: u64) -> Result<ObjectId>;
+}
+
 pub struct EphemeralWorkspace<'a> {
     repo: &'a Repository,
     base: Option<ObjectId>,
     files: BTreeMap<String, Bytes>,
+}
+
+// bole-1kz
+/// Thin async wrapper over the inherent (synchronous) methods; additive, so no
+/// existing caller changes. Fully-qualified `EphemeralWorkspace::method` calls
+/// dodge trait/inherent name collisions (and thus infinite recursion).
+#[async_trait::async_trait]
+impl Workspace for EphemeralWorkspace<'_> {
+    fn base(&self) -> Option<ObjectId> {
+        EphemeralWorkspace::base(self)
+    }
+
+    async fn read(&self, path: &str) -> Result<Option<Bytes>> {
+        Ok(EphemeralWorkspace::read(self, path).map(Bytes::copy_from_slice))
+    }
+
+    async fn write(&mut self, path: &str, bytes: Bytes) -> Result<()> {
+        EphemeralWorkspace::write(self, path, bytes);
+        Ok(())
+    }
+
+    async fn remove(&mut self, path: &str) -> Result<bool> {
+        Ok(EphemeralWorkspace::remove(self, path))
+    }
+
+    async fn paths(&self) -> Result<Vec<String>> {
+        Ok(EphemeralWorkspace::paths(self).map(str::to_owned).collect())
+    }
+
+    async fn diff(&self) -> Result<PathDiff> {
+        EphemeralWorkspace::diff(self).await
+    }
+
+    async fn commit(&mut self, author: &str, message: &str, created_at: u64) -> Result<ObjectId> {
+        EphemeralWorkspace::commit(self, author, message, created_at).await
+    }
 }
 
 impl<'a> EphemeralWorkspace<'a> {
@@ -335,5 +408,30 @@ mod tests {
         let snap = ws.commit("t", "c", 0).await.unwrap();
         let ws2 = repo.ephemeral_workspace_from(snap).await.unwrap();
         assert!(ws2.diff().await.unwrap().is_empty());
+    }
+
+    // bole-1kz
+    #[tokio::test]
+    async fn ephemeral_workspace_through_trait_object() {
+        let repo = Repository::memory();
+        let mut ws = repo.ephemeral_workspace();
+        {
+            // Exercise the whole surface through &mut dyn Workspace.
+            let w: &mut dyn Workspace = &mut ws;
+            assert_eq!(w.base(), None);
+            w.write("a.txt", Bytes::from_static(b"hi")).await.unwrap();
+            assert_eq!(w.read("a.txt").await.unwrap(), Some(Bytes::from_static(b"hi")));
+            assert_eq!(w.read("missing").await.unwrap(), None);
+            assert_eq!(w.paths().await.unwrap(), vec!["a.txt".to_string()]);
+            assert!(w.remove("a.txt").await.unwrap());
+            assert!(!w.remove("a.txt").await.unwrap());
+            w.write("b.txt", Bytes::from_static(b"x")).await.unwrap();
+            let id = w.commit("t", "m", 0).await.unwrap();
+            assert_eq!(w.base(), Some(id));
+        }
+        // Trait commit advanced base; the snapshot has the file.
+        let base = ws.base().unwrap();
+        let paths = snapshot_paths(&repo.objects, base).await.unwrap();
+        assert!(paths.contains_key("b.txt"));
     }
 }
