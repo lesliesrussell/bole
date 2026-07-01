@@ -305,6 +305,12 @@ impl StorageBackend for PackedDiskBackend {
         Ok(packed + loose_extra)
     }
 
+    async fn compact(&self) -> Result<u64> {
+        let loose_before = self.loose.list().await?.len() as u64;
+        self.repack().await?;
+        Ok(loose_before)
+    }
+
     async fn sweep(
         &self,
         reachable: &std::collections::HashSet<ObjectId>,

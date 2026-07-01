@@ -93,6 +93,13 @@ impl ObjectStore {
     }
 
     // bole-81z
+    /// Consolidates loose objects into a pack (no-op on backends without packs).
+    /// Returns the number of objects packed.
+    pub async fn compact(&self) -> Result<u64> {
+        self.backend.compact().await
+    }
+
+    // bole-81z
     /// Removes every object not in `reachable`, honouring `grace_secs` against
     /// the unix-seconds clock `now`. Returns the number removed. Used by GC.
     pub async fn sweep(

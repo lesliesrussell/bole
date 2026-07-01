@@ -38,6 +38,14 @@ pub trait StorageBackend: Send + Sync {
     }
 
     // bole-81z
+    /// Consolidates loose objects into packs where the backend supports it.
+    /// Returns the number of objects packed. Default: no-op (0) for backends
+    /// without packs (memory, loose-only disk).
+    async fn compact(&self) -> Result<u64> {
+        Ok(0)
+    }
+
+    // bole-81z
     /// Removes every object NOT in `reachable`. The default deletes unreachable
     /// objects individually (used by memory/loose-only backends and ignores the
     /// grace window). Packed backends override to rewrite packs keeping only the

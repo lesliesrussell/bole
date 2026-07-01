@@ -89,3 +89,36 @@ fn repo_info_reports_paths() {
     assert_eq!(info["backend"], "disk");
     assert!(info["repo_dir"].as_str().unwrap().ends_with(".bole"));
 }
+
+// bole-81z
+#[test]
+fn store_repack_and_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    ok(w, &["init", "."]);
+
+    // Store three blobs (loose).
+    let mut ids = Vec::new();
+    for (i, payload) in ["alpha", "beta", "gamma"].iter().enumerate() {
+        std::fs::write(w.join(format!("f{i}.txt")), payload).unwrap();
+        let id = json(w, &["object", "put-blob", &format!("f{i}.txt")])["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        ids.push(id);
+    }
+    assert_eq!(json(w, &["store", "stats"])["objects"], 3);
+
+    // Repack: loose → pack; count is unchanged and reads still resolve.
+    let repacked = json(w, &["store", "repack"]);
+    assert_eq!(repacked["packed"], 3);
+    assert_eq!(json(w, &["store", "stats"])["objects"], 3);
+    let cat = ok(w, &["object", "cat", &ids[0]]);
+    assert_eq!(String::from_utf8(cat.stdout).unwrap(), "alpha");
+
+    // GC with no refs and no registries → all three unreachable → collected
+    // (grace 0 so freshly-written objects are not protected).
+    let gc = json(w, &["store", "gc", "--grace-secs", "0"]);
+    assert_eq!(gc["removed"], 3);
+    assert_eq!(json(w, &["store", "stats"])["objects"], 0);
+}
