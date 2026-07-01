@@ -1,31 +1,32 @@
-# bole
+# bole — access-controlled version control for multi-actor workflows
 
-A next-generation version control library crate for Rust, designed for fine-grained visibility, pluggable storage, typed secrets, multi-actor workflows, and backward-compatible Git export.
+bole is a version control library for multi-actor, access-controlled workflows. Unlike Git — where access control lives outside the repository in a hosting platform or filesystem permissions — bole encodes actor identities, visibility labels, and operation policies as first-class objects in the same content-addressed store as your files and history. That means a real **label lattice** with scoped clearances, **ACL-filtered snapshot views**, **policy-hook-gated** timeline advancement and merges, and **envelope-encrypted secrets** stored alongside source files with access gated by the same rules — making bole a foundation for agent-safe workflows where every actor's capability is declared, enforced, and auditable without a separate service. Distributed sync (content-addressed pack transfer with compare-and-swap on heads) and a git import/export round-trip make it interoperable; networked transports, signed policy verification, and KMS integration are the active roadmap.
 
 ## What bole is
 
-bole reimagines the core VCS abstraction. Instead of "files in a directory plus a commit DAG," bole's primitives are:
+The access model — actors, labels, and policy — is the reason for the design. The snapshot/timeline model below is the mechanism.
 
-- **Snapshots** — the only durable state unit. A snapshot is a typed map from logical paths to content IDs, plus metadata (author, timestamp, parents). Every state change — commit, merge, agent action — produces a new snapshot. Nothing is mutable.
-- **Timelines** — ordered views over the snapshot DAG. A timeline is a named pointer (like a branch) with a configurable policy for how new snapshots are added.
-- **Tags** — lightweight named pointers to a snapshot or timeline head.
-- **ACLs** — every path and timeline participates in an access-control lattice. Private files, private timelines, and policy-driven merges are first-class, not conventions layered on top.
-- **Secrets and env overlays** — typed object-graph nodes with separate encryption and visibility. A workspace view is computed as base files + env overlays + secret bindings; `.env` files are never committed.
+- **Actors and access** — named actors carry labeled grants (path globs, timeline patterns) evaluated against a bounded label lattice with scoped clearances; access-controlled views filter what an actor can see. An automated agent and a human developer are the same concept — just different grant sets.
+- **Timelines with policy** — named movable pointers with configurable advancement policies (`ff`, `append`, `unrestricted`) and programmable `PolicyHook`s (e.g. approval-gated merge into `release/**`) enforced at the API boundary.
+- **Secrets and env overlays** — envelope-encrypted values and environment bundles stored as content-addressed objects, access-gated by the same actor model, never committed as plaintext.
+- **Snapshots** — the only durable state: immutable typed file trees plus metadata. Every operation produces a new snapshot; nothing is rewritten.
+- **Tags** — fixed named pointers to a snapshot.
 
-bole is primarily a **library crate**: it provides the data model and storage layer, and you build applications and tools on top. A command-line interface (`bole-cli`, binary `bole`) ships alongside it as a thin wrapper over the library — see the [CLI reference](docs/CLI.md).
+bole is primarily a **library crate**: it provides the data model, access engine, and storage layer, and you build applications and tools on top. A command-line interface (`bole-cli`, binary `bole`) ships alongside it as a thin wrapper over the library — see the [CLI reference](docs/CLI.md).
 
-## Features (Gates 1–8)
+## Capabilities
 
-| Gate | Feature |
-|------|---------|
-| G1 | Content-addressed object store (BLAKE3), immutable snapshots |
-| G2 | Tags and timelines as movable references |
-| G3 | Granular ACLs — private paths, private timelines, policy-driven merge |
-| G4 | Secrets (`chacha20poly1305`) and env overlays as first-class typed nodes |
-| G5 | Pluggable storage backends — `MemoryBackend` and `DiskBackend` |
-| G6 | Multi-actor workflows — ephemeral timelines, agent capability enforcement |
-| G7 | Git projection — export a filtered timeline to a bare Git repo |
-| G8 | Storage deduplication verified, criterion benchmark suite |
+| Capability | Description |
+|-----------|-------------|
+| Content-addressed store | Immutable snapshots; identical content is stored once; BLAKE3-verified integrity |
+| Timelines and tags | Named history views with configurable advancement policy |
+| Label lattice + clearances | Bounded partial-order labels, scoped actor clearances, ACL-filtered snapshot views; glob ACLs are the degenerate two-point case |
+| PolicyHook | Programmable, content-addressed policy gating `advance`/`merge` (e.g. N approvals for `release/**`) |
+| Secrets and env overlays | Envelope-encrypted typed objects (per-secret data key wrapped by a master key) in the same store; env bundles mixing plain and secret values |
+| Packs + GC | Immutable pack format (disk + wire payload), mark-sweep GC from refs, atomic multi-ref transactions |
+| Distributed sync | Negotiated pack transfer (missing-closure) with CAS-on-heads fetch/push/clone |
+| Git interop | One-way ACL-filtered export to a bare Git repo, and git → bole import with an identity map for round-trips |
+| Pluggable storage | In-memory (agents, tests) and packed disk-backed (CLI) backends behind one interface |
 
 ## Quick Start
 
@@ -185,6 +186,24 @@ cargo bench
 ```
 
 Benchmarks cover object store put/get, snapshot operations, and git projection at 10 and 100 commits. Results are saved as a criterion baseline (`--save-baseline gate8`).
+
+## Status and roadmap
+
+The design direction is realized in library form; several workstreams landed their core with networked/crypto follow-ups still open. This table is the canonical honesty record.
+
+| Capability | Today | Notes / follow-up |
+|-----------|-------|-------------------|
+| Content-addressed object store, timelines, tags, ff/append/unrestricted policy | Realized | — |
+| Real label lattice + scoped clearances (glob ACLs as degenerate case) | Realized | WS1 (`bole-fo2`) |
+| PolicyHook — approval-gated merge/advance | Realized | WS1 (`bole-fo2`); signed attestation for approvals is roadmap |
+| Workspace trait (in-memory + disk-backed) | Realized | WS2 (`bole-1kz`) |
+| Envelope-encrypted secrets (per-secret data key + master key), `env resolve` / `run` / `rekey` | Realized | WS3 (`bole-9mz`); KMS provider is roadmap (`bole-vw9`) |
+| Pack format + mark-sweep GC + atomic multi-ref transactions | Realized | WS4 (`bole-81z`) + `bole-sk6` |
+| Distributed sync — fetch/push/clone with CAS on heads | Realized (in-process core) | WS5 (`bole-cy6`); networked transports (`bole-6qy`), signed policy verification (`bole-0tp`), authn mapping (`bole-6h7`) are roadmap |
+| Git import / round-trip + identity map | Realized (library) | WS6 (`bole-mtq`); `bole git import` CLI verb is roadmap (`bole-58u`) |
+| Linked-worktree hardening (`prune`/`repair`/`list --check`) | Realized | WS7 (`bole-3hj`) |
+
+Present-tense claims above describe what runs today; items marked "roadmap" are not yet shipped.
 
 ## License
 
