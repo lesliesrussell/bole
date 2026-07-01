@@ -11,6 +11,97 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+// bole-3hj
+use crate::context::{Pointer, REPO_DIR};
+
+// bole-3hj
+/// The consistency of a registered linked worktree vs its on-disk pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    /// Directory, pointer, id, and store all consistent.
+    Ok,
+    /// `entry.path` is not an existing directory.
+    MissingDirectory,
+    /// The directory exists but `<path>/.bole` is absent or not a file.
+    MissingPointer,
+    /// `.bole` exists but is not readable / not a valid `Pointer`.
+    BadPointer(String),
+    /// The pointer's id does not match the registry key.
+    WrongId { found: String },
+    /// The pointer's store path differs from the current store (store moved) but
+    /// the id matches — recoverable by `repair` (R1).
+    WrongStore { found: String },
+}
+
+impl Status {
+    /// A stable machine string for JSON / scripting.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Status::Ok => "ok",
+            Status::MissingDirectory => "missing-directory",
+            Status::MissingPointer => "missing-pointer",
+            Status::BadPointer(_) => "bad-pointer",
+            Status::WrongId { .. } => "wrong-id",
+            Status::WrongStore { .. } => "wrong-store",
+        }
+    }
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Status::Ok)
+    }
+    /// Prunable by default (disconnected from any recoverable state).
+    pub fn is_prunable(&self) -> bool {
+        matches!(
+            self,
+            Status::MissingDirectory
+                | Status::MissingPointer
+                | Status::BadPointer(_)
+                | Status::WrongId { .. }
+        )
+    }
+    /// Recoverable by `repair` (store moved, id still matches).
+    pub fn is_recoverable(&self) -> bool {
+        matches!(self, Status::WrongStore { .. })
+    }
+}
+
+// bole-3hj
+/// Pure classification of one registry entry against the filesystem. Reads the
+/// pointer file directly (before any RepoContext is established).
+pub fn classify(repo_dir: &Path, id: &str, entry: &Entry) -> Status {
+    let dir = Path::new(&entry.path);
+    if !dir.is_dir() {
+        return Status::MissingDirectory;
+    }
+    let ptr_path = dir.join(REPO_DIR);
+    if !ptr_path.is_file() {
+        return Status::MissingPointer;
+    }
+    let bytes = match std::fs::read(&ptr_path) {
+        Ok(b) => b,
+        Err(e) => return Status::BadPointer(e.to_string()),
+    };
+    let ptr: Pointer = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => return Status::BadPointer(e.to_string()),
+    };
+    if ptr.id != id {
+        return Status::WrongId { found: ptr.id };
+    }
+    if !same_path(&ptr.store, repo_dir) {
+        return Status::WrongStore { found: ptr.store };
+    }
+    Status::Ok
+}
+
+// bole-3hj
+/// Path equality up to canonicalization (falls back to literal compare).
+pub fn same_path(a: &str, b: &Path) -> bool {
+    match (std::fs::canonicalize(a).ok(), std::fs::canonicalize(b).ok()) {
+        (Some(x), Some(y)) => x == y,
+        _ => Path::new(a) == b,
+    }
+}
+
 /// One registered linked worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {

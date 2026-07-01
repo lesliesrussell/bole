@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 
 use crate::context::{Pointer, RepoContext};
@@ -56,11 +56,41 @@ pub enum Cmd {
         actor: Option<String>,
     },
     /// List the primary and all linked worktrees.
-    List,
+    List {
+        // bole-3hj
+        /// Exit 1 if any linked worktree is stale.
+        #[arg(long)]
+        check: bool,
+    },
     /// Remove a linked worktree's registration (leaves your files untouched).
     Remove {
         /// Worktree directory.
         path: PathBuf,
+    },
+    // bole-3hj
+    /// Drop registry entries whose linked worktree can no longer be verified.
+    Prune {
+        /// Print what would be pruned; modify nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also prune recoverable (store-moved) entries.
+        #[arg(long)]
+        include_recoverable: bool,
+    },
+    // bole-3hj
+    /// Reconcile pointer/registry inconsistencies (moved store/dir, orphans).
+    Repair {
+        /// Print what would change; modify nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// R2: update a moved worktree's registered path to this new location.
+        #[arg(long = "moved-to")]
+        moved_to: Option<PathBuf>,
+        /// R3: adopt an orphaned pointer directory into the registry.
+        #[arg(long)]
+        adopt: Option<PathBuf>,
+        /// Worktree id (required with --moved-to).
+        id: Option<String>,
     },
 }
 
@@ -78,8 +108,11 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
         Cmd::Clear => clear(ctx, out).await,
         // bole-hrk
         Cmd::Add { path, timeline, actor } => add(ctx, out, path, timeline, actor).await,
-        Cmd::List => list(ctx, out).await,
+        Cmd::List { check } => list(ctx, out, check).await,
         Cmd::Remove { path } => remove(ctx, out, path).await,
+        // bole-3hj
+        Cmd::Prune { dry_run, include_recoverable } => prune(ctx, out, dry_run, include_recoverable),
+        Cmd::Repair { dry_run, moved_to, adopt, id } => repair(ctx, out, dry_run, moved_to, adopt, id),
     }
 }
 
@@ -309,26 +342,49 @@ async fn add(
 }
 
 // bole-hrk
-async fn list(ctx: &RepoContext, out: &Output) -> Result<()> {
-    // (path, timeline, head, linked)
-    let mut rows: Vec<(String, Option<String>, Option<bole::ObjectId>, bool)> = Vec::new();
-    for (i, (path, tl)) in existing_bindings(ctx)?.into_iter().enumerate() {
-        let head = match &tl {
-            Some(name) => ctx.repo.refs.get_timeline(&resolve::ref_name(name)?)?.map(|t| t.head),
-            None => None,
-        };
-        rows.push((path, tl, head, i != 0)); // first entry is the primary
+// bole-3hj: (path, timeline, head, linked, status)
+type ListRow = (String, Option<String>, Option<bole::ObjectId>, bool, String);
+
+async fn list(ctx: &RepoContext, out: &Output, check: bool) -> Result<()> {
+    let mut rows: Vec<ListRow> = Vec::new();
+
+    // Primary worktree (always present, always "ok").
+    let primary_state = ctx.repo_dir.join("cli-state.json");
+    let primary_path = ctx.repo_dir.parent().unwrap_or(&ctx.repo_dir).display().to_string();
+    let primary_tl = read_binding(&primary_state)?;
+    let primary_head = head_of(ctx, &primary_tl)?;
+    rows.push((primary_path, primary_tl, primary_head, false, "ok".to_string()));
+
+    // Linked worktrees, each with a consistency status (bole-3hj).
+    let mut any_stale = false;
+    for (id, entry) in &worktrees::load(&ctx.repo_dir)?.worktrees {
+        let status = worktrees::classify(&ctx.repo_dir, id, entry);
+        if !status.is_ok() {
+            any_stale = true;
+        }
+        let sp = worktrees::meta_dir(&ctx.repo_dir, id).join("state.json");
+        let tl = read_binding(&sp).unwrap_or(None);
+        let head = head_of(ctx, &tl)?;
+        rows.push((entry.path.clone(), tl, head, true, status.as_str().to_string()));
     }
+
     out.emit(
         || {
             rows.iter()
-                .map(|(p, tl, head, linked)| {
+                .map(|(p, tl, head, linked, status)| {
+                    let kind = if *linked { "  (linked)" } else { "  (primary)" };
+                    let stale = if *linked && status != "ok" {
+                        format!("  [STALE: {status}]")
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{}  {}  {}{}",
+                        "{}  {}  {}{}{}",
                         p,
                         tl.as_deref().unwrap_or("(none)"),
                         head.map(|h| short(&h)).unwrap_or_else(|| "-".into()),
-                        if *linked { "  (linked)" } else { "" },
+                        kind,
+                        stale,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -337,14 +393,237 @@ async fn list(ctx: &RepoContext, out: &Output) -> Result<()> {
         || {
             serde_json::json!(rows
                 .iter()
-                .map(|(p, tl, head, linked)| serde_json::json!({
+                .map(|(p, tl, head, linked, status)| serde_json::json!({
                     "path": p,
                     "timeline": tl,
                     "head": head.map(|h| h.to_string()),
                     "linked": linked,
+                    "status": status,
                 }))
                 .collect::<Vec<_>>())
         },
+    );
+
+    // bole-3hj: --check turns a stale linked worktree into a non-zero exit.
+    if check && any_stale {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+// bole-3hj
+/// Resolves a timeline binding to its current head, if the timeline exists.
+fn head_of(ctx: &RepoContext, tl: &Option<String>) -> Result<Option<bole::ObjectId>> {
+    match tl {
+        Some(name) => Ok(ctx.repo.refs.get_timeline(&resolve::ref_name(name)?)?.map(|t| t.head)),
+        None => Ok(None),
+    }
+}
+
+// bole-3hj
+/// `workspace prune` — drop entries whose linked worktree cannot be verified.
+fn prune(
+    ctx: &RepoContext,
+    out: &Output,
+    dry_run: bool,
+    include_recoverable: bool,
+) -> Result<()> {
+    use crate::context::REPO_DIR;
+    let mut registry = worktrees::load(&ctx.repo_dir)?;
+    let ids: Vec<String> = registry.worktrees.keys().cloned().collect();
+    let mut pruned: Vec<(String, String, String)> = Vec::new();
+    let mut clean = 0usize;
+
+    for id in ids {
+        let entry = registry.worktrees[&id].clone();
+        let status = worktrees::classify(&ctx.repo_dir, &id, &entry);
+        let prunable = status.is_prunable() || (include_recoverable && status.is_recoverable());
+        if !prunable {
+            if status.is_ok() {
+                clean += 1;
+            }
+            continue;
+        }
+        if !dry_run {
+            // Remove the metadata dir (idempotent).
+            let _ = std::fs::remove_dir_all(worktrees::meta_dir(&ctx.repo_dir, &id));
+            // For a bad/mismatched pointer with a surviving directory, remove ONLY
+            // the `.bole` pointer file; never touch the user's other files.
+            if matches!(status, worktrees::Status::BadPointer(_) | worktrees::Status::WrongId { .. }) {
+                let ptr = std::path::Path::new(&entry.path).join(REPO_DIR);
+                if ptr.is_file() {
+                    let _ = std::fs::remove_file(ptr);
+                }
+            }
+            registry.worktrees.remove(&id);
+        }
+        pruned.push((id, entry.path, status.as_str().to_string()));
+    }
+
+    if !dry_run {
+        worktrees::save(&ctx.repo_dir, &registry)?;
+    }
+
+    let pruned_for_json = pruned.clone();
+    let n = pruned.len();
+    out.emit(
+        || {
+            if pruned.is_empty() {
+                format!("nothing to prune; {clean} entr{} clean.", if clean == 1 { "y" } else { "ies" })
+            } else {
+                let mut lines: Vec<String> = pruned
+                    .iter()
+                    .map(|(id, path, status)| {
+                        let verb = if dry_run { "would prune" } else { "pruned" };
+                        format!("{verb} worktree {id}  (path: {path}) — {status}")
+                    })
+                    .collect();
+                lines.push(format!("{n} entr{} {}, {clean} clean.", if n == 1 { "y" } else { "ies" }, if dry_run { "would be pruned" } else { "pruned" }));
+                lines.join("\n")
+            }
+        },
+        || {
+            serde_json::json!(pruned_for_json
+                .iter()
+                .map(|(id, path, status)| serde_json::json!({
+                    "id": id, "path": path, "status": status, "pruned": !dry_run,
+                }))
+                .collect::<Vec<_>>())
+        },
+    );
+    Ok(())
+}
+
+// bole-3hj
+/// `workspace repair` — reconcile recoverable pointer/registry inconsistencies.
+fn repair(
+    ctx: &RepoContext,
+    out: &Output,
+    dry_run: bool,
+    moved_to: Option<PathBuf>,
+    adopt: Option<PathBuf>,
+    id: Option<String>,
+) -> Result<()> {
+    if let Some(path) = adopt {
+        return repair_adopt(ctx, out, dry_run, path);
+    }
+    if let Some(new_path) = moved_to {
+        let id = id.ok_or_else(|| anyhow::anyhow!("--moved-to requires a worktree id"))?;
+        return repair_moved(ctx, out, dry_run, new_path, id);
+    }
+    repair_store_moved(ctx, out, dry_run)
+}
+
+// bole-3hj — R1: the primary store was moved; rewrite each pointer's `store`.
+fn repair_store_moved(ctx: &RepoContext, out: &Output, dry_run: bool) -> Result<()> {
+    use crate::context::{Pointer, REPO_DIR};
+    let registry = worktrees::load(&ctx.repo_dir)?;
+    let store = ctx.repo_dir.display().to_string();
+    let mut repaired: Vec<(String, String)> = Vec::new();
+    for (id, entry) in &registry.worktrees {
+        if worktrees::classify(&ctx.repo_dir, id, entry).is_recoverable() {
+            if !dry_run {
+                let ptr = Pointer { store: store.clone(), id: id.clone() };
+                let bytes = serde_json::to_vec_pretty(&ptr)?;
+                std::fs::write(std::path::Path::new(&entry.path).join(REPO_DIR), bytes)
+                    .with_context(|| format!("rewriting pointer for {id}"))?;
+            }
+            repaired.push((id.clone(), entry.path.clone()));
+        }
+    }
+    let repaired_json = repaired.clone();
+    out.emit(
+        || {
+            if repaired.is_empty() {
+                "no store-moved worktrees to repair.".to_string()
+            } else {
+                let verb = if dry_run { "would repair" } else { "repaired" };
+                repaired
+                    .iter()
+                    .map(|(id, path)| format!("{verb} worktree {id}  (pointer store updated)  path: {path}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        },
+        || {
+            serde_json::json!(repaired_json
+                .iter()
+                .map(|(id, path)| serde_json::json!({ "id": id, "path": path, "repaired": !dry_run }))
+                .collect::<Vec<_>>())
+        },
+    );
+    Ok(())
+}
+
+// bole-3hj — R2: a worktree directory moved; update its registered path.
+fn repair_moved(ctx: &RepoContext, out: &Output, dry_run: bool, new_path: PathBuf, id: String) -> Result<()> {
+    use crate::context::{Pointer, REPO_DIR};
+    let mut registry = worktrees::load(&ctx.repo_dir)?;
+    if !registry.worktrees.contains_key(&id) {
+        bail!("no such worktree id '{id}'; did you mean --adopt?");
+    }
+    let canon = std::fs::canonicalize(&new_path)
+        .with_context(|| format!("resolving {}", new_path.display()))?;
+    let ptr_bytes = std::fs::read(canon.join(REPO_DIR))
+        .with_context(|| format!("reading pointer at {}", canon.display()))?;
+    let ptr: Pointer = serde_json::from_slice(&ptr_bytes).context("parsing pointer")?;
+    if !worktrees::same_path(&ptr.store, &ctx.repo_dir) {
+        bail!("pointer store '{}' does not match this store", ptr.store);
+    }
+    if ptr.id != id {
+        bail!("pointer id '{}' does not match '{id}'", ptr.id);
+    }
+    let old = registry.worktrees[&id].path.clone();
+    let new_str = canon.display().to_string();
+    if !dry_run {
+        registry.worktrees.get_mut(&id).unwrap().path = new_str.clone();
+        worktrees::save(&ctx.repo_dir, &registry)?;
+    }
+    out.emit(
+        || format!("{} worktree {id}: path {old} -> {new_str}", if dry_run { "would repair" } else { "repaired" }),
+        || serde_json::json!({ "id": id, "old_path": old, "new_path": new_str, "repaired": !dry_run }),
+    );
+    Ok(())
+}
+
+// bole-3hj — R3: adopt an orphaned pointer directory into the registry.
+fn repair_adopt(ctx: &RepoContext, out: &Output, dry_run: bool, path: PathBuf) -> Result<()> {
+    use crate::context::{CliState, Pointer, REPO_DIR};
+    let canon = std::fs::canonicalize(&path)
+        .with_context(|| format!("resolving {}", path.display()))?;
+    let ptr_bytes = std::fs::read(canon.join(REPO_DIR))
+        .with_context(|| format!("reading pointer at {}", canon.display()))?;
+    let ptr: Pointer = serde_json::from_slice(&ptr_bytes).context("parsing pointer")?;
+    if !worktrees::same_path(&ptr.store, &ctx.repo_dir) {
+        bail!("pointer store '{}' does not match this store", ptr.store);
+    }
+    let id = ptr.id.clone();
+    let canon_str = canon.display().to_string();
+    let mut registry = worktrees::load(&ctx.repo_dir)?;
+    if let Some(existing) = registry.worktrees.get(&id) {
+        if worktrees::same_path(&existing.path, &canon) {
+            out.emit(
+                || format!("worktree {id} already consistent at {canon_str}"),
+                || serde_json::json!({ "id": id, "path": canon_str, "adopted": false }),
+            );
+            return Ok(());
+        }
+        bail!("id '{id}' is already registered at '{}'; use --moved-to to update", existing.path);
+    }
+    if !dry_run {
+        registry.worktrees.insert(id.clone(), worktrees::Entry { path: canon_str.clone() });
+        worktrees::save(&ctx.repo_dir, &registry)?;
+        // Ensure the metadata dir exists with a default (unbound) state.
+        let meta = worktrees::meta_dir(&ctx.repo_dir, &id);
+        std::fs::create_dir_all(&meta)?;
+        let state_path = meta.join("state.json");
+        if !state_path.exists() {
+            std::fs::write(&state_path, serde_json::to_vec_pretty(&CliState::default())?)?;
+        }
+    }
+    out.emit(
+        || format!("{} worktree {id} at {canon_str}", if dry_run { "would adopt" } else { "adopted" }),
+        || serde_json::json!({ "id": id, "path": canon_str, "adopted": !dry_run }),
     );
     Ok(())
 }
