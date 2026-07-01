@@ -160,6 +160,13 @@ fn decode_frame(frame: &[u8]) -> Result<(ObjectId, Vec<u8>)> {
 }
 
 // bole-81z
+/// Decodes and verifies a single self-contained frame slice, returning
+/// `(id, canonical_bytes)`. Used by the packed backend to read one object.
+pub fn decode_frame_public(frame: &[u8]) -> Result<(ObjectId, Vec<u8>)> {
+    decode_frame(frame)
+}
+
+// bole-81z
 /// Random-access read of one object at `(offset, len)` in a pack, verifying it.
 pub fn read_frame_at(pack: &[u8], offset: u64, len: u64) -> Result<(ObjectId, Vec<u8>)> {
     let start = offset as usize;

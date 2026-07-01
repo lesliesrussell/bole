@@ -29,4 +29,11 @@ pub trait StorageBackend: Send + Sync {
     // bole-p8u
     /// Returns the ids of all objects currently in the store.
     async fn list(&self) -> Result<Vec<ObjectId>>;
+
+    // bole-81z
+    /// Returns the number of distinct objects in the store. The default counts
+    /// `list()`; backends with a cheaper path (e.g. pack index headers) override.
+    async fn count(&self) -> Result<u64> {
+        Ok(self.list().await?.len() as u64)
+    }
 }

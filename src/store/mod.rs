@@ -4,6 +4,8 @@ pub mod disk;
 pub mod memory;
 // bole-81z
 pub mod pack;
+// bole-81z
+pub mod packed;
 
 use bytes::Bytes;
 use std::collections::BTreeMap;
