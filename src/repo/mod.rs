@@ -143,6 +143,12 @@ impl Repository {
         self.hooks.push(spec);
     }
 
+    // bole-sk6
+    /// Begins an atomic multi-ref transaction over this repository's refs.
+    pub fn transaction(&self) -> crate::refs::RefTransaction<'_> {
+        self.refs.transaction()
+    }
+
     // bole-fo2
     /// Builds the active policy registry: the built-in `TimelinePolicyHook` plus
     /// every resolved declarative hook (fail-closed on unknown kinds).

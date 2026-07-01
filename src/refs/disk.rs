@@ -12,7 +12,15 @@ impl DiskRefBackend {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        let backend = Self { root };
+        // bole-sk6: complete any transaction interrupted before its journal was deleted.
+        backend.recover()?;
+        Ok(backend)
+    }
+
+    // bole-sk6
+    fn txn_dir(&self) -> PathBuf {
+        self.root.join("refs").join(".txn")
     }
 
     fn ref_path(&self, name: &RefName) -> PathBuf {
@@ -33,6 +41,10 @@ impl DiskRefBackend {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
+                // bole-sk6: skip hidden dirs (e.g. the .txn journal dir).
+                if path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with('.')).unwrap_or(false) {
+                    continue;
+                }
                 self.walk_refs(&path, root, prefix, acc)?;
             } else {
                 if path.file_name()
@@ -100,6 +112,72 @@ impl RefBackend for DiskRefBackend {
         names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(names)
     }
+
+    // bole-sk6
+    /// Write-ahead journal commit: record the plan's absolute final values,
+    /// fsync (the commit point), apply each set/delete, then delete the journal.
+    /// A crash before the fsync leaves no durable journal (the txn never
+    /// happened); a crash after it is completed idempotently by `recover`.
+    fn apply_atomic(&self, plan: &[(RefName, Option<Ref>)]) -> Result<()> {
+        if plan.is_empty() {
+            return Ok(());
+        }
+        let txn_dir = self.txn_dir();
+        fs::create_dir_all(&txn_dir)?;
+        let bytes = postcard::to_allocvec(&plan.to_vec()).map_err(|e| Error::Codec(e.to_string()))?;
+        let txid = blake3::hash(&bytes).to_hex().to_string();
+        let journal = txn_dir.join(format!("{txid}.journal"));
+        let tmp = txn_dir.join(format!(".{txid}.journal.tmp"));
+        {
+            use std::io::Write as _;
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?; // commit point once renamed
+        }
+        fs::rename(&tmp, &journal)?;
+        if let Ok(d) = fs::File::open(&txn_dir) {
+            let _ = d.sync_all();
+        }
+        apply_plan(self, plan)?;
+        fs::remove_file(&journal)?;
+        Ok(())
+    }
+
+    // bole-sk6
+    fn recover(&self) -> Result<()> {
+        let txn_dir = self.txn_dir();
+        let rd = match fs::read_dir(&txn_dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::Io(e)),
+        };
+        for entry in rd {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("journal") {
+                continue;
+            }
+            let bytes = fs::read(&path)?;
+            // Absolute-value plan → idempotent replay (overwrite partial state).
+            let plan: Vec<(RefName, Option<Ref>)> =
+                postcard::from_bytes(&bytes).map_err(|e| Error::Codec(e.to_string()))?;
+            apply_plan(self, &plan)?;
+            fs::remove_file(&path)?;
+        }
+        Ok(())
+    }
+}
+
+// bole-sk6
+/// Applies each ref set/delete in a resolved plan (no journal — the caller owns
+/// journaling/recovery).
+fn apply_plan(backend: &DiskRefBackend, plan: &[(RefName, Option<Ref>)]) -> Result<()> {
+    for (name, val) in plan {
+        match val {
+            Some(r) => backend.set(name, r)?,
+            None => backend.delete(name)?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

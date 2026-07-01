@@ -39,6 +39,8 @@ pub enum Error {
     // bole-3w9
     /// A timeline advance was rejected because it violates the timeline's [`TimelinePolicy`](crate::refs::TimelinePolicy).
     #[error("policy violation: {0}")] PolicyViolation(String),
+    // bole-sk6
+    #[error("transaction conflict: {0}")] TransactionConflict(String),
 }
 
 // bole-p8u

@@ -10,7 +10,7 @@ use std::fmt;
 /// must not start with `.`, must not contain null bytes, and the name must not
 /// begin or end with `/`.  These rules mirror Git's ref naming restrictions to
 /// keep projection straightforward.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RefName(String);
 
 impl RefName {

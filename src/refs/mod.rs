@@ -6,6 +6,8 @@ pub mod name;
 pub mod ref_type;
 pub mod tag;
 pub mod timeline;
+// bole-sk6
+pub mod transaction;
 
 // bole-i1v
 pub use backend::RefBackend;
@@ -22,6 +24,8 @@ pub use timeline::{Timeline, TimelinePolicy};
 
 // bole-2jp
 pub use self::store::RefStore;
+// bole-sk6
+pub use transaction::{RefOp, RefTransaction};
 
 // bole-2jp
 use crate::error::Error;
@@ -148,6 +152,25 @@ mod store {
         // bole-1vi
         pub(crate) fn set_raw(&self, name: &RefName, r: &Ref) -> Result<()> {
             self.backend.set(name, r)
+        }
+
+        // bole-sk6
+        /// Begins an atomic multi-ref transaction.
+        pub fn transaction(&self) -> super::RefTransaction<'_> {
+            super::RefTransaction::new(self)
+        }
+
+        // bole-sk6
+        /// Resolves and atomically applies a transaction's ops. All-or-nothing.
+        pub(crate) fn commit_transaction(&self, ops: &[super::RefOp]) -> Result<()> {
+            let plan = super::transaction::resolve(&*self.backend, ops)?;
+            self.backend.apply_atomic(&plan)
+        }
+
+        // bole-sk6
+        /// Replays any interrupted transaction journal (called on open).
+        pub fn recover(&self) -> Result<()> {
+            self.backend.recover()
         }
     }
 }
@@ -300,5 +323,104 @@ mod tests {
         let tl = s.get_timeline(&name("main")).unwrap().unwrap();
         assert_eq!(tl.kind, "persistent");
         assert_eq!(tl.expires_at, None);
+    }
+
+    // bole-sk6
+    #[test]
+    fn transaction_commits_all_or_nothing() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // A multi-ref transaction: advance main + create a tag + a new timeline.
+        let new_head = ObjectId::new([2u8; 32]);
+        let mut tx = s.transaction();
+        tx.advance_head(name("main"), new_head)
+            .create_tag(name("v1"), id, None, 1)
+            .create_timeline(name("feature"), id, TimelinePolicy::Append, 1, "persistent".into(), None);
+        tx.commit().unwrap();
+        assert_eq!(s.get_timeline(&name("main")).unwrap().unwrap().head, new_head);
+        assert_eq!(s.get_tag(&name("v1")).unwrap().unwrap().target, id);
+        assert!(s.get_timeline(&name("feature")).unwrap().is_some());
+    }
+
+    // bole-sk6
+    #[test]
+    fn transaction_aborts_on_failed_op_leaves_no_partial_state() {
+        let s = store();
+        let id = ObjectId::new([1u8; 32]);
+        s.create_timeline(name("main"), id, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // Second op fails (create_tag on an existing name) → nothing applied.
+        let mut tx = s.transaction();
+        tx.advance_head(name("main"), ObjectId::new([9u8; 32]))
+            .create_tag(name("main"), id, None, 1); // 'main' already exists
+        assert!(tx.commit().is_err());
+        // The advance was NOT applied.
+        assert_eq!(s.get_timeline(&name("main")).unwrap().unwrap().head, id);
+    }
+
+    // bole-sk6
+    #[test]
+    fn cas_advance_head_if_rejects_lost_update() {
+        let s = store();
+        let a = ObjectId::new([1u8; 32]);
+        let b = ObjectId::new([2u8; 32]);
+        let c = ObjectId::new([3u8; 32]);
+        s.create_timeline(name("main"), a, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // Correct expected old head → succeeds.
+        let mut tx = s.transaction();
+        tx.advance_head_if(name("main"), a, b);
+        tx.commit().unwrap();
+        assert_eq!(s.get_timeline(&name("main")).unwrap().unwrap().head, b);
+
+        // Stale expected old head → conflict, no change.
+        let mut tx = s.transaction();
+        tx.advance_head_if(name("main"), a, c); // expects a, but head is b
+        let err = tx.commit().unwrap_err();
+        assert!(matches!(err, crate::error::Error::TransactionConflict(_)), "got {err:?}");
+        assert_eq!(s.get_timeline(&name("main")).unwrap().unwrap().head, b);
+    }
+
+    // bole-sk6
+    #[test]
+    fn disk_transaction_and_journal_recovery() {
+        use crate::refs::DiskRefBackend;
+        use crate::refs::Ref;
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = ObjectId::new([1u8; 32]);
+        let b = ObjectId::new([2u8; 32]);
+
+        // A committed disk transaction persists and leaves no journal behind.
+        {
+            let s = RefStore::new(DiskRefBackend::open(dir.path()).unwrap());
+            s.create_timeline(name("main"), a, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+            let mut tx = s.transaction();
+            tx.advance_head(name("main"), b).create_tag(name("v1"), a, None, 1);
+            tx.commit().unwrap();
+        }
+        let txn_dir = dir.path().join("refs").join(".txn");
+        let leftover = std::fs::read_dir(&txn_dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.path().extension().is_some_and(|x| x == "journal")))
+            .unwrap_or(false);
+        assert!(!leftover, "journal should be deleted after commit");
+
+        // Simulate a crash mid-commit: drop a journal recording an absolute
+        // final value, then reopen → recovery replays it idempotently.
+        std::fs::create_dir_all(&txn_dir).unwrap();
+        let plan: Vec<(RefName, Option<Ref>)> = vec![(
+            name("recovered"),
+            Some(Ref::Tag(crate::refs::Tag { target: b, created_at: 5, message: None })),
+        )];
+        let bytes = postcard::to_allocvec(&plan).unwrap();
+        std::fs::write(txn_dir.join("deadbeef.journal"), &bytes).unwrap();
+
+        let s2 = RefStore::new(DiskRefBackend::open(dir.path()).unwrap());
+        // Recovery applied the journalled ref and removed the journal.
+        assert_eq!(s2.get_tag(&name("recovered")).unwrap().unwrap().target, b);
+        assert!(!txn_dir.join("deadbeef.journal").exists());
+        // The earlier committed state is intact.
+        assert_eq!(s2.get_timeline(&name("main")).unwrap().unwrap().head, b);
     }
 }
