@@ -23,6 +23,29 @@ pub async fn project_to_git(
     target_path: &Path,
     accessor: &Accessor,
 ) -> Result<()> {
+    project_impl(repo, target_path, accessor, None).await
+}
+
+// bole-mtq
+/// Like [`project_to_git`] but loads/persists the [`IdentityMap`](super::git_import::IdentityMap)
+/// sidecar under `identity_map_dir`, recording each bole Snapshot ↔ git commit
+/// correspondence so a later import can detect bole-sourced objects and skip
+/// re-translating them (round-trip idempotency).
+pub async fn project_to_git_mapped(
+    repo: &Repository,
+    target_path: &Path,
+    accessor: &Accessor,
+    identity_map_dir: &Path,
+) -> Result<()> {
+    project_impl(repo, target_path, accessor, Some(identity_map_dir)).await
+}
+
+async fn project_impl(
+    repo: &Repository,
+    target_path: &Path,
+    accessor: &Accessor,
+    identity_map_dir: Option<&Path>,
+) -> Result<()> {
     // bole-68s
     // Pass 1: open existing bare repo or create a new one (idempotent)
     let git_repo = if target_path.exists() {
@@ -82,11 +105,24 @@ pub async fn project_to_git(
         }
     }
 
-    // Pass 5: write tag refs (lightweight; target must be in id_map)
+    // Pass 5: write tag refs. Lightweight tags (message None) point directly at
+    // the commit; annotated tags (message Some) write a git tag object first.
     for name in &all_refs {
         if let Some(Ref::Tag(tag)) = repo.refs.get(name)? {
-            if let Some(git_id) = id_map.get(&tag.target) {
-                write_loose_ref(target_path, &format!("refs/tags/{}", name.as_str()), git_id)?;
+            if let Some(git_commit) = id_map.get(&tag.target).cloned() {
+                let git_ref_target = match &tag.message {
+                    None => git_commit,
+                    // bole-mtq
+                    Some(msg) => {
+                        let tagger = format!("bole <bole@local> {} +0000", tag.created_at);
+                        let tag_bytes = encode_tag(&git_commit, name.as_str(), &tagger, msg);
+                        git_repo
+                            .objects
+                            .write_buf(gix::object::Kind::Tag, &tag_bytes)
+                            .map_err(|e| Error::GitProjection(e.to_string()))?
+                    }
+                };
+                write_loose_ref(target_path, &format!("refs/tags/{}", name.as_str()), &git_ref_target)?;
             }
         }
     }
@@ -98,7 +134,30 @@ pub async fn project_to_git(
         std::fs::write(target_path.join("HEAD"), head_content.as_bytes())?;
     }
 
+    // bole-mtq
+    // Pass 7: persist the snapshot ↔ commit identity map (round-trip idempotency).
+    if let Some(map_dir) = identity_map_dir {
+        let mut idmap = super::git_import::IdentityMap::load(map_dir, target_path)?;
+        for (bole_snap, git_commit) in &id_map {
+            idmap.insert(git_commit.as_bytes().to_vec(), *bole_snap);
+        }
+        idmap.save(map_dir, target_path)?;
+    }
+
     Ok(())
+}
+
+// bole-mtq
+/// Encode a git annotated tag object (gix adds the `tag <len>\0` header).
+fn encode_tag(target_commit: &gix::ObjectId, tag_name: &str, tagger: &str, message: &str) -> Vec<u8> {
+    let mut s = format!(
+        "object {target_commit}\ntype commit\ntag {tag_name}\ntagger {tagger}\n\n"
+    );
+    s.push_str(message);
+    if !message.ends_with('\n') {
+        s.push('\n');
+    }
+    s.into_bytes()
 }
 
 /// DFS post-order topological sort of all snapshots reachable from `starts`.
