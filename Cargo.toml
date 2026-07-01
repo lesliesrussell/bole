@@ -10,7 +10,7 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-tokio = { version = "1", features = ["fs", "sync", "rt", "io-util"] }
+tokio = { version = "1", features = ["fs", "sync", "rt", "io-util", "net"] }
 blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
