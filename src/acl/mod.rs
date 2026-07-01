@@ -358,6 +358,13 @@ impl AclStore {
     pub fn list_secret_acls(&self) -> Result<Vec<SecretAcl>> {
         self.backend.list_secret_acls()
     }
+
+    // bole-6h7
+    /// Stores an actor's clearance grant (used to build an `Accessor` for a
+    /// connecting peer, WS5 §6).
+    pub fn set_grant(&self, grant: crate::acl::policy_object::ClearanceGrant) -> Result<()> {
+        self.backend.set_grant(&grant)
+    }
 }
 
 // bole-mhs

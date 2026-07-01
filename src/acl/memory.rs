@@ -2,6 +2,8 @@
 use crate::acl::{backend::AclBackend, PathAcl, TimelineAcl};
 // bole-9mz
 use crate::acl::SecretAcl;
+// bole-6h7
+use crate::acl::policy_object::ClearanceGrant;
 use crate::error::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -12,6 +14,8 @@ pub struct MemoryAclBackend {
     timeline_acls: Arc<RwLock<HashMap<String, TimelineAcl>>>,
     // bole-9mz
     secret_acls: Arc<RwLock<HashMap<String, SecretAcl>>>,
+    // bole-6h7
+    grants: Arc<RwLock<HashMap<String, ClearanceGrant>>>,
 }
 
 impl MemoryAclBackend {
@@ -59,6 +63,15 @@ impl AclBackend for MemoryAclBackend {
     // bole-9mz
     fn delete_secret_acl(&self, name: &str) -> Result<()> {
         self.secret_acls.write().unwrap().remove(name);
+        Ok(())
+    }
+    // bole-6h7
+    fn get_grant(&self, actor: &str) -> Result<Option<ClearanceGrant>> {
+        Ok(self.grants.read().unwrap().get(actor).cloned())
+    }
+    // bole-6h7
+    fn set_grant(&self, grant: &ClearanceGrant) -> Result<()> {
+        self.grants.write().unwrap().insert(grant.actor.clone(), grant.clone());
         Ok(())
     }
 }

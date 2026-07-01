@@ -18,6 +18,8 @@ pub mod transport;
 pub mod session;
 // bole-vih
 pub mod http;
+// bole-6h7
+pub mod authn;
 
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};
