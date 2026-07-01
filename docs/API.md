@@ -46,6 +46,11 @@ This document describes every public type, method, and function in the `bole` cr
 
 ## Core concepts
 
+bole's object model is designed to express what Git's commit DAG cannot: **who is
+allowed to see each file and timeline**, and **under what conditions an operation
+is permitted**. The five primitives below are the mechanism; the access model —
+actors, labels, and policy — is the reason for the design.
+
 bole's object model has five primitives:
 
 | Primitive | What it is |
@@ -61,6 +66,22 @@ All five are stored in the same content-addressed `ObjectStore`. An `ObjectId` i
 **Timelines** (like Git branches) are mutable named pointers to a Snapshot. **Tags** are named pointers that can point at either a Snapshot or a Timeline head. Timelines and Tags live in a `RefStore`, separate from the object store.
 
 **ACLs** control which paths and timelines an `Accessor` can read or write. An Accessor is a capability token — you build one for each actor in your system and pass it to every operation.
+
+### Access model
+
+Every read and write through the `Repository` API is mediated by an `Accessor`.
+An `Accessor` binds a **label lattice**, a rule set, and an actor's scoped
+**clearances**, and answers `can_read` / `can_write` for a resource's effective
+label — plus the convenience `can_read_path` / `can_write_path` /
+`can_read_timeline` / `can_write_timeline` / `can_read_secret` against a resource
+name. Glob path/timeline ACLs are the degenerate two-point lattice
+(`public ⊑ protected`); a real bounded lattice with multiple levels is expressed
+by the same types. A `PolicyHook` registry gates `advance` and `merge` for rules
+labels cannot express (e.g. "N approvals before merging into `release/**`").
+
+`Accessor::privileged()` grants **read-only** access to everything and is
+appropriate for tests, migrations, and trusted read paths; build an `Accessor`
+with explicit `Clearance`s (or `from_parts`) for write operations.
 
 ---
 

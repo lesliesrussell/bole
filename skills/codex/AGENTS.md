@@ -10,6 +10,12 @@ merge, or otherwise manage history with bole.
 > Actors open workspaces on timelines, produce snapshots, and advance timelines
 > subject to ACL and policy.
 
+More precisely: bole puts access control **inside** the repository. Named actors
+carry path and timeline grants; the CLI binds an actor before any
+access-controlled operation; secrets are encrypted objects in the same store as
+source files. Automated agents and human developers are the same concept — just
+different grant sets.
+
 - **Repository** — a `.bole/` directory; its parent is the **work tree**.
   Commands discover the repo by walking up from the current directory.
 - **Snapshot** — an immutable file tree + metadata; the only durable state.
@@ -31,6 +37,11 @@ merge, or otherwise manage history with bole.
   non-descendant snapshot fails. `unrestricted` accepts any snapshot.
 - Secrets require a 64-hex (32-byte) key via `$BOLE_KEY` or `--key-file`; never
   write key material into the repo.
+- `--as <actor>` binds capability for all workspace operations: an agent scoped
+  to `src/**` write cannot see or touch `secrets/**`, enforced at the API level.
+- `workspace prune` / `workspace repair` clean up stale or moved linked worktree
+  registrations; run them after moving directories or the store
+  (`workspace list --check` flags staleness).
 - Prefer `bole <command> --help` when unsure of a flag, rather than guessing.
 
 ## Core workflow

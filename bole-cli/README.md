@@ -1,9 +1,11 @@
 <!-- bole-ou7 -->
-# bole-cli
+# bole-cli — the bole CLI
 
-The command-line interface to [bole](../README.md), a content-addressed version
-control library. `bole-cli` is a thin wrapper: every command maps directly onto
-the library's `Repository`, `ObjectStore`, `RefStore`, and `AclStore` APIs. The
+The command-line interface to [bole](../README.md), a version control library for
+multi-actor, access-controlled workflows. `bole-cli` is a thin wrapper: every
+command maps directly onto the library's `Repository`, `ObjectStore`, `RefStore`,
+and `AclStore` APIs. Access control — which actors can see which files and
+timelines — is enforced by the library at the API boundary, not by the CLI. The
 crate produces a single binary named **`bole`**.
 
 - Full prose reference: [`docs/CLI.md`](../docs/CLI.md)
@@ -28,6 +30,7 @@ cp target/release/bole ~/.local/bin/
 | **Snapshot** | an immutable file tree + metadata — the only durable state |
 | **Timeline** | a movable named pointer to a snapshot (like a branch) |
 | **Tag** | a fixed named pointer to a snapshot |
+| **Worktree** | a directory with a `.bole/` store (primary) or a `.bole` pointer file (linked); many directories can share one store, each on a different timeline |
 | **Actor** | a named bundle of path/timeline grants; the bound actor is the identity used for access checks |
 | **Secret** | an encrypted value, addressed by a CLI-local name |
 | **Env overlay** | a named bundle of environment variables (plain or secret-backed) |

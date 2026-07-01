@@ -1,12 +1,18 @@
 ---
 name: using-bole
-description: Use when version-controlling a project with the bole CLI — initializing a repo, creating snapshots from the work tree, managing timelines and tags, opening/diffing a workspace, merging, ACLs/actors, secrets, env overlays, or exporting to Git. Triggers on the `bole` command and `.bole/` repositories.
+description: Use when version-controlling a project with the bole CLI. bole is access-controlled, multi-actor version control: actor grants, ACL rules, and policy-gated operations are in the repository model, not a hosting platform. Triggers on the `bole` command, `.bole/` repositories, or any task involving actors, timelines, secrets, env overlays, or linked worktrees.
 ---
 
 # Using the bole CLI
 
 `bole` is a content-addressed version-control tool. It is **not** Git — the
 nouns are different and map to bole's model:
+
+More precisely: bole puts access control **inside** the repository. Named actors
+carry path and timeline grants; the CLI binds an actor before any
+access-controlled operation; secrets are encrypted objects in the same store as
+source files. Automated agents and human developers are the same concept — just
+different grant sets.
 
 > Actors open workspaces on timelines, produce snapshots, and advance timelines
 > subject to ACL and policy.
@@ -35,6 +41,12 @@ Commands discover the repo by walking up from the current directory (like Git).
   non-descendant; `unrestricted` accepts any snapshot.
 - **Secrets need a key**: a 64-hex (32-byte) key via `$BOLE_KEY` or
   `--key-file`. It is never stored in the repo.
+- **`--as <actor>` binds capability for all workspace operations.** An agent
+  scoped to `src/**` write cannot see or touch `secrets/**` — enforced at the API
+  level, not by convention.
+- **`workspace prune` / `workspace repair`** clean up stale or moved linked
+  worktree registrations; run them after moving directories or the store
+  (`workspace list --check` flags staleness).
 
 ## Core workflow
 

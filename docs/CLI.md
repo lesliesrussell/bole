@@ -17,16 +17,27 @@ cargo build --release -p bole-cli
 > Actors open workspaces on timelines, produce snapshots, and advance timelines
 > subject to ACL and policy.
 
+bole puts access control *inside* the repository, not outside it. What Git cannot
+express natively: an actor that can only see `src/**` and produce snapshots on
+`agent/**`, while `main` is protected and requires an explicit merge by an actor
+with broader grants. bole expresses this in the repository itself, without a
+hosting platform. An automated agent and a human developer are the same concept —
+just different grant sets.
+
 - A **repository** is a `.bole/` directory. The directory containing it is the
   **work tree**. Commands discover the repository by walking up from the current
   directory, just like Git.
 - A **snapshot** is an immutable file tree plus metadata. It is the only durable
   state.
-- A **timeline** is a movable named pointer to a snapshot (like a branch). A
-  **tag** is a fixed pointer.
-- An **actor** is a named set of path/timeline grants. The bound actor is the
-  identity used for access-controlled operations; with none bound the CLI has
+- A **timeline** is a movable named pointer to a snapshot (like a branch) with an
+  advancement policy (`ff` / `append` / `unrestricted`). A **tag** is a fixed
+  pointer.
+- An **actor** is a named set of path/timeline grants evaluated against the label
+  lattice. The bound actor is the identity used for access-controlled operations;
+  `Accessor` enforces its grants at the API boundary, with none bound the CLI has
   full access.
+- A **secret** is an encrypted object in the same content-addressed store as
+  source files, readable only by cleared actors.
 
 ## Global flags
 
@@ -133,14 +144,30 @@ bole workspace clear         # unbind
 # Linked worktrees — many directories sharing one .bole/ store, each bound
 # to a different timeline (like `git worktree`, minus the ref machinery):
 bole workspace add <path> --timeline <name> [--as <actor>]   # timeline must exist
-bole workspace list          # primary + linked: path, timeline, head
-bole workspace remove <path> # unregister; never deletes your files
+bole workspace list [--check]  # primary + linked: path, timeline, head, status
+bole workspace remove <path>   # unregister; never deletes your files
+
+# Hardening — reconcile a registry that has gone stale (moved/deleted dirs):
+bole workspace prune [--dry-run] [--include-recoverable]     # drop unverifiable entries
+bole workspace repair [--dry-run]                            # R1: fix a moved store
+bole workspace repair --moved-to <new-path> <id>            # R2: a moved worktree dir
+bole workspace repair --adopt <path>                        # R3: adopt an orphaned pointer
 ```
 
 A linked worktree is a directory containing a `.bole` **file** that points at
 the primary store; its binding lives under `<store>/worktrees/<id>/`. Commands
 run from inside it resolve the shared store but its own timeline binding, so the
 primary and each linked worktree can sit on different timelines at once.
+
+If you delete or move a linked directory (or the primary store) outside of bole,
+the registry can go stale. `workspace list` annotates stale entries
+(`[STALE: missing-directory]`, `[STALE: wrong-store]`, …) and `list --check`
+exits non-zero if any are stale. `workspace prune` drops entries that can no
+longer be verified (removing only bookkeeping — the metadata dir and a bad
+`.bole` pointer — never your other files), and `workspace repair` reconciles the
+recoverable cases: a moved primary store (`repair`), a moved worktree directory
+(`repair --moved-to`), or an orphaned pointer with no registry entry
+(`repair --adopt`).
 
 ### Merge
 
