@@ -52,6 +52,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::EnvOverlay(_) => "env-overlay",
         // bole-fo2
         Object::Policy(_) => "policy",
+        // bole-9mz
+        Object::SecretV2(_) => "secret",
     }
 }
 

@@ -29,6 +29,8 @@ pub use tree::{EntryKind, Tree, TreeEntry};
 // bole-hto
 pub use env::{EnvOverlay, EnvValue};
 pub use secret::Secret;
+// bole-9mz
+pub use secret::{SecretAad, SecretV2};
 
 use serde::{Deserialize, Serialize};
 // bole-fo2
@@ -61,4 +63,7 @@ pub enum Object {
     // bole-fo2
     /// A content-addressed access-policy payload (lattice, rules, grant, or root).
     Policy(PolicyObject),
+    // bole-9mz
+    /// An envelope-encrypted secret (per-secret data key wrapped by a master key).
+    SecretV2(SecretV2),
 }
