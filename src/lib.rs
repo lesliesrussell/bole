@@ -58,6 +58,8 @@ pub use error::{Error, Result};
 pub use object::{Blob, EntryKind, Object, ObjectId, ParseObjectIdError, Snapshot, Tree, TreeEntry};
 // bole-hto
 pub use object::{EnvOverlay, EnvValue, Secret};
+// bole-9mz
+pub use object::{SecretAad, SecretV2};
 // bole-wmu
 pub use refs::{
     backend::RefBackend,

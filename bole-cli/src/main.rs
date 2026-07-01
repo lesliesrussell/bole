@@ -118,6 +118,9 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::env::Cmd,
     },
+    // bole-9mz
+    /// Resolve an overlay and run a command with its variables injected.
+    Run(commands::run::RunArgs),
     // bole-0hg
     /// Repository-level information.
     Repo {
@@ -207,6 +210,11 @@ async fn run() -> Result<()> {
         Command::Env { cmd } => {
             let ctx = open().await?;
             commands::env::run(&ctx, &out, cmd).await
+        }
+        // bole-9mz
+        Command::Run(args) => {
+            let ctx = open().await?;
+            commands::run::run(&ctx, &out, args).await
         }
         // bole-0hg
         Command::Repo { cmd } => {

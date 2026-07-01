@@ -103,3 +103,71 @@ fn env_overlay_with_plain_and_secret() {
     let list = json(w, &["env", "list"]);
     assert_eq!(list, serde_json::json!(["dev"]));
 }
+
+// bole-9mz
+#[test]
+fn env_resolve_and_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    ok(w, &["init", "."]);
+    std::fs::write(w.join("s.txt"), b"postgres://secret").unwrap();
+    ok(w, &["secret", "put", "prod/db", "--from-file", "s.txt"]);
+    ok(w, &["env", "create", "dev"]);
+    ok(w, &["env", "set", "dev", "RUST_LOG", "debug"]);
+    ok(w, &["env", "set-secret", "dev", "DATABASE_URL", "prod/db"]);
+
+    // Default resolve redacts the secret value.
+    let human = String::from_utf8(ok(w, &["env", "resolve", "dev"]).stdout).unwrap();
+    assert!(human.contains("RUST_LOG=debug"));
+    assert!(human.contains("DATABASE_URL=<redacted>"));
+    assert!(!human.contains("postgres://secret"));
+
+    // --reveal decrypts (no secret ACL → public → cleared).
+    let revealed = json(w, &["env", "resolve", "dev", "--reveal"]);
+    assert_eq!(revealed["env"]["DATABASE_URL"], "postgres://secret");
+    assert_eq!(revealed["env"]["RUST_LOG"], "debug");
+
+    // `bole run` injects the vars into the child process.
+    let out = run(w, &["run", "--env", "dev", "--", "sh", "-c", "printf %s \"$DATABASE_URL\""]);
+    assert!(out.status.success(), "run failed: {out:?}");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "postgres://secret");
+}
+
+// bole-9mz
+#[test]
+fn secret_rekey_rotates_master_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    ok(w, &["init", "."]);
+    std::fs::write(w.join("s.txt"), b"the-value").unwrap();
+    ok(w, &["secret", "put", "k", "--from-file", "s.txt"]);
+
+    // Rotate the master key from KEY to KEY2.
+    let out = bin()
+        .env("BOLE_KEY", KEY)
+        .env("BOLE_NEW_KEY", KEY2)
+        .args(["secret", "rekey", "--all"])
+        .current_dir(w)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rekey failed: {out:?}");
+
+    // The new key decrypts; the old key no longer does.
+    let rev = bin()
+        .env("BOLE_KEY", KEY2)
+        .args(["secret", "reveal", "k", "--json"])
+        .current_dir(w)
+        .output()
+        .unwrap();
+    assert!(rev.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&rev.stdout).unwrap();
+    assert_eq!(v["value"], "the-value");
+
+    let old = bin()
+        .env("BOLE_KEY", KEY)
+        .args(["secret", "reveal", "k"])
+        .current_dir(w)
+        .output()
+        .unwrap();
+    assert!(!old.status.success(), "old key should no longer decrypt");
+}

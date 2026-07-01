@@ -56,8 +56,39 @@ pub enum Cmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Rotate the master key: re-wrap secrets under a new key (values untouched).
+    Rekey {
+        /// Rekey every registered secret.
+        #[arg(long)]
+        all: bool,
+        /// Specific secret names to rekey (when not `--all`).
+        names: Vec<String>,
+        /// Env var holding the OLD 64-hex key.
+        #[arg(long, default_value = "BOLE_KEY")]
+        from_key_env: String,
+        /// File holding the OLD 64-hex key.
+        #[arg(long)]
+        from_key_file: Option<PathBuf>,
+        /// Env var holding the NEW 64-hex key.
+        #[arg(long, default_value = "BOLE_NEW_KEY")]
+        to_key_env: String,
+        /// File holding the NEW 64-hex key.
+        #[arg(long)]
+        to_key_file: Option<PathBuf>,
+    },
     /// List secret names.
     List,
+}
+
+// bole-9mz
+/// The AAD for a secret named `name`: binds `{version, label}`, where the label
+/// is this secret name's effective WS1 label (omitted when public/bottom).
+async fn secret_aad(ctx: &RepoContext, name: &str) -> Result<bole::SecretAad> {
+    let lattice = ctx.repo.acls.lattice()?;
+    let rules = ctx.repo.acls.label_ruleset()?;
+    let label = rules.label_for_secret(&lattice, name);
+    let label = if label == lattice.bottom() { None } else { Some(label) };
+    Ok(bole::SecretAad::v2(label))
 }
 
 fn read_plaintext(from_stdin: bool, from_file: Option<PathBuf>) -> Result<Vec<u8>> {
@@ -83,6 +114,9 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             store(ctx, out, name, from_stdin, from_file, key_env, key_file, true).await
         }
         Cmd::Reveal { name, key_env, key_file } => reveal(ctx, out, name, key_env, key_file).await,
+        Cmd::Rekey { all, names, from_key_env, from_key_file, to_key_env, to_key_file } => {
+            rekey(ctx, out, all, names, from_key_env, from_key_file, to_key_env, to_key_file).await
+        }
         Cmd::List => list(ctx, out),
     }
 }
@@ -105,9 +139,16 @@ async fn store(
     if !must_exist && reg.contains_key(&name) {
         bail!("secret already exists: {name} (use `secret rotate`)");
     }
-    let key = key::resolve(&key_env, key_file.as_deref())?;
+    // bole-9mz: write v2 envelope secrets under the resolved master key.
+    let chain = key::build_chain(&key_env, key_file.as_deref())?;
+    let aad = secret_aad(ctx, &name).await?;
     let plaintext = read_plaintext(from_stdin, from_file)?;
-    let id = ctx.repo.objects.put_secret(&plaintext, &key).await.context("encrypting secret")?;
+    let id = ctx
+        .repo
+        .objects
+        .put_secret_enveloped(&plaintext, chain.active()?, aad)
+        .await
+        .context("encrypting secret")?;
     reg.insert(name.clone(), id.to_string());
     registry::save(ctx, SECRETS_FILE, &reg)?;
     let verb = if must_exist { "rotated" } else { "stored" };
@@ -128,16 +169,108 @@ async fn reveal(
     let reg = registry::load(ctx, SECRETS_FILE)?;
     let id_str = reg.get(&name).ok_or_else(|| anyhow!("no such secret: {name}"))?;
     let id = id_str.parse::<bole::ObjectId>().map_err(|e| anyhow!("corrupt registry id: {e}"))?;
-    let key = key::resolve(&key_env, key_file.as_deref())?;
+    // bole-9mz: resolve v2 (envelope) or legacy v1 secrets via the chain.
+    let chain = key::build_chain(&key_env, key_file.as_deref())?;
     let bytes = ctx
         .repo
         .objects
-        .get_secret(&id, &key)
+        .get_secret_resolved(&id, &chain)
         .await
         .context("decrypting secret")?
         .ok_or_else(|| anyhow!("secret object missing from store: {id}"))?;
     let text = String::from_utf8_lossy(&bytes).to_string();
     out.emit(|| text.clone(), || serde_json::json!({ "name": name, "value": text }));
+    Ok(())
+}
+
+// bole-9mz
+/// Master-key rotation: re-wrap the targeted secrets' data keys from the old key
+/// to the new key (values untouched; v1 secrets are upgraded to v2), then repoint
+/// the secrets registry and any overlays referencing the rotated objects.
+#[allow(clippy::too_many_arguments)]
+async fn rekey(
+    ctx: &RepoContext,
+    out: &Output,
+    all: bool,
+    names: Vec<String>,
+    from_key_env: String,
+    from_key_file: Option<PathBuf>,
+    to_key_env: String,
+    to_key_file: Option<PathBuf>,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    let mut reg = registry::load(ctx, SECRETS_FILE)?;
+    let targets: Vec<String> = if all {
+        reg.keys().cloned().collect()
+    } else if names.is_empty() {
+        bail!("give secret names or --all");
+    } else {
+        names
+    };
+
+    let old = key::build_chain(&from_key_env, from_key_file.as_deref())?;
+    let new = key::build_chain(&to_key_env, to_key_file.as_deref())?;
+    let new_provider = new.active()?;
+
+    // Map each target name to its current object id.
+    let mut name_ids: Vec<(String, bole::ObjectId)> = Vec::new();
+    for name in &targets {
+        let id_str = reg.get(name).ok_or_else(|| anyhow!("no such secret: {name}"))?;
+        let id = id_str.parse::<bole::ObjectId>().map_err(|e| anyhow!("corrupt registry id: {e}"))?;
+        name_ids.push((name.clone(), id));
+    }
+    let ids: Vec<bole::ObjectId> = name_ids.iter().map(|(_, id)| *id).collect();
+
+    let mapping = ctx.repo.rekey(&ids, &old, new_provider).await.context("rekeying secrets")?;
+    // old id -> new id
+    let remap: BTreeMap<bole::ObjectId, bole::ObjectId> = mapping.into_iter().collect();
+
+    // Repoint the secrets registry.
+    for (name, old_id) in &name_ids {
+        if let Some(new_id) = remap.get(old_id) {
+            reg.insert(name.clone(), new_id.to_string());
+        }
+    }
+    registry::save(ctx, SECRETS_FILE, &reg)?;
+
+    // Repoint overlays that reference any rotated object (O4 auto-repoint).
+    let mut envs = registry::load(ctx, crate::commands::env::ENVS_FILE)?;
+    let mut env_updates: Vec<(String, String)> = Vec::new();
+    for (env_name, oid_str) in envs.iter() {
+        let oid = match oid_str.parse::<bole::ObjectId>() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let overlay = match ctx.repo.objects.get_overlay(&oid).await? {
+            Some(o) => o,
+            None => continue,
+        };
+        let mut changed = false;
+        let mut entries = overlay.entries.clone();
+        for value in entries.values_mut() {
+            if let bole::EnvValue::Secret(id) = value {
+                if let Some(new_id) = remap.get(id) {
+                    *value = bole::EnvValue::Secret(*new_id);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let new_oid = ctx.repo.objects.put_overlay(bole::EnvOverlay { entries }).await?;
+            env_updates.push((env_name.clone(), new_oid.to_string()));
+        }
+    }
+    for (env_name, new_oid) in env_updates {
+        envs.insert(env_name, new_oid);
+    }
+    registry::save(ctx, crate::commands::env::ENVS_FILE, &envs)?;
+
+    let count = remap.len();
+    out.emit(
+        || format!("rekeyed {count} secret(s)"),
+        || serde_json::json!({ "rekeyed": count, "secrets": targets }),
+    );
     Ok(())
 }
 

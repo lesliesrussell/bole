@@ -4,6 +4,8 @@
 //! Overlays are immutable content-addressed objects, so every edit stores a
 //! new overlay and repoints the name at it.
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, bail, Result};
 use bole::{EnvOverlay, EnvValue};
 use clap::Subcommand;
@@ -11,7 +13,7 @@ use clap::Subcommand;
 use crate::commands::secret::SECRETS_FILE;
 use crate::context::RepoContext;
 use crate::output::Output;
-use crate::registry;
+use crate::{key, registry};
 
 /// File holding the env name -> overlay-id map.
 pub const ENVS_FILE: &str = "envs.json";
@@ -47,6 +49,23 @@ pub enum Cmd {
         /// Overlay name.
         name: String,
     },
+    /// Resolve an overlay to a concrete environment (secrets redacted by default).
+    Resolve {
+        /// Overlay name.
+        name: String,
+        /// Decrypt and print real secret values (requires clearance).
+        #[arg(long)]
+        reveal: bool,
+        /// Omit secrets the actor is not cleared for instead of failing.
+        #[arg(long)]
+        skip_unauthorized: bool,
+        /// Env var holding the 64-hex key.
+        #[arg(long, default_value = "BOLE_KEY")]
+        key_env: String,
+        /// File holding the 64-hex key.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// List overlay names.
     List,
 }
@@ -58,8 +77,68 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
         Cmd::Set { name, var, value } => set(ctx, out, name, var, EnvValue::Plain(value)).await,
         Cmd::SetSecret { name, var, secret } => set_secret(ctx, out, name, var, secret).await,
         Cmd::Show { name } => show(ctx, out, name).await,
+        Cmd::Resolve { name, reveal, skip_unauthorized, key_env, key_file } => {
+            resolve(ctx, out, name, reveal, skip_unauthorized, key_env, key_file).await
+        }
         Cmd::List => list(ctx, out),
     }
+}
+
+// bole-9mz
+async fn resolve(
+    ctx: &RepoContext,
+    out: &Output,
+    name: String,
+    reveal: bool,
+    skip_unauthorized: bool,
+    key_env: String,
+    key_file: Option<PathBuf>,
+) -> Result<()> {
+    let overlay = load_overlay(ctx, &name).await?;
+
+    // Redacted view (default): no decryption, no access check needed.
+    if !reveal {
+        out.emit(
+            || {
+                overlay
+                    .entries
+                    .iter()
+                    .map(|(k, v)| match v {
+                        EnvValue::Plain(s) => format!("{k}={s}"),
+                        EnvValue::Secret(_) => format!("{k}=<redacted>"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            || {
+                serde_json::json!({
+                    "name": name,
+                    "revealed": false,
+                    "entries": overlay.entries.iter().map(|(k, v)| match v {
+                        EnvValue::Plain(s) => serde_json::json!({ "var": k, "value": s }),
+                        EnvValue::Secret(_) => serde_json::json!({ "var": k, "value": null, "secret": true }),
+                    }).collect::<Vec<_>>(),
+                })
+            },
+        );
+        return Ok(());
+    }
+
+    // Reveal: access-checked resolution through the provider chain.
+    let reg = registry::load(ctx, ENVS_FILE)?;
+    let id_str = reg.get(&name).ok_or_else(|| anyhow!("no such overlay: {name}"))?;
+    let overlay_id = id_str.parse::<bole::ObjectId>().map_err(|e| anyhow!("corrupt registry id: {e}"))?;
+    let chain = key::build_chain(&key_env, key_file.as_deref())?;
+    let accessor = crate::actor::effective_accessor(ctx)?;
+    let env = ctx
+        .repo
+        .resolve_overlay(&overlay_id, &chain, &accessor, skip_unauthorized)
+        .await?;
+    out.emit(
+        || env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("\n"),
+        || serde_json::json!({ "name": name, "revealed": true, "env": env }),
+    );
+    Ok(())
 }
 
 async fn load_overlay(ctx: &RepoContext, name: &str) -> Result<EnvOverlay> {

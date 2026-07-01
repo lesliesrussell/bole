@@ -9,6 +9,21 @@
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context as _, Result};
+// bole-9mz
+use bole::{LocalKeyProvider, ProviderChain};
+
+// bole-9mz
+/// Builds a `ProviderChain` from the same flags `resolve` reads. The resolved
+/// 32-byte key serves as BOTH the active v2 master key (`LocalKeyProvider`) and
+/// a legacy v1 raw key (so `env resolve` / `run` decrypt old single-key secrets
+/// too). `ref_prefix` is `file` when `--key-file` is used, else `env`.
+pub fn build_chain(key_env: &str, key_file: Option<&Path>) -> Result<ProviderChain> {
+    let mk = resolve(key_env, key_file)?;
+    let ref_prefix = if key_file.is_some() { "file" } else { "env" };
+    let mut chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new(mk, ref_prefix)));
+    chain.push_legacy_key(mk);
+    Ok(chain)
+}
 
 /// Resolves a 32-byte key from `--key-file` if given, otherwise from the
 /// environment variable named by `key_env`.
