@@ -52,6 +52,11 @@ pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, Wra
 pub use acl::{
     Accessor, AclStore, PathAcl, PathRole, Permission, SecretAcl, TimelineAcl, TimelineRole,
 };
+// bole-0tp
+pub use acl::authority::{
+    reconcile, verify_chain, PolicyResolution, PolicySigner, PolicyVerdict, RootSignature,
+    SignatureStore, TrustAnchor, TrustStore,
+};
 
 pub(crate) mod codec;
 

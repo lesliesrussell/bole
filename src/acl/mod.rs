@@ -11,6 +11,8 @@ pub mod rules;
 pub mod policy_object;
 // bole-fo2
 pub mod hook;
+// bole-0tp
+pub mod authority;
 pub mod glob;
 pub mod memory;
 
