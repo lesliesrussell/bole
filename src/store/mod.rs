@@ -86,6 +86,24 @@ impl ObjectStore {
         self.backend.list().await
     }
 
+    // bole-81z
+    /// Returns the number of distinct objects in the store (cheap on packs).
+    pub async fn count(&self) -> Result<u64> {
+        self.backend.count().await
+    }
+
+    // bole-81z
+    /// Removes every object not in `reachable`, honouring `grace_secs` against
+    /// the unix-seconds clock `now`. Returns the number removed. Used by GC.
+    pub async fn sweep(
+        &self,
+        reachable: &std::collections::HashSet<ObjectId>,
+        grace_secs: u64,
+        now: u64,
+    ) -> Result<u64> {
+        self.backend.sweep(reachable, grace_secs, now).await
+    }
+
     // bole-meg
     // bole-p8u
     /// Encrypts `plaintext` with `key`, stores the result as a [`Secret`], and returns its `ObjectId`.

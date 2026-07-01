@@ -32,7 +32,9 @@ use crate::crypto::key_provider::{KeyProvider, ProviderChain};
 use workspace::WorkspaceView;
 // bole-3w9
 use crate::refs::{DiskRefBackend, MemoryRefBackend, RefName, RefStore};
-use crate::store::{disk::DiskBackend, memory::MemoryBackend, ObjectStore};
+use crate::store::{memory::MemoryBackend, ObjectStore};
+// bole-81z
+use crate::store::packed::PackedDiskBackend;
 
 // bole-9by
 // bole-p8u
@@ -124,7 +126,9 @@ impl Repository {
     pub async fn disk(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref();
         Ok(Self {
-            objects: ObjectStore::new(DiskBackend::open(root).await?),
+            // bole-81z: packed backend (loose-first + packs); loose-only repos
+            // with no packs/ behave exactly as before.
+            objects: ObjectStore::new(PackedDiskBackend::open(root).await?),
             refs: RefStore::new(DiskRefBackend::open(root)?),
             // bole-9by
             acls: AclStore::new(DiskAclBackend::open(root)?),
@@ -596,6 +600,61 @@ impl Repository {
             mapping.push((*id, new_id));
         }
         Ok(mapping)
+    }
+
+    // bole-81z
+    /// Mark-and-sweep GC. Roots = every timeline head (all kinds, incl.
+    /// ephemeral) and tag target in the ref store, plus `extra_roots` (for
+    /// objects rooted outside refs, e.g. CLI-registry secrets/overlays — see
+    /// spec O8). Computes the reachable object closure, then rewrites packs and
+    /// unlinks unreachable loose objects older than `grace_secs` (relative to the
+    /// unix-seconds clock `now`). Returns the number of objects removed. Never
+    /// removes a reachable object.
+    pub async fn gc(&self, extra_roots: &[ObjectId], grace_secs: u64, now: u64) -> Result<u64> {
+        let mut roots: Vec<ObjectId> = extra_roots.to_vec();
+        for name in self.refs.list("")? {
+            match self.refs.get(&name)? {
+                Some(crate::refs::Ref::Timeline(t)) => roots.push(t.head),
+                Some(crate::refs::Ref::Tag(t)) => roots.push(t.target),
+                None => {}
+            }
+        }
+        let reachable = self.mark_reachable(&roots).await?;
+        self.objects.sweep(&reachable, grace_secs, now).await
+    }
+
+    // bole-81z
+    /// The reachable object closure from `roots`, following the object-graph
+    /// edges: Snapshot → {root, parents}, Tree → entry ids, EnvOverlay → secret
+    /// refs. Blobs and secrets are leaves. Shared subtrees are visited once.
+    async fn mark_reachable(&self, roots: &[ObjectId]) -> Result<std::collections::HashSet<ObjectId>> {
+        let mut reachable: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+        let mut stack: Vec<ObjectId> = roots.to_vec();
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            match self.objects.get(&id).await? {
+                Some(Object::Snapshot(s)) => {
+                    stack.push(s.root);
+                    stack.extend(s.parents);
+                }
+                Some(Object::Tree(t)) => {
+                    for e in t.entries.values() {
+                        stack.push(e.id);
+                    }
+                }
+                Some(Object::EnvOverlay(o)) => {
+                    for v in o.entries.values() {
+                        if let EnvValue::Secret(sid) = v {
+                            stack.push(*sid);
+                        }
+                    }
+                }
+                _ => {} // Blob, Secret, SecretV2, Policy: leaves
+            }
+        }
+        Ok(reachable)
     }
 }
 
@@ -1497,5 +1556,79 @@ mod tests {
             repo.objects.get_secret_resolved(&new_id, &chain).await.unwrap().unwrap(),
             b"legacy"
         );
+    }
+
+    // bole-81z
+    #[tokio::test]
+    async fn gc_keeps_reachable_and_collects_garbage() {
+        use crate::object::{EntryKind, EnvOverlay, EnvValue, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use bytes::Bytes;
+        use std::collections::BTreeMap;
+
+        // Disk repo → PackedDiskBackend, so GC exercises the pack-rewrite path.
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::disk(dir.path()).await.unwrap();
+
+        // Reachable graph: blob → tree → snapshot → timeline head.
+        let blob = repo.objects.put_blob(Bytes::from("live")).await.unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert("f".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let tree = repo.objects.put_tree(entries).await.unwrap();
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: tree,
+                parents: vec![],
+                author: "t".into(),
+                created_at: 0,
+                message: "m".into(),
+            })
+            .await
+            .unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs
+            .create_timeline(name, snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+
+        // A secret reachable ONLY through an overlay (extra root).
+        let secret = repo.objects.put_secret(b"s", &[3u8; 32]).await.unwrap();
+        let mut oe = BTreeMap::new();
+        oe.insert("DB".into(), EnvValue::Secret(secret));
+        let overlay = repo.objects.put_overlay(EnvOverlay { entries: oe }).await.unwrap();
+
+        // Pure garbage: an unreferenced blob.
+        let orphan = repo.objects.put_blob(Bytes::from("garbage")).await.unwrap();
+
+        // GC with the overlay as an extra root, grace disabled (now huge).
+        let removed = repo.gc(&[overlay], 0, u64::MAX).await.unwrap();
+        assert!(removed >= 1, "should collect the orphan");
+
+        // Reachable objects survive.
+        assert!(repo.objects.get(&blob).await.unwrap().is_some());
+        assert!(repo.objects.get(&tree).await.unwrap().is_some());
+        assert!(repo.objects.get(&snap).await.unwrap().is_some());
+        // The overlay→secret edge kept the secret alive.
+        assert!(repo.objects.get(&overlay).await.unwrap().is_some());
+        assert!(repo.objects.get(&secret).await.unwrap().is_some());
+        // Garbage is gone.
+        assert!(repo.objects.get(&orphan).await.unwrap().is_none());
+    }
+
+    // bole-81z
+    #[tokio::test]
+    async fn gc_grace_window_protects_recent_objects() {
+        use bytes::Bytes;
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::disk(dir.path()).await.unwrap();
+        let orphan = repo.objects.put_blob(Bytes::from("fresh")).await.unwrap();
+        // now ~= object mtime, large grace → the just-written orphan is protected.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let removed = repo.gc(&[], 3600, now).await.unwrap();
+        assert_eq!(removed, 0);
+        assert!(repo.objects.get(&orphan).await.unwrap().is_some());
     }
 }

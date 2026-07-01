@@ -46,10 +46,7 @@ impl PackedDiskBackend {
         self.root.join("packs")
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
+    #[cfg(test)]
     pub(crate) fn loose(&self) -> &DiskBackend {
         &self.loose
     }
@@ -307,6 +304,50 @@ impl StorageBackend for PackedDiskBackend {
             .count() as u64;
         Ok(packed + loose_extra)
     }
+
+    async fn sweep(
+        &self,
+        reachable: &std::collections::HashSet<ObjectId>,
+        grace_secs: u64,
+        now: u64,
+    ) -> Result<u64> {
+        let before = self.count().await?;
+        // 1. Rewrite packs keeping only reachable (drops packed garbage and
+        //    consolidates; reachable loose are folded into the new pack).
+        self.repack_keeping(Some(reachable)).await?;
+        // 2. Delete unreachable loose objects older than the grace window.
+        for id in self.loose.list().await? {
+            if reachable.contains(&id) {
+                continue;
+            }
+            if let Some(mtime) = loose_mtime_secs(&self.root, &id) {
+                if now < mtime.saturating_add(grace_secs) {
+                    continue; // within grace: protect the write-before-ref race
+                }
+            }
+            self.loose.delete(&id).await?;
+        }
+        let after = self.count().await?;
+        Ok(before.saturating_sub(after))
+    }
+}
+
+// bole-81z
+/// The loose on-disk path for `id` (mirrors `DiskBackend::object_path`).
+fn loose_object_path(root: &Path, id: &ObjectId) -> PathBuf {
+    let hex = id.to_string();
+    root.join("objects").join(&hex[..2]).join(&hex[2..])
+}
+
+// bole-81z
+/// The mtime of a loose object in unix seconds, if it exists.
+fn loose_mtime_secs(root: &Path, id: &ObjectId) -> Option<u64> {
+    let md = std::fs::metadata(loose_object_path(root, id)).ok()?;
+    md.modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 #[cfg(test)]

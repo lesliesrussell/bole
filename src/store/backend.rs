@@ -36,4 +36,27 @@ pub trait StorageBackend: Send + Sync {
     async fn count(&self) -> Result<u64> {
         Ok(self.list().await?.len() as u64)
     }
+
+    // bole-81z
+    /// Removes every object NOT in `reachable`. The default deletes unreachable
+    /// objects individually (used by memory/loose-only backends and ignores the
+    /// grace window). Packed backends override to rewrite packs keeping only the
+    /// reachable set and to honour `grace_secs` for recently-written loose
+    /// objects (`now` is a unix-seconds clock supplied by the caller). Returns
+    /// the number of objects removed.
+    async fn sweep(
+        &self,
+        reachable: &std::collections::HashSet<ObjectId>,
+        _grace_secs: u64,
+        _now: u64,
+    ) -> Result<u64> {
+        let mut removed = 0u64;
+        for id in self.list().await? {
+            if !reachable.contains(&id) {
+                self.delete(&id).await?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
 }
