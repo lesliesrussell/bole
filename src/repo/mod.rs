@@ -834,6 +834,28 @@ impl Repository {
 // Visible iff the path's effective label is the lattice bottom (public — visible
 // to all) or the accessor's clearances dominate it in scope. This collapses the
 // old `path_is_protected` gate into the dominance check.
+// bole-wy4
+/// Maximum tree nesting depth walked. A content-addressed object graph cannot
+/// contain a cycle (ids are BLAKE3 of content), so the only unbounded-recursion
+/// vector is a very deep *chain* of nested trees — cheap to construct
+/// (~60 bytes/level, far under the pack byte caps) yet enough to overflow the
+/// worker stack into an uncatchable SIGABRT. Past this depth we return an Error
+/// instead of recursing, turning a process abort into a handled failure. Real
+/// repositories nest far shallower than this.
+///
+/// The walk itself is iterative (O(1) stack), but this bound also protects any
+/// *recursive* consumer of the walk's output — e.g. `git_projection`'s
+/// `write_git_tree_level`, which rebuilds nested trees by path depth — since the
+/// walk errors before emitting a path deeper than this.
+pub(crate) const MAX_TREE_DEPTH: usize = 256;
+
+// bole-wy4
+/// Filters a tree into `out` using an explicit heap work-stack rather than
+/// recursion, so the call stack stays O(1) regardless of tree nesting — a
+/// maliciously deep tree chain can no longer overflow the worker stack into an
+/// uncatchable SIGABRT. `MAX_TREE_DEPTH` still bounds total work (the depth is
+/// tracked per stack item). Content addressing rules out true cycles, so depth
+/// is the only unbounded dimension.
 async fn walk_tree_filtered(
     objects: &ObjectStore,
     lattice: &LabelLattice,
@@ -843,30 +865,32 @@ async fn walk_tree_filtered(
     accessor: &Accessor,
     out: &mut BTreeMap<String, ObjectId>,
 ) -> Result<()> {
-    let tree = match objects.get(&tree_id).await? {
-        Some(Object::Tree(t)) => t,
-        _ => return Ok(()),
-    };
-    for (name, entry) in &tree.entries {
-        let full_path = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", prefix, name)
+    // (tree id, path prefix, depth)
+    let mut stack: Vec<(ObjectId, String, usize)> = vec![(tree_id, prefix.to_string(), 0)];
+    while let Some((tid, pfx, depth)) = stack.pop() {
+        if depth >= MAX_TREE_DEPTH {
+            return Err(Error::Storage(format!(
+                "tree nesting exceeds maximum depth {MAX_TREE_DEPTH}"
+            )));
+        }
+        let tree = match objects.get(&tid).await? {
+            Some(Object::Tree(t)) => t,
+            _ => continue,
         };
-        match entry.kind {
-            EntryKind::Blob => {
-                let label = rules.label_for_path(lattice, &full_path);
-                if label == lattice.bottom()
-                    || accessor.can_read(&label, ResourceRef::Path(&full_path))
-                {
-                    out.insert(full_path, entry.id);
+        for (name, entry) in &tree.entries {
+            let full_path = if pfx.is_empty() { name.clone() } else { format!("{pfx}/{name}") };
+            match entry.kind {
+                EntryKind::Blob => {
+                    let label = rules.label_for_path(lattice, &full_path);
+                    if label == lattice.bottom()
+                        || accessor.can_read(&label, ResourceRef::Path(&full_path))
+                    {
+                        out.insert(full_path, entry.id);
+                    }
                 }
-            }
-            EntryKind::Tree => {
-                Box::pin(walk_tree_filtered(
-                    objects, lattice, rules, entry.id, &full_path, accessor, out,
-                ))
-                .await?;
+                EntryKind::Tree => {
+                    stack.push((entry.id, full_path, depth + 1));
+                }
             }
         }
     }
@@ -1677,6 +1701,42 @@ mod tests {
         assert!(
             matches!(err, crate::error::Error::PolicyViolation(_)),
             "expected the approval gate to fire on a direct advance, got {err:?}"
+        );
+    }
+
+    // bole-wy4
+    #[tokio::test]
+    async fn deep_tree_chain_is_rejected_not_overflow() {
+        use crate::acl::Accessor;
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        // Build a chain of single-entry nested trees deeper than the cap,
+        // bottom-up (a loop, so building itself never recurses).
+        let leaf = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let mut child = {
+            let mut e = BTreeMap::new();
+            e.insert("f".to_string(), TreeEntry { id: leaf, kind: EntryKind::Blob });
+            repo.objects.put_tree(e).await.unwrap()
+        };
+        for _ in 0..(super::MAX_TREE_DEPTH + 2) {
+            let mut e = BTreeMap::new();
+            e.insert("d".to_string(), TreeEntry { id: child, kind: EntryKind::Tree });
+            child = repo.objects.put_tree(e).await.unwrap();
+        }
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot { root: child, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() })
+            .await
+            .unwrap();
+
+        // A filtered read must return a handled Error at the depth cap, not
+        // recurse to a stack overflow (SIGABRT).
+        let err = repo.get_snapshot_filtered(snap, &Accessor::privileged()).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Storage(_)) && format!("{err}").contains("depth"),
+            "expected a depth-limit error, got {err:?}"
         );
     }
 
