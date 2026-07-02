@@ -57,9 +57,19 @@ struct PushResp {
 async fn read_http(stream: &mut TcpStream) -> Result<(String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
+    // bole-oby: track how far we've already scanned for the header terminator so
+    // the search is linear overall, not O(n^2) as the buffer grows.
+    let mut scanned = 0usize;
     let header_end = loop {
-        if let Some(pos) = find(&buf, b"\r\n\r\n") {
-            break pos;
+        if let Some(rel) = find(&buf[scanned..], b"\r\n\r\n") {
+            break scanned + rel;
+        }
+        // Keep a 3-byte overlap so a terminator split across reads is still found.
+        scanned = buf.len().saturating_sub(3);
+        // bole-oby: bound header accumulation so a peer that never sends the
+        // terminator cannot drive unbounded buffering.
+        if buf.len() > MAX_HTTP_HEADER_LEN {
+            return Err(Error::Storage("http: headers exceed cap".into()));
         }
         let n = stream.read(&mut tmp).await.map_err(Error::Io)?;
         if n == 0 {
@@ -76,6 +86,12 @@ async fn read_http(stream: &mut TcpStream) -> Result<(String, Vec<u8>)> {
             low.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))
         })
         .unwrap_or(0);
+    // bole-oby: reject an oversized declared body before allocating for it.
+    if content_length > MAX_HTTP_BODY_LEN {
+        return Err(Error::Storage(format!(
+            "http: content-length {content_length} exceeds cap {MAX_HTTP_BODY_LEN}"
+        )));
+    }
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_length {
         let n = stream.read(&mut tmp).await.map_err(Error::Io)?;
@@ -87,6 +103,14 @@ async fn read_http(stream: &mut TcpStream) -> Result<(String, Vec<u8>)> {
     body.truncate(content_length);
     Ok((start_line, body))
 }
+
+// bole-oby
+/// Maximum accepted HTTP header block (64 KiB).
+const MAX_HTTP_HEADER_LEN: usize = 64 * 1024;
+// bole-oby
+/// Maximum accepted HTTP body / declared Content-Length (256 MiB), matching the
+/// stream frame cap since a pack rides in the body.
+const MAX_HTTP_BODY_LEN: usize = 256 * 1024 * 1024;
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)

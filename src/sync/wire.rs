@@ -118,6 +118,14 @@ pub fn frame(body: &[u8]) -> Vec<u8> {
     out
 }
 
+// bole-oby
+/// Maximum accepted length-prefixed frame body on a stream transport (256 MiB).
+/// A hostile peer's length prefix above this is rejected before the body is
+/// buffered, bounding transport memory. It must be at least as large as a
+/// legitimately transferable pack (see [`crate::store::pack::MAX_PACK_TOTAL_LEN`]
+/// compressed) plus control-message overhead.
+pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024;
+
 // bole-6qy
 /// Reads one length-prefixed frame body from `buf` starting at `*pos`, advancing
 /// `*pos` past it. Returns `None` if the buffer does not yet hold a full frame.
@@ -126,6 +134,13 @@ pub fn deframe<'a>(buf: &'a [u8], pos: &mut usize) -> Result<Option<&'a [u8]>> {
         return Ok(None);
     }
     let len = u32::from_le_bytes(buf[*pos..*pos + 4].try_into().unwrap()) as usize;
+    // bole-oby: reject an oversized frame from the length prefix alone, before
+    // the body is buffered, so a hostile prefix cannot drive unbounded reads.
+    if len > MAX_FRAME_LEN {
+        return Err(Error::Storage(format!(
+            "frame length {len} exceeds cap {MAX_FRAME_LEN}"
+        )));
+    }
     if buf.len() < *pos + 4 + len {
         return Ok(None);
     }
@@ -137,6 +152,25 @@ pub fn deframe<'a>(buf: &'a [u8], pos: &mut usize) -> Result<Option<&'a [u8]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // bole-oby
+    #[test]
+    fn deframe_rejects_oversized_length_prefix() {
+        // A 4-byte prefix above MAX_FRAME_LEN must error immediately, even with
+        // no body bytes present — proving the body is never buffered.
+        let mut buf = ((MAX_FRAME_LEN as u32) + 1).to_le_bytes().to_vec();
+        buf.extend_from_slice(b"x"); // nowhere near the declared length
+        let mut pos = 0;
+        assert!(deframe(&buf, &mut pos).is_err());
+    }
+
+    // bole-oby
+    #[test]
+    fn deframe_accepts_within_cap() {
+        let framed = frame(b"hello");
+        let mut pos = 0;
+        assert_eq!(deframe(&framed, &mut pos).unwrap(), Some(&b"hello"[..]));
+    }
 
     #[test]
     fn message_encode_decode_roundtrip() {

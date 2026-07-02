@@ -27,6 +27,43 @@ pub const RECORD_OBJECT: u8 = 0x01;
 const HEADER_LEN: usize = 32;
 const TRAILER_LEN: usize = 40;
 
+// bole-oby
+/// Maximum accepted uncompressed size of a single packed object (128 MiB).
+/// Bounds zstd expansion so a decompression bomb on untrusted wire input cannot
+/// exhaust memory before the length/id verification runs.
+pub const MAX_OBJECT_LEN: u64 = 128 * 1024 * 1024;
+// bole-oby
+/// Maximum number of frames accepted in one pack.
+pub const MAX_PACK_OBJECTS: u64 = 8_000_000;
+// bole-oby
+/// Maximum total uncompressed bytes across all frames in one pack (1 GiB), so
+/// many small bomb frames cannot amplify past a fixed budget.
+pub const MAX_PACK_TOTAL_LEN: u64 = 1024 * 1024 * 1024;
+// bole-oby
+/// zstd window-log cap (2^27 = 128 MiB), bounding the decoder's internal window
+/// regardless of what the compressed frame's header requests.
+const ZSTD_WINDOW_LOG_MAX: u32 = 27;
+
+// bole-oby
+/// Bounded zstd decode: never materialises more than `max_out + 1` output bytes,
+/// so a decompression bomb is caught by allocation limit + the length check that
+/// follows. `max_out` is the frame's declared uncompressed length (already
+/// verified `<= MAX_OBJECT_LEN`).
+fn zstd_decode_bounded(zstd: &[u8], max_out: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut dec = zstd::stream::read::Decoder::new(zstd)
+        .map_err(|e| Error::Storage(format!("pack: zstd init: {e}")))?;
+    dec.window_log_max(ZSTD_WINDOW_LOG_MAX)
+        .map_err(|e| Error::Storage(format!("pack: zstd window: {e}")))?;
+    let mut canonical = Vec::new();
+    // Read at most max_out + 1 bytes: exactly-right output lands under the cap;
+    // a bomb producing more is truncated at cap+1 and rejected by length check.
+    dec.take(max_out + 1)
+        .read_to_end(&mut canonical)
+        .map_err(|e| Error::Storage(format!("pack: zstd decode: {e}")))?;
+    Ok(canonical)
+}
+
 // LEB128 unsigned varint.
 fn write_varint(out: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -144,12 +181,18 @@ fn decode_frame(frame: &[u8]) -> Result<(ObjectId, Vec<u8>)> {
     let id = ObjectId::new(idb);
     pos += 32;
     let ulen = read_varint(frame, &mut pos)?;
+    // bole-oby: reject an over-cap declared length before allocating/decoding.
+    if ulen > MAX_OBJECT_LEN {
+        return Err(Error::Storage(format!(
+            "pack: object length {ulen} exceeds cap {MAX_OBJECT_LEN}"
+        )));
+    }
     let slen = read_varint(frame, &mut pos)? as usize;
     let zstd = frame
         .get(pos..pos + slen)
         .ok_or_else(|| Error::Storage("pack: frame body truncated".into()))?;
-    let canonical = zstd::decode_all(zstd)
-        .map_err(|e| Error::Storage(format!("pack: zstd decode: {e}")))?;
+    // bole-oby: bounded decode caps output at ulen+1; a bomb is rejected here.
+    let canonical = zstd_decode_bounded(zstd, ulen)?;
     if canonical.len() as u64 != ulen {
         return Err(Error::Storage("pack: uncompressed length mismatch".into()));
     }
@@ -194,6 +237,12 @@ pub fn decode_pack(pack: &[u8]) -> Result<Vec<(ObjectId, Vec<u8>)>> {
         return Err(Error::Storage(format!("pack: unsupported version {version}")));
     }
     let count = u64::from_le_bytes(pack[16..24].try_into().unwrap());
+    // bole-oby: reject an absurd object count before the decode loop.
+    if count > MAX_PACK_OBJECTS {
+        return Err(Error::Storage(format!(
+            "pack: object count {count} exceeds cap {MAX_PACK_OBJECTS}"
+        )));
+    }
 
     let body_end = pack.len() - TRAILER_LEN;
     let trailer = &pack[body_end..];
@@ -206,6 +255,7 @@ pub fn decode_pack(pack: &[u8]) -> Result<Vec<(ObjectId, Vec<u8>)>> {
     }
 
     let mut out = Vec::new();
+    let mut total_out: u64 = 0; // bole-oby: running decompressed-bytes budget
     let mut pos = HEADER_LEN;
     while pos < body.len() {
         // Parse frame header to find its total length, then decode+verify it.
@@ -226,6 +276,13 @@ pub fn decode_pack(pack: &[u8]) -> Result<Vec<(ObjectId, Vec<u8>)>> {
             .filter(|e| *e <= body.len())
             .ok_or_else(|| Error::Storage("pack: frame body truncated".into()))?;
         let (id, canonical) = decode_frame(&body[frame_start..frame_end])?;
+        // bole-oby: enforce the whole-pack decompressed budget as we go.
+        total_out = total_out.saturating_add(canonical.len() as u64);
+        if total_out > MAX_PACK_TOTAL_LEN {
+            return Err(Error::Storage(format!(
+                "pack: total uncompressed size exceeds cap {MAX_PACK_TOTAL_LEN}"
+            )));
+        }
         out.push((id, canonical));
         pos = frame_end;
     }
@@ -461,6 +518,67 @@ mod tests {
         let mut encoded = PackIndex::build(entries, digest).encode();
         encoded[20] ^= 0xff; // corrupt a fanout byte
         assert!(PackIndex::parse(&encoded).is_err());
+    }
+
+    // bole-oby
+    /// Hand-crafts a single-frame pack with an attacker-declared `ulen` and a
+    /// real zstd body of `payload`, bypassing PackBuilder so the declared length
+    /// can lie. Returns the full pack bytes.
+    fn crafted_pack(declared_ulen: u64, payload: &[u8]) -> Vec<u8> {
+        let zstd = zstd::encode_all(payload, 3).unwrap();
+        let id = ObjectId::from_content(payload);
+        let mut frame = Vec::new();
+        frame.push(RECORD_OBJECT);
+        frame.extend_from_slice(id.as_bytes());
+        write_varint(&mut frame, declared_ulen);
+        write_varint(&mut frame, zstd.len() as u64);
+        frame.extend_from_slice(&zstd);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PACK_MAGIC);
+        buf.extend_from_slice(&PACK_VERSION.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes()); // object_count = 1
+        buf.extend_from_slice(&[0u8; 8]);
+        buf.extend_from_slice(&frame);
+        let digest = *blake3::hash(&buf).as_bytes();
+        buf.extend_from_slice(END_MAGIC);
+        buf.extend_from_slice(&digest);
+        buf
+    }
+
+    // bole-oby
+    #[test]
+    fn frame_declaring_oversized_ulen_is_rejected_before_decode() {
+        // A frame declaring an uncompressed length above the per-object cap must
+        // be refused by the cap check, not decoded. Body is a tiny valid zstd.
+        let pack = crafted_pack(MAX_OBJECT_LEN + 1, b"small");
+        let err = decode_pack(&pack).unwrap_err();
+        assert!(
+            format!("{err}").contains("exceeds"),
+            "expected an over-cap rejection, got: {err}"
+        );
+    }
+
+    // bole-oby
+    #[test]
+    fn frame_with_output_exceeding_declared_ulen_is_rejected() {
+        // Declared ulen lies small; the real body decompresses to more. The
+        // bounded streaming decoder must stop and reject on the length mismatch.
+        let payload = vec![0u8; 1024 * 1024]; // 1 MiB of zeros -> tiny zstd
+        let pack = crafted_pack(8, &payload);
+        assert!(decode_pack(&pack).is_err());
+    }
+
+    // bole-oby
+    #[test]
+    fn genuine_bomb_capped_by_object_limit() {
+        // A real bomb: MAX_OBJECT_LEN+1 compressible bytes. Honestly declared,
+        // it must be rejected by the cap without materialising the output.
+        let payload = vec![0u8; (MAX_OBJECT_LEN as usize) + 1];
+        let pack = crafted_pack(MAX_OBJECT_LEN + 1, &payload);
+        let err = decode_pack(&pack).unwrap_err();
+        assert!(format!("{err}").contains("exceeds"), "got: {err}");
     }
 
     #[test]
