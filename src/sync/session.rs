@@ -38,11 +38,20 @@ pub async fn serve(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) 
 
 async fn serve_fetch(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) -> Result<()> {
     let refs = advertise(repo, accessor)?;
+    // bole-yl2: the objects we may serve are rooted only at refs this accessor is
+    // authorized to read. Capture that set BEFORE trusting the client's `want`.
+    let authorized: HashSet<ObjectId> = refs.iter().map(|r| r.target).collect();
     conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
     let (want, have) = match conn.recv().await? {
         Message::HaveWant { want, have } => (want, have),
         _ => return Err(Error::Storage("protocol: expected HaveWant".into())),
     };
+    // bole-yl2: do NOT trust client-supplied roots. Constrain `want` to the
+    // authorized advertised targets, so a client cannot name an arbitrary
+    // ObjectId (e.g. a protected head or a Secret) and pull its closure. This
+    // enforces the read-ACL on served objects, not just on the advert, and
+    // matches the HTTP fetch path (which derives wants from the adverts).
+    let want: Vec<ObjectId> = want.into_iter().filter(|w| authorized.contains(w)).collect();
     let have: HashSet<ObjectId> = have.into_iter().collect();
     let missing = negotiate::missing_closure(repo, &want, &have).await?;
     let pack = build_pack(repo, &missing).await?;
@@ -398,6 +407,60 @@ mod tests {
             .create_timeline(rn.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
             .unwrap();
         (rn, snap)
+    }
+
+    // bole-yl2
+    #[tokio::test]
+    async fn serve_fetch_refuses_unauthorized_want() {
+        use crate::acl::TimelineAcl;
+        let server = Arc::new(Repository::memory());
+        let (_pub_name, _pub_head) = seed(&server, "main", b"public").await;
+        let (_sec_name, secret_head) = seed(&server, "secret/x", b"classified").await;
+        server.acls.set_timeline_acl(TimelineAcl { pattern: "secret/**".into() }).unwrap();
+
+        let (mut client_conn, mut server_conn) = InProcessConn::pair();
+        let srv = server.clone();
+        let handle = tokio::spawn(async move {
+            // Empty accessor: not cleared for the protected timeline.
+            serve(&mut server_conn, &srv, &Accessor::new()).await
+        });
+
+        // Client asks for the protected head DIRECTLY, bypassing the advert.
+        client_conn
+            .send(&Message::Hello {
+                proto_min: PROTO_VERSION,
+                proto_max: PROTO_VERSION,
+                caps: CapSet::EMPTY,
+                intent: Intent::Fetch,
+            })
+            .await
+            .unwrap();
+        let welcome = client_conn.recv().await.unwrap();
+        if let Message::Welcome { refs, .. } = &welcome {
+            assert!(
+                refs.iter().all(|r| r.target != secret_head),
+                "protected head must not be advertised"
+            );
+        } else {
+            panic!("expected Welcome, got {welcome:?}");
+        }
+        client_conn
+            .send(&Message::HaveWant { want: vec![secret_head], have: vec![] })
+            .await
+            .unwrap();
+        let pack = match client_conn.recv().await.unwrap() {
+            Message::Pack(p) => p,
+            other => panic!("expected Pack, got {other:?}"),
+        };
+        let _done = client_conn.recv().await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        let served: Vec<ObjectId> =
+            decode_pack(&pack).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert!(
+            !served.contains(&secret_head),
+            "serve_fetch leaked a protected object the accessor cannot read"
+        );
     }
 
     #[tokio::test]
