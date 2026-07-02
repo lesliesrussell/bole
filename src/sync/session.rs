@@ -66,19 +66,39 @@ async fn serve_push(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor)
     let refs = advertise(repo, accessor)?;
     conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
 
-    // Land the pushed objects (self-verifying) BEFORE any ref CAS.
+    // Decode + verify the pack (bounded — bole-oby) but do NOT land it yet.
     let pack = match conn.recv().await? {
         Message::Pack(p) => p,
         _ => return Err(Error::Storage("protocol: expected Pack".into())),
     };
-    for (_id, canonical) in decode_pack(&pack)? {
-        repo.objects.put_raw(&canonical).await?;
-    }
+    let decoded = decode_pack(&pack)?;
 
     let ops = match conn.recv().await? {
         Message::RefUpdate(ops) => ops,
         _ => return Err(Error::Storage("protocol: expected RefUpdate".into())),
     };
+
+    // bole-zez: authorize before landing. A connection with no write capability
+    // at all can never have a ref op accepted, so refuse it without writing any
+    // objects to the durable store (prevents an unauthorized/anonymous peer from
+    // planting objects or consuming storage on a push that will be fully denied).
+    if !accessor.has_write_capability() {
+        let denied = ops
+            .iter()
+            .map(|op| RefStatusEntry {
+                name: op.name.clone(),
+                status: RefApplyStatus::Denied("no write capability".into()),
+            })
+            .collect();
+        conn.send(&Message::RefStatus(denied)).await?;
+        return Ok(());
+    }
+
+    // Land the pushed objects (self-verifying) BEFORE the ref CAS; apply_push_ops
+    // needs them present to validate heads and ancestry.
+    for (_id, canonical) in &decoded {
+        repo.objects.put_raw(canonical).await?;
+    }
     let results = apply_push_ops(repo, accessor, &ops).await?;
     conn.send(&Message::RefStatus(results)).await?;
     Ok(())
@@ -424,6 +444,56 @@ mod tests {
             }
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }
+    }
+
+    // bole-zez
+    #[tokio::test]
+    async fn push_without_write_capability_lands_nothing() {
+        let server = Arc::new(Repository::memory());
+        let client = Repository::memory();
+        let (name, head) = seed(&client, "main", b"data").await;
+        let missing =
+            crate::sync::negotiate::missing_closure(&client, &[head], &HashSet::new()).await.unwrap();
+        let pack = build_pack(&client, &missing).await.unwrap();
+
+        let (mut cc, mut sc) = InProcessConn::pair();
+        let srv = server.clone();
+        let handle = tokio::spawn(async move {
+            // Read-only accessor: no write capability at all.
+            serve(&mut sc, &srv, &Accessor::new()).await
+        });
+
+        cc.send(&Message::Hello {
+            proto_min: PROTO_VERSION,
+            proto_max: PROTO_VERSION,
+            caps: CapSet::EMPTY,
+            intent: Intent::Push,
+        })
+        .await
+        .unwrap();
+        let _welcome = cc.recv().await.unwrap();
+        cc.send(&Message::Pack(pack)).await.unwrap();
+        cc.send(&Message::RefUpdate(vec![RefUpdateOp {
+            name: name.clone(),
+            expected_old: None,
+            new_head: head,
+        }]))
+        .await
+        .unwrap();
+        let status = cc.recv().await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        match status {
+            Message::RefStatus(s) => {
+                assert!(matches!(&s[0].status, RefApplyStatus::Denied(_)), "got {:?}", s[0].status)
+            }
+            other => panic!("expected RefStatus, got {other:?}"),
+        }
+        // Objects must NOT have landed for a connection with no write capability.
+        assert!(
+            server.objects.get(&head).await.unwrap().is_none(),
+            "no-write push must not land objects"
+        );
     }
 
     // bole-e9a

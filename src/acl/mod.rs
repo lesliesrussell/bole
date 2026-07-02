@@ -259,6 +259,14 @@ impl Accessor {
         }
     }
 
+    // bole-zez
+    /// True if this accessor holds *any* write clearance. A cheap, resource-
+    /// independent gate: a connection with no write capability at all cannot
+    /// authorize any push, so a responder can refuse it before landing objects.
+    pub fn has_write_capability(&self) -> bool {
+        self.clearances.clearances.iter().any(|c| c.cap.contains(Capability::WRITE))
+    }
+
     /// Read iff some Read-capable, in-scope clearance's ceiling dominates `label`.
     pub fn can_read(&self, label: &Label, r: ResourceRef) -> bool {
         self.clearances.clearances.iter().any(|c| {

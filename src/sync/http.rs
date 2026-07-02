@@ -242,8 +242,23 @@ pub async fn serve_http_once(
         respond(&mut stream, &out).await
     } else if start_line.contains(PUSH_PATH) {
         let req: PushReq = postcard::from_bytes(&body).map_err(|e| Error::Codec(e.to_string()))?;
-        for (_id, canonical) in decode_pack(&req.pack)? {
-            repo.objects.put_raw(&canonical).await?;
+        let decoded = decode_pack(&req.pack)?;
+        // bole-zez: authorize before landing (see serve_push). A no-write-capable
+        // connection lands no objects.
+        if !accessor.has_write_capability() {
+            let status = req
+                .ops
+                .iter()
+                .map(|op| RefStatusEntry {
+                    name: op.name.clone(),
+                    status: RefApplyStatus::Denied("no write capability".into()),
+                })
+                .collect();
+            let out = postcard::to_allocvec(&PushResp { status }).map_err(|e| Error::Codec(e.to_string()))?;
+            return respond(&mut stream, &out).await;
+        }
+        for (_id, canonical) in &decoded {
+            repo.objects.put_raw(canonical).await?;
         }
         let status = apply_push_ops(repo, accessor, &req.ops).await?;
         let out = postcard::to_allocvec(&PushResp { status }).map_err(|e| Error::Codec(e.to_string()))?;
