@@ -185,8 +185,9 @@ pub async fn git_import(
     {
         let mut r = r.map_err(|e| Error::GitProjection(e.to_string()))?;
         let full = r.name().as_bstr().to_string();
+        // bole-jio: peel_to_id_in_place was deprecated in gix 0.74.
         let target = r
-            .peel_to_id_in_place()
+            .peel_to_id()
             .map_err(|e| Error::GitProjection(e.to_string()))?
             .detach();
         if let Some(short) = full.strip_prefix("refs/heads/") {
@@ -346,7 +347,7 @@ async fn translate_commit(
 
     let author = commit.author().map_err(|e| Error::GitProjection(e.to_string()))?;
     let author_str = format!("{} <{}>", author.name, author.email);
-    let created_at = author.time.seconds.max(0) as u64;
+    let created_at = author.seconds().max(0) as u64;
     let mut message = commit.message_raw_sloppy().to_string();
     if let Ok(committer) = commit.committer() {
         if committer.name != author.name || committer.email != author.email {
@@ -355,7 +356,7 @@ async fn translate_commit(
                 message.trim_end(),
                 committer.name,
                 committer.email,
-                committer.time.seconds
+                committer.seconds()
             );
         }
     }
@@ -507,8 +508,8 @@ async fn annotated_tag_meta(
                             tag.decode().map_err(|e| Error::GitProjection(e.to_string()))?;
                         let (tagger_line, created_at) = match decoded.tagger {
                             Some(t) => (
-                                format!("\n\nTagger: {} <{}> {}", t.name, t.email, t.time.seconds),
-                                t.time.seconds.max(0) as u64,
+                                format!("\n\nTagger: {} <{}> {}", t.name, t.email, t.seconds()),
+                                t.seconds().max(0) as u64,
                             ),
                             None => (String::new(), 0),
                         };

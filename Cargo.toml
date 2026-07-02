@@ -26,7 +26,7 @@ async-trait = "0.1"
 thiserror = "1"
 chacha20poly1305 = "0.10"
 rand = "0.8"
-gix = { version = "0.70", default-features = false, features = ["max-performance-safe"] }
+gix = { version = "0.74", default-features = false, features = ["max-performance-safe"] }
 # bole-fo2
 bitflags = { version = "2", features = ["serde"] }
 # bole-0tp
