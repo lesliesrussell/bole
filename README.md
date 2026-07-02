@@ -1,5 +1,13 @@
 # bole — access-controlled version control for multi-actor workflows
 
+> ⚠️ **Experimental — not independently audited.** bole's cryptography and
+> access-control enforcement have had an internal adversarial review but **no
+> external security audit**. Do not rely on it to protect secrets against a
+> motivated adversary yet, and **do not expose a bole network listener on an
+> untrusted network** (the TCP/HTTP transports have no TLS or peer auth). See the
+> [threat model](docs/THREAT_MODEL.md) for the adversary model, enforced
+> protections, and known limitations.
+
 bole is a version control library for multi-actor, access-controlled workflows. Unlike Git — where access control lives outside the repository in a hosting platform or filesystem permissions — bole encodes actor identities, visibility labels, and operation policies as first-class objects in the same content-addressed store as your files and history. That means a real **label lattice** with scoped clearances, **ACL-filtered snapshot views**, **policy-hook-gated** timeline advancement and merges, and **envelope-encrypted secrets** stored alongside source files with access gated by the same rules — making bole a foundation for agent-safe workflows where every actor's capability is declared, enforced, and auditable without a separate service. Distributed sync (content-addressed pack transfer with compare-and-swap on heads, over TCP or HTTP), signed policy verification with a per-repo trust store, and a git import/export round-trip make it interoperable; TLS/SSH transports and cloud KMS adapters are the remaining incremental work.
 
 ## What bole is
