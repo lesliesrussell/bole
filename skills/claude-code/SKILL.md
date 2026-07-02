@@ -1,38 +1,55 @@
 ---
 name: using-bole
-description: Use when version-controlling a project with the bole CLI. bole is access-controlled, multi-actor version control: actor grants, ACL rules, and policy-gated operations are in the repository model, not a hosting platform. Triggers on the `bole` command, `.bole/` repositories, or any task involving actors, timelines, secrets, env overlays, or linked worktrees.
+description: Use when version-controlling a project with bole — either the `bole` CLI over a `.bole/` repository, or the embeddable library in-process (`Repository::memory()` / `ephemeral_workspace`). bole is access-controlled, multi-actor version control: actor grants, ACL rules, and policy-gated operations live in the repository model, not a hosting platform. Triggers on the `bole` command, `.bole/` repositories, the bole library, or any task involving actors, timelines, secrets, env overlays, or linked worktrees.
 ---
 
-# Using the bole CLI
+# Using bole
 
-`bole` is a content-addressed version-control tool. It is **not** Git — the
-nouns are different and map to bole's model:
+`bole` is a content-addressed version-control **library** with a `bole` CLI on
+top of it. It is **not** Git — the nouns are different and map to bole's model.
+
+## Two first-class backends, one object model
+
+bole runs the same object model — snapshots, timelines, actors, ACLs, policy —
+over either backend. Pick per use case:
+
+- **In-memory (library, in-process):** `Repository::memory()` +
+  `repo.ephemeral_workspace()` give a `read`/`write`/`remove`/`diff`/`commit`
+  working tree entirely in RAM — no `.bole/`, no filesystem. This is the path for
+  in-process agents and tests. See *In-memory backend* below.
+- **On disk (the `bole` CLI):** the CLI drives a `.bole/` directory for durable
+  storage — plus linked worktrees, packs/GC, distributed sync, and git interop.
+
+Neither is a footnote: in-RAM embedding and the on-disk CLI are peer ways to use
+bole.
 
 More precisely: bole puts access control **inside** the repository. Named actors
-carry path and timeline grants; the CLI binds an actor before any
-access-controlled operation; secrets are encrypted objects in the same store as
-source files. Automated agents and human developers are the same concept — just
-different grant sets.
+carry path and timeline grants; a bound actor gates every access-controlled
+operation; secrets are encrypted objects in the same store as source files.
+Automated agents and human developers are the same concept — just different grant
+sets.
 
 > Actors open workspaces on timelines, produce snapshots, and advance timelines
 > subject to ACL and policy.
 
 | Concept | Meaning |
 |---------|---------|
-| Repository | a `.bole/` directory; its parent is the **work tree** |
-| Snapshot | an immutable file tree + metadata — the only durable state |
+| Repository | the object/ref/ACL store — in RAM (`Repository::memory()`) or a `.bole/` directory on disk (`Repository::disk()` / the CLI) |
+| Snapshot | an immutable file tree + metadata — the durable state |
 | Timeline | a movable named pointer to a snapshot (≈ branch) |
 | Tag | a fixed named pointer to a snapshot |
 | Actor | a named bundle of path/timeline grants; the bound actor is the identity used for access checks |
-| Secret / Env overlay | encrypted value / named variable bundle, addressed by a CLI-local name |
+| Secret / Env overlay | encrypted value / named variable bundle |
 
-Commands discover the repo by walking up from the current directory (like Git).
+CLI commands discover the on-disk repo by walking up from the current directory
+(like Git).
 
 ## Critical facts
 
-- **Every `bole` command is a separate process.** There is no in-memory/session
-  mode; all state lives in `.bole/`. Don't expect anything to persist except
-  through the repo.
+- **The CLI has no session: each `bole` command is a separate process and its
+  state lives in `.bole/` on disk.** Don't expect CLI state to persist except
+  through the repo. (In-process, the library backend keeps everything in RAM
+  instead — see *In-memory backend*.)
 - **Add `--json` for any output you need to parse.** It is the stable contract;
   human text is not. `--quiet` suppresses non-error output.
 - **Snapshots are created from the work tree**, not staged files. There is no
@@ -52,7 +69,7 @@ Commands discover the repo by walking up from the current directory (like Git).
   `git import <path>` (import a Git repo), `store repack` / `store gc`
   (consolidate loose objects / collect garbage).
 
-## Core workflow
+## Core workflow (CLI / on-disk)
 
 ```bash
 bole init .                                   # create .bole/
@@ -65,7 +82,7 @@ bole snapshot create --from-workspace -m "changes"  # advances the bound timelin
 bole snapshot list                            # history, newest first
 ```
 
-## Command map
+## Command map (CLI)
 
 - **Lifecycle**: `init`, `status`, `repo info`
 - **History**: `snapshot create|show|list|parents|diff`, `timeline create|list|show|advance|delete` (alias `branch`/`branches`), `tag create|list|show|delete`
@@ -87,17 +104,19 @@ target · 64 hex chars = object id · `<name>` = timeline head or tag target.
 segments, including mid-pattern (`a/**/z`); trailing `**` is descendants-only
 (`src/**` ≠ bare `src`); matching is case-sensitive.
 
-## In-process agents (library, not CLI)
+## In-memory backend (library)
 
-If you drive the bole **library** directly (Rust, in-process) instead of the
-CLI, you can work entirely in RAM: `Repository::memory()` plus
-`repo.ephemeral_workspace()` (or `ephemeral_workspace_from(snapshot)`) gives a
-`read`/`write`/`remove`/`diff`/`commit` worktree over in-memory buffers — no
-`.bole/`, no filesystem. `commit` returns a snapshot id (it does not move a
-timeline; call `advance_timeline` for that). See `docs/API.md` → *In-memory
+The in-RAM backend is a co-equal way to use bole, not a fallback. Drive the
+library directly (Rust, in-process) and work entirely in memory:
+`Repository::memory()` plus `repo.ephemeral_workspace()` (or
+`ephemeral_workspace_from(snapshot)`) give a `read`/`write`/`remove`/`diff`/`commit`
+worktree over in-memory buffers — no `.bole/`, no filesystem. `commit` returns a
+snapshot id (it does not move a timeline; call `advance_timeline` for that). The
+same actors, ACLs, secrets, and policy apply. See `docs/API.md` → *In-memory
 workspaces*.
 
 ## When unsure
 
-Run `bole <command> --help`, or read `docs/CLI.md` (full reference) and
+Run `bole <command> --help`, or read `docs/CLI.md` (full CLI reference),
+`docs/API.md` (library API, incl. the in-memory backend), and
 `bole-cli/README.md` (flags + worked examples) in the bole repo.
