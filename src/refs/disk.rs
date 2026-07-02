@@ -4,6 +4,9 @@ use crate::refs::{backend::RefBackend, Ref, RefName};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+// bole-0x3: process-wide monotonic counter for unique journal filenames.
+static JOURNAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct DiskRefBackend {
     root: PathBuf,
 }
@@ -134,8 +137,17 @@ impl RefBackend for DiskRefBackend {
         fs::create_dir_all(&txn_dir)?;
         let bytes = postcard::to_allocvec(&plan.to_vec()).map_err(|e| Error::Codec(e.to_string()))?;
         let txid = blake3::hash(&bytes).to_hex().to_string();
-        let journal = txn_dir.join(format!("{txid}.journal"));
-        let tmp = txn_dir.join(format!(".{txid}.journal.tmp"));
+        // bole-0x3: make the journal/temp names unique per commit. Deriving them
+        // from the plan-content hash alone means two *identical* plans committed
+        // concurrently (across processes — one process is serialized by the
+        // RefStore lock, bole-bti) collide on the journal + temp paths: they
+        // clobber each other's temp file, and one can delete the other's journal
+        // before its owner finishes applying. A (pid, sequence) nonce makes each
+        // commit's paths unique; `recover` still matches any `*.journal`.
+        let seq = JOURNAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nonce = format!("{}-{}", std::process::id(), seq);
+        let journal = txn_dir.join(format!("{txid}-{nonce}.journal"));
+        let tmp = txn_dir.join(format!(".{txid}-{nonce}.journal.tmp"));
         {
             use std::io::Write as _;
             let mut f = fs::File::create(&tmp)?;

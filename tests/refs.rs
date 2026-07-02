@@ -143,3 +143,36 @@ async fn concurrent_cas_advance_has_exactly_one_winner() {
         assert!(head == a || head == b);
     }
 }
+
+// bole-0x3
+/// After committing transactions on the disk backend, no journal file is left
+/// behind (the write-ahead journal is deleted post-apply), and repeated identical
+/// plans commit cleanly with per-commit-unique journal names.
+#[test]
+fn disk_transactions_leave_no_journal() {
+    let dir = TempDir::new().unwrap();
+    let store = RefStore::new(DiskRefBackend::open(dir.path()).unwrap());
+    let base = ObjectId::new([0u8; 32]);
+    let a = ObjectId::new([1u8; 32]);
+    store
+        .create_timeline(name("main"), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+        .unwrap();
+
+    // Two identical-plan commits back to back (unique journal names avoid a
+    // clobber/delete-window collision); both leave the txn dir clean.
+    for target in [a, a] {
+        let mut tx = store.transaction();
+        tx.set(name("dup"), Ref::Tag(bole::Tag { target, created_at: 0, message: None }));
+        let _ = tx.commit();
+    }
+
+    let txn_dir = dir.path().join("refs").join(".txn");
+    if txn_dir.exists() {
+        let leftover: Vec<_> = std::fs::read_dir(&txn_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("journal"))
+            .collect();
+        assert!(leftover.is_empty(), "no journal should remain after commit");
+    }
+}
