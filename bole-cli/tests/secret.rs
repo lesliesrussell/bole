@@ -31,6 +31,72 @@ fn json(dir: &Path, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 
+// bole-amy
+/// Writes `value` to a new secret `name` via stdin, using the default granter key.
+fn put_stdin(dir: &Path, name: &str, value: &[u8]) {
+    let mut child = bin()
+        .args(["secret", "put", name, "--from-stdin"])
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(value).unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+}
+
+// bole-amy
+/// Runs `bole` with a specific `BOLE_KEY`, returning the raw output.
+fn run_as(dir: &Path, key: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_bole"))
+        .env("BOLE_KEY", key)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+}
+
+// bole-amy
+#[test]
+fn secret_grant_and_revoke_actor() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    ok(w, &["init", "."]);
+
+    put_stdin(w, "prod/db", b"postgres://secret");
+
+    // The granter (KEY) can read; Bob (KEY2) cannot yet.
+    assert!(run_as(w, KEY, &["secret", "reveal", "prod/db"]).status.success());
+    assert!(!run_as(w, KEY2, &["secret", "reveal", "prod/db"]).status.success());
+
+    // Grant Bob: granter key from BOLE_KEY, recipient key from BOLE_RECIPIENT_KEY.
+    let grant = bin()
+        .args(["secret", "grant-actor", "prod/db", "--recipient-key-env", "BOLE_RECIPIENT_KEY"])
+        .env("BOLE_RECIPIENT_KEY", KEY2)
+        .current_dir(w)
+        .output()
+        .unwrap();
+    assert!(grant.status.success(), "grant failed: {grant:?}");
+
+    // Now Bob can read, and the granter still can.
+    let bob = run_as(w, KEY2, &["secret", "reveal", "prod/db", "--json"]);
+    assert!(bob.status.success(), "bob reveal failed: {bob:?}");
+    let v: serde_json::Value = serde_json::from_slice(&bob.stdout).unwrap();
+    assert_eq!(v["value"], "postgres://secret");
+    assert!(run_as(w, KEY, &["secret", "reveal", "prod/db"]).status.success());
+
+    // Revoke Bob: he can no longer read; the granter still can.
+    let revoke = bin()
+        .args(["secret", "revoke-actor", "prod/db", "--recipient-key-env", "BOLE_RECIPIENT_KEY"])
+        .env("BOLE_RECIPIENT_KEY", KEY2)
+        .current_dir(w)
+        .output()
+        .unwrap();
+    assert!(revoke.status.success(), "revoke failed: {revoke:?}");
+    assert!(!run_as(w, KEY2, &["secret", "reveal", "prod/db"]).status.success());
+    assert!(run_as(w, KEY, &["secret", "reveal", "prod/db"]).status.success());
+}
+
 #[test]
 fn secret_put_reveal_roundtrip() {
     let dir = tempfile::tempdir().unwrap();

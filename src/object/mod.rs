@@ -66,4 +66,8 @@ pub enum Object {
     // bole-9mz
     /// An envelope-encrypted secret (per-secret data key wrapped by a master key).
     SecretV2(SecretV2),
+    // bole-amy
+    /// An envelope-encrypted secret whose data key is wrapped per-recipient, so
+    /// each actor decrypts with their own master key (no shared master key).
+    MultiRecipientSecret(MultiRecipientSecret),
 }

@@ -199,6 +199,7 @@ The design direction is realized in library form. This table is the canonical ho
 | Signed approval attestations (Ed25519, head-bound) | Realized | `bole-fz1` |
 | Workspace trait (in-memory + disk-backed) | Realized | WS2 (`bole-1kz`) |
 | Envelope-encrypted secrets (per-secret data key + master key), `env resolve` / `run` / `secret rekey` | Realized | WS3 (`bole-9mz`) |
+| Actor-scoped (multi-recipient) secrets — per-actor key wrapping, `secret grant-actor` / `revoke-actor` | Realized | `bole-21g` (crypto) + `bole-amy` (Object/CLI) |
 | KMS integration slot (`KmsClient` + `KmsKeyProvider`, feature `kms`) | Realized | `bole-vw9`; cloud/HSM adapters are third-party `KmsClient` impls |
 | Pack format + mark-sweep GC + atomic multi-ref transactions | Realized | WS4 (`bole-81z`) + `bole-sk6` |
 | Distributed sync — fetch/push/clone with CAS on heads | Realized | WS5 (`bole-cy6`) |

@@ -78,6 +78,40 @@ pub enum Cmd {
     },
     /// List secret names.
     List,
+    /// Grant another actor read access by wrapping the data key for their key.
+    ///
+    /// A plain (single-recipient) secret is upgraded to multi-recipient on the
+    /// first grant, keeping the granter as a reader.
+    GrantActor {
+        /// Secret name.
+        name: String,
+        /// Env var holding YOUR 64-hex key (must already be able to read).
+        #[arg(long, default_value = "BOLE_KEY")]
+        key_env: String,
+        /// File holding YOUR 64-hex key.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// Env var holding the RECIPIENT's 64-hex key.
+        #[arg(long, default_value = "BOLE_RECIPIENT_KEY")]
+        recipient_key_env: String,
+        /// File holding the RECIPIENT's 64-hex key.
+        #[arg(long)]
+        recipient_key_file: Option<PathBuf>,
+    },
+    /// Revoke an actor's read access (drops their wrapped data key).
+    ///
+    /// Forward revocation only: a reader who already extracted the value is not
+    /// un-taught it — follow with `secret rotate` to defeat that.
+    RevokeActor {
+        /// Secret name.
+        name: String,
+        /// Env var holding the RECIPIENT's 64-hex key (to derive their key ref).
+        #[arg(long, default_value = "BOLE_RECIPIENT_KEY")]
+        recipient_key_env: String,
+        /// File holding the RECIPIENT's 64-hex key.
+        #[arg(long)]
+        recipient_key_file: Option<PathBuf>,
+    },
 }
 
 // bole-9mz
@@ -118,7 +152,81 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             rekey(ctx, out, all, names, from_key_env, from_key_file, to_key_env, to_key_file).await
         }
         Cmd::List => list(ctx, out),
+        Cmd::GrantActor { name, key_env, key_file, recipient_key_env, recipient_key_file } => {
+            grant_actor(ctx, out, name, key_env, key_file, recipient_key_env, recipient_key_file)
+                .await
+        }
+        Cmd::RevokeActor { name, recipient_key_env, recipient_key_file } => {
+            revoke_actor(ctx, out, name, recipient_key_env, recipient_key_file).await
+        }
     }
+}
+
+// bole-amy
+/// Grants an actor read access by wrapping the secret's data key under their key.
+#[allow(clippy::too_many_arguments)]
+async fn grant_actor(
+    ctx: &RepoContext,
+    out: &Output,
+    name: String,
+    key_env: String,
+    key_file: Option<PathBuf>,
+    recipient_key_env: String,
+    recipient_key_file: Option<PathBuf>,
+) -> Result<()> {
+    let mut reg = registry::load(ctx, SECRETS_FILE)?;
+    let id_str = reg.get(&name).ok_or_else(|| anyhow!("no such secret: {name}"))?;
+    let id = id_str.parse::<bole::ObjectId>().map_err(|e| anyhow!("corrupt registry id: {e}"))?;
+
+    let granter = key::build_chain(&key_env, key_file.as_deref())?;
+    let recipient = key::build_chain(&recipient_key_env, recipient_key_file.as_deref())?;
+    let recipient_provider = recipient.active()?;
+    let recipient_ref = recipient_provider.active_key_ref().to_string();
+
+    let new_id = ctx
+        .repo
+        .objects
+        .grant_secret_recipient(&id, &granter, recipient_provider)
+        .await
+        .context("granting recipient")?;
+    reg.insert(name.clone(), new_id.to_string());
+    registry::save(ctx, SECRETS_FILE, &reg)?;
+    out.emit(
+        || format!("granted {recipient_ref} read access to secret {name}"),
+        || serde_json::json!({ "action": "grant-actor", "name": name, "recipient": recipient_ref, "id": new_id.to_string() }),
+    );
+    Ok(())
+}
+
+// bole-amy
+/// Revokes an actor's read access by dropping their wrapped data key.
+async fn revoke_actor(
+    ctx: &RepoContext,
+    out: &Output,
+    name: String,
+    recipient_key_env: String,
+    recipient_key_file: Option<PathBuf>,
+) -> Result<()> {
+    let mut reg = registry::load(ctx, SECRETS_FILE)?;
+    let id_str = reg.get(&name).ok_or_else(|| anyhow!("no such secret: {name}"))?;
+    let id = id_str.parse::<bole::ObjectId>().map_err(|e| anyhow!("corrupt registry id: {e}"))?;
+
+    let recipient = key::build_chain(&recipient_key_env, recipient_key_file.as_deref())?;
+    let recipient_ref = recipient.active()?.active_key_ref().to_string();
+
+    let new_id = ctx
+        .repo
+        .objects
+        .revoke_secret_recipient(&id, &recipient_ref)
+        .await
+        .context("revoking recipient")?;
+    reg.insert(name.clone(), new_id.to_string());
+    registry::save(ctx, SECRETS_FILE, &reg)?;
+    out.emit(
+        || format!("revoked {recipient_ref} from secret {name}"),
+        || serde_json::json!({ "action": "revoke-actor", "name": name, "recipient": recipient_ref, "id": new_id.to_string() }),
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

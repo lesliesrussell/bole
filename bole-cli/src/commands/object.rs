@@ -54,6 +54,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::Policy(_) => "policy",
         // bole-9mz
         Object::SecretV2(_) => "secret",
+        // bole-amy
+        Object::MultiRecipientSecret(_) => "secret",
     }
 }
 

@@ -866,9 +866,12 @@ actor decrypts with a key only they hold — there is no shared master key.
   value rotation to defeat a reader who already extracted the DK). Refuses to
   remove the last recipient.
 
-This is the cryptographic core; wiring it into the `Object` model and CLI
-porcelain (`secret grant-actor` / `secret revoke-actor`) is tracked separately
-(`bole-amy`).
+Stored as `Object::MultiRecipientSecret`; `ObjectStore::{put_multi_recipient,
+grant_secret_recipient, revoke_secret_recipient}` and `get_secret_resolved`
+handle it, and `get_secret_resolved` transparently resolves it alongside v1/v2
+secrets. `grant_secret_recipient` upgrades a single-recipient `SecretV2` on first
+grant. Exposed on the CLI as `secret grant-actor` / `secret revoke-actor`
+(bole-amy).
 
 ### Storage: packs, GC, and cheap counts (`bole::store`)
 

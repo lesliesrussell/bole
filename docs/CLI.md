@@ -233,7 +233,21 @@ bole secret rekey [--all | <name>...] \                       # rotate the maste
     --from-key-env <VAR> [--from-key-file <path>] \
     --to-key-env <VAR>   [--to-key-file <path>]
 bole secret list
+bole secret grant-actor <name> \                              # give another actor read access
+    [--key-env <VAR>] [--key-file <path>] \                   #   your key (must already read)
+    --recipient-key-env <VAR> [--recipient-key-file <path>]   #   the recipient's key
+bole secret revoke-actor <name> \                             # drop an actor's read access
+    --recipient-key-env <VAR> [--recipient-key-file <path>]
 ```
+
+`grant-actor` moves a secret from a single shared key toward *per-actor* keys: the
+value's data key is wrapped separately for each recipient, so each actor decrypts
+with only their own key. The first `grant-actor` on a plain secret upgrades it to
+multi-recipient (keeping the granter as a reader); subsequent grants add a wrap
+without re-encrypting the value. `revoke-actor` drops a recipient's wrap
+(identified by their key fingerprint) — this is *forward* revocation, so pair it
+with `secret rotate` to defeat a reader who already extracted the value. The last
+remaining recipient cannot be revoked.
 
 ### Environment overlays
 

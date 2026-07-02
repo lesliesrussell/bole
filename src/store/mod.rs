@@ -13,7 +13,7 @@ use crate::codec;
 use crate::error::Result;
 use crate::object::{Blob, EnvOverlay, Object, ObjectId, Secret, Snapshot, Tree, TreeEntry};
 // bole-9mz
-use crate::object::{SecretAad, SecretV2};
+use crate::object::{MultiRecipientSecret, SecretAad, SecretV2};
 use crate::crypto::key_provider::{KeyProvider, ProviderChain};
 use backend::StorageBackend;
 
@@ -164,6 +164,80 @@ impl ObjectStore {
         self.put(&Object::SecretV2(s)).await
     }
 
+    // bole-amy
+    /// Encrypts `plaintext` for one or more recipients (each an actor's own key
+    /// provider) and stores it as a [`MultiRecipientSecret`]. Any recipient can
+    /// later decrypt with only their own key.
+    pub async fn put_multi_recipient(
+        &self,
+        plaintext: &[u8],
+        recipients: &[&dyn KeyProvider],
+        aad: SecretAad,
+    ) -> Result<ObjectId> {
+        let s = MultiRecipientSecret::encrypt_for(plaintext, recipients, aad).await?;
+        self.put(&Object::MultiRecipientSecret(s)).await
+    }
+
+    // bole-amy
+    /// Grants `new_recipient` read access to the secret at `id` and stores the
+    /// result, returning the new (content-addressed) object id. `granting_chain`
+    /// must already be able to read the secret.
+    ///
+    /// A single-recipient [`SecretV2`] is transparently upgraded to a
+    /// [`MultiRecipientSecret`] whose recipients are the granter (resolved from
+    /// `granting_chain`) plus `new_recipient`; this one-time upgrade re-encrypts
+    /// the value under a fresh data key. A secret that is already multi-recipient
+    /// keeps its value ciphertext untouched — only a wrap is added.
+    pub async fn grant_secret_recipient(
+        &self,
+        id: &ObjectId,
+        granting_chain: &ProviderChain,
+        new_recipient: &dyn KeyProvider,
+    ) -> Result<ObjectId> {
+        match self.get(id).await? {
+            Some(Object::MultiRecipientSecret(mut s)) => {
+                s.grant(granting_chain, new_recipient).await?;
+                self.put(&Object::MultiRecipientSecret(s)).await
+            }
+            Some(Object::SecretV2(s)) => {
+                // Upgrade: decrypt with the granter, then re-encrypt for both the
+                // granter and the newcomer.
+                let plaintext = s.decrypt(granting_chain).await?;
+                let granter = granting_chain.active()?;
+                let recipients: [&dyn KeyProvider; 2] = [granter, new_recipient];
+                self.put_multi_recipient(&plaintext, &recipients, s.aad.clone()).await
+            }
+            Some(_) => Err(crate::error::Error::Codec("not an envelope secret".into())),
+            None => Err(crate::error::Error::Storage(format!("secret not found: {id}"))),
+        }
+    }
+
+    // bole-amy
+    /// Revokes the recipient identified by `key_ref` from the multi-recipient
+    /// secret at `id`, storing and returning the new object id. Errors if the
+    /// object is not a [`MultiRecipientSecret`], if `key_ref` is not a recipient,
+    /// or if it is the last remaining recipient.
+    pub async fn revoke_secret_recipient(
+        &self,
+        id: &ObjectId,
+        key_ref: &str,
+    ) -> Result<ObjectId> {
+        match self.get(id).await? {
+            Some(Object::MultiRecipientSecret(mut s)) => {
+                if !s.revoke(key_ref)? {
+                    return Err(crate::error::Error::Codec(format!(
+                        "{key_ref} is not a recipient of this secret"
+                    )));
+                }
+                self.put(&Object::MultiRecipientSecret(s)).await
+            }
+            Some(_) => Err(crate::error::Error::Codec(
+                "not a multi-recipient secret".into(),
+            )),
+            None => Err(crate::error::Error::Storage(format!("secret not found: {id}"))),
+        }
+    }
+
     // bole-9mz
     /// Fetches and decrypts a secret at `id` using `chain`, resolving both v2
     /// envelope secrets (via the provider chain) and legacy v1 secrets (via the
@@ -176,6 +250,8 @@ impl ObjectStore {
         match self.get(id).await? {
             None => Ok(None),
             Some(Object::SecretV2(s)) => Ok(Some(s.decrypt(chain).await?)),
+            // bole-amy
+            Some(Object::MultiRecipientSecret(s)) => Ok(Some(s.decrypt(chain).await?)),
             Some(Object::Secret(s)) => {
                 for k in chain.legacy_keys() {
                     if let Ok(pt) = s.decrypt(k) {
@@ -361,6 +437,60 @@ mod tests {
         // Missing object → None.
         let missing = crate::object::ObjectId::new([9u8; 32]);
         assert!(s.get_secret_resolved(&missing, &chain).await.unwrap().is_none());
+    }
+
+    // bole-amy
+    #[tokio::test]
+    async fn multi_recipient_store_grant_revoke_roundtrip() {
+        use crate::crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain};
+        use crate::object::SecretAad;
+        let s = store();
+
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let recips: [&dyn KeyProvider; 1] = [&alice];
+        let id = s.put_multi_recipient(b"v", &recips, SecretAad::v2(None)).await.unwrap();
+
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        let b_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "actor:bob")));
+        assert_eq!(s.get_secret_resolved(&id, &a_chain).await.unwrap().unwrap(), b"v");
+        assert!(s.get_secret_resolved(&id, &b_chain).await.is_err());
+
+        // Grant Bob → new object id; Bob can now read.
+        let bob = LocalKeyProvider::new([2u8; 32], "actor:bob");
+        let id2 = s.grant_secret_recipient(&id, &a_chain, &bob).await.unwrap();
+        assert_ne!(id2, id);
+        assert_eq!(s.get_secret_resolved(&id2, &b_chain).await.unwrap().unwrap(), b"v");
+
+        // Revoke Bob → he can no longer read; Alice still can.
+        let bob_ref = LocalKeyProvider::new([2u8; 32], "actor:bob").active_key_ref().to_string();
+        let id3 = s.revoke_secret_recipient(&id2, &bob_ref).await.unwrap();
+        assert!(s.get_secret_resolved(&id3, &b_chain).await.is_err());
+        assert_eq!(s.get_secret_resolved(&id3, &a_chain).await.unwrap().unwrap(), b"v");
+
+        // Revoking a non-recipient errors.
+        assert!(s.revoke_secret_recipient(&id3, "actor:nobody:0000").await.is_err());
+    }
+
+    // bole-amy
+    #[tokio::test]
+    async fn grant_upgrades_secretv2_to_multi_recipient() {
+        use crate::crypto::key_provider::{LocalKeyProvider, ProviderChain};
+        use crate::object::SecretAad;
+        let s = store();
+
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let id = s.put_secret_enveloped(b"v", &alice, SecretAad::v2(None)).await.unwrap();
+        assert!(matches!(s.get(&id).await.unwrap().unwrap(), Object::SecretV2(_)));
+
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        let bob = LocalKeyProvider::new([2u8; 32], "actor:bob");
+        let id2 = s.grant_secret_recipient(&id, &a_chain, &bob).await.unwrap();
+
+        // Upgraded in place to a multi-recipient object; both keys read.
+        assert!(matches!(s.get(&id2).await.unwrap().unwrap(), Object::MultiRecipientSecret(_)));
+        let b_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "actor:bob")));
+        assert_eq!(s.get_secret_resolved(&id2, &b_chain).await.unwrap().unwrap(), b"v");
+        assert_eq!(s.get_secret_resolved(&id2, &a_chain).await.unwrap().unwrap(), b"v");
     }
 
     #[tokio::test]
