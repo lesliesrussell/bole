@@ -589,7 +589,15 @@ impl Repository {
                 return Err(Error::PolicyViolation(reason))
             }
         }
-        self.refs.advance_head(name, snapshot_id)?;
+        // bole-qj4: commit via a compare-and-swap on the head we read and
+        // evaluated policy against (timeline.head), not an unconditional
+        // advance_head. If a concurrent writer moved the head since that read,
+        // the CAS fails (TransactionConflict) rather than silently clobbering the
+        // winner and having accepted this advance on stale lineage. Serialized by
+        // the RefStore commit lock (bole-bti).
+        let mut tx = self.refs.transaction();
+        tx.advance_head_if(name.clone(), timeline.head, snapshot_id);
+        tx.commit()?;
         Ok(())
     }
 
@@ -1738,6 +1746,77 @@ mod tests {
             matches!(err, crate::error::Error::Storage(_)) && format!("{err}").contains("depth"),
             "expected a depth-limit error, got {err:?}"
         );
+    }
+
+    // bole-qj4
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_advance_timeline_exactly_one_winner() {
+        use crate::acl::clearance::{Capability, Clearance, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use crate::acl::Accessor;
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let writer = || {
+            let clr = ClearanceSet {
+                clearances: vec![Clearance {
+                    ceiling: Label::protected(),
+                    cap: Capability::WRITE,
+                    scope: None,
+                }],
+                confined: false,
+            };
+            Accessor::from_parts(Arc::new(LabelLattice::two_point()), Arc::new(LabelRuleSet::default()), clr)
+        };
+
+        for _ in 0..100 {
+            let repo = Arc::new(Repository::memory());
+            let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+            let base = repo
+                .objects
+                .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() })
+                .await
+                .unwrap();
+            let a = repo
+                .objects
+                .put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "a".into() })
+                .await
+                .unwrap();
+            let b = repo
+                .objects
+                .put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 2, message: "b2".into() })
+                .await
+                .unwrap();
+            // FastForwardOnly + sibling children (a, b both descend only base,
+            // neither descends the other). Under concurrency the loser either
+            // sees a CAS conflict (read base, head already moved) or an ff
+            // rejection (read the winner's head, its target isn't a descendant) —
+            // both fail, so with the CAS fix exactly one advance ever succeeds,
+            // deterministically. Without the CAS an advance evaluated against a
+            // stale base head slips through unconditionally (oks == 2), a
+            // fast-forward-policy bypass.
+            let main = RefName::new("main").unwrap();
+            repo.refs
+                .create_timeline(main.clone(), base, TimelinePolicy::FastForwardOnly, 0, "persistent".into(), None)
+                .unwrap();
+
+            let (r1, r2) = {
+                let (rp1, rp2) = (repo.clone(), repo.clone());
+                let (m1, m2) = (main.clone(), main.clone());
+                let (w1, w2) = (writer(), writer());
+                let t1 = tokio::spawn(async move { rp1.advance_timeline(&m1, a, &w1).await });
+                let t2 = tokio::spawn(async move { rp2.advance_timeline(&m2, b, &w2).await });
+                (t1.await.unwrap(), t2.await.unwrap())
+            };
+
+            let oks = [r1.is_ok(), r2.is_ok()].iter().filter(|x| **x).count();
+            assert_eq!(oks, 1, "exactly one winner; got r1={r1:?} r2={r2:?}");
+            let head = repo.refs.get_timeline(&main).unwrap().unwrap().head;
+            assert!(head == a || head == b);
+        }
     }
 
     // bole-48r
