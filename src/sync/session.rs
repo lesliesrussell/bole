@@ -104,6 +104,25 @@ async fn serve_push(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor)
     Ok(())
 }
 
+// bole-sq4
+/// True iff every object reachable from `root` is present in the store (and thus
+/// decodable). Iterative with a seen-set; content addressing rules out cycles so
+/// it always terminates.
+async fn closure_present(objects: &crate::store::ObjectStore, root: ObjectId) -> Result<bool> {
+    let mut stack = vec![root];
+    let mut seen: HashSet<ObjectId> = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match objects.get(&id).await? {
+            Some(obj) => stack.extend(negotiate::child_edges(&obj)),
+            None => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
 // bole-6qy
 /// Server-side: authorize + fast-forward-gate each op, then CAS all survivors in
 /// one `RefTransaction`; a concurrent-winner conflict reports NonFastForward.
@@ -154,6 +173,17 @@ pub(crate) async fn apply_push_ops(
             results.push(RefStatusEntry {
                 name: op.name.clone(),
                 status: RefApplyStatus::Denied("new head is not a snapshot".into()),
+            });
+            continue;
+        }
+        // bole-sq4: the whole reachable closure of new_head must be present, not
+        // just the head node. A pusher that omits part of the snapshot's tree/blob
+        // or parent closure would otherwise advance the head to an un-checkout-able
+        // state that replicates the corruption to other peers.
+        if !closure_present(&repo.objects, op.new_head).await? {
+            results.push(RefStatusEntry {
+                name: op.name.clone(),
+                status: RefApplyStatus::Denied("incomplete object closure".into()),
             });
             continue;
         }
@@ -444,6 +474,39 @@ mod tests {
             }
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }
+    }
+
+    // bole-sq4
+    #[tokio::test]
+    async fn push_with_incomplete_closure_is_denied() {
+        let repo = Repository::memory();
+        // A snapshot whose root tree id was never stored — its closure is broken.
+        let orphan_tree = ObjectId::from_content(b"never-stored-tree");
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: orphan_tree,
+                parents: vec![],
+                author: "t".into(),
+                created_at: 0,
+                message: "m".into(),
+            })
+            .await
+            .unwrap();
+        // The snapshot node itself IS present (passes the bole-e9a check), but its
+        // reachable closure is incomplete.
+        let op = RefUpdateOp {
+            name: RefName::new("main").unwrap(),
+            expected_old: None,
+            new_head: snap,
+        };
+        let res = apply_push_ops(&repo, &writer(), std::slice::from_ref(&op)).await.unwrap();
+        assert!(
+            matches!(&res[0].status, RefApplyStatus::Denied(m) if m.contains("incomplete object closure")),
+            "incomplete closure must be denied, got {:?}",
+            res[0].status
+        );
+        assert!(repo.refs.get_timeline(&RefName::new("main").unwrap()).unwrap().is_none());
     }
 
     // bole-zez
