@@ -85,6 +85,11 @@ impl RepoContext {
                     .with_context(|| format!("reading worktree pointer {}", candidate.display()))?;
                 let ptr: Pointer = serde_json::from_slice(&bytes)
                     .with_context(|| format!("parsing worktree pointer {}", candidate.display()))?;
+                // bole-1hd: a crafted pointer's id is joined into a store path;
+                // reject anything that isn't a safe single path component so it
+                // cannot escape <store>/worktrees.
+                crate::worktrees::validate_id(&ptr.id)
+                    .with_context(|| format!("in worktree pointer {}", candidate.display()))?;
                 let store = PathBuf::from(&ptr.store);
                 let repo = Repository::disk(&store)
                     .await

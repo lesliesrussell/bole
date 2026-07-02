@@ -125,14 +125,33 @@ pub fn meta_dir(repo_dir: &Path, id: &str) -> PathBuf {
     repo_dir.join("worktrees").join(id)
 }
 
-/// Loads the registry, returning an empty one if absent.
+// bole-1hd
+/// Rejects a worktree id that is not a single safe path component — exactly the
+/// charset `allocate_id` produces (ASCII alphanumeric plus `-`/`_`). A worktree
+/// id is joined into `<store>/worktrees/<id>/...`, so a crafted `.bole` pointer
+/// or hand-tampered registry carrying `../..`, a separator, or NUL would escape
+/// the store. Validating on read makes that impossible.
+pub fn validate_id(id: &str) -> Result<()> {
+    use anyhow::bail;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("invalid worktree id {id:?}: must be alphanumeric / '-' / '_'");
+    }
+    Ok(())
+}
+
+/// Loads the registry, returning an empty one if absent. Rejects a registry that
+/// carries an id which is not a safe path component (bole-1hd).
 pub fn load(repo_dir: &Path) -> Result<Registry> {
     let p = registry_path(repo_dir);
-    match std::fs::read(&p) {
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", p.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", p.display())),
+    let registry: Registry = match std::fs::read(&p) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", p.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registry::default(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+    };
+    for id in registry.worktrees.keys() {
+        validate_id(id).with_context(|| format!("in registry {}", p.display()))?;
     }
+    Ok(registry)
 }
 
 /// Persists the registry.
@@ -162,5 +181,25 @@ pub fn allocate_id(registry: &Registry, path: &Path) -> String {
             return candidate;
         }
         n += 1;
+    }
+}
+
+// bole-1hd
+#[cfg(test)]
+mod tests {
+    use super::validate_id;
+
+    #[test]
+    fn validate_id_accepts_allocate_charset() {
+        for ok in ["worktree", "my-wt_2", "abc123", "A-b_C"] {
+            assert!(validate_id(ok).is_ok(), "{ok} should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_id_rejects_traversal_and_separators() {
+        for bad in ["", "..", "../etc", "a/b", "a\\b", "a\0b", "with space", "dot.dot"] {
+            assert!(validate_id(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 }
