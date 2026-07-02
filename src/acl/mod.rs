@@ -280,11 +280,21 @@ impl Accessor {
             return false;
         }
         if self.clearances.confined {
-            let writes_down = self.clearances.clearances.iter().all(|c| {
-                !c.cap.contains(Capability::WRITE)
-                    || self.lattice.strictly_dominates(&c.ceiling, label)
+            // bole-kt8: a confined actor may write only *at* its own level, never
+            // strictly down. Permit iff some in-scope, write-capable clearance's
+            // ceiling EQUALS the label (dominates but not strictly). The previous
+            // global `.all(strictly_dominates)` was unsound: it ignored scope and
+            // ranged over every clearance, so any extra write grant that did not
+            // strictly dominate the label (e.g. an out-of-scope or lower grant)
+            // flipped the guard off while a different higher clearance authorized
+            // the write-down.
+            let at_level = self.clearances.clearances.iter().any(|c| {
+                c.cap.contains(Capability::WRITE)
+                    && scope_applies(&c.scope, r)
+                    && self.lattice.dominates(&c.ceiling, label)
+                    && !self.lattice.strictly_dominates(&c.ceiling, label)
             });
-            if writes_down {
+            if !at_level {
                 return false;
             }
         }
@@ -356,13 +366,12 @@ impl Accessor {
         let allowed = if !dominated {
             false
         } else if cap.contains(Capability::WRITE) && self.clearances.confined {
-            // Confined no-write-down: every write clearance must strictly dominate.
-            let writes_down = self
-                .clearances
-                .clearances
+            // bole-kt8: mirror can_write — permit iff some in-scope write-capable
+            // clearance sits exactly at the label (dominates, not strictly).
+            let at_level = evals
                 .iter()
-                .all(|c| !c.cap.contains(Capability::WRITE) || self.lattice.strictly_dominates(&c.ceiling, label));
-            if writes_down {
+                .any(|e| e.grants_capability && e.scope_applies && e.dominates && !e.strictly_dominates);
+            if !at_level {
                 confined_write_down_block = true;
                 false
             } else {
@@ -722,5 +731,56 @@ mod tests {
         assert!(agent.can_write(&l("b"), ResourceRef::Path("x")));
         // Target bottom: BOTH clearances strictly dominate it -> denied.
         assert!(!agent.can_write(&l("bottom"), ResourceRef::Path("x")));
+    }
+
+    // bole-kt8
+    #[test]
+    fn confined_no_write_down_not_defeated_by_extra_grant() {
+        use super::{Accessor, ResourceRef};
+        use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use std::sync::Arc;
+
+        let l = |s: &str| Label(s.into());
+        // public <= internal <= secret
+        let lat = Arc::new(LabelLattice::new(
+            [l("public"), l("internal"), l("secret")],
+            [(l("public"), l("internal")), (l("internal"), l("secret"))],
+        ));
+        // A confined agent with a HIGH grant on its work area plus an unrelated
+        // LOW grant elsewhere — both individually legitimate.
+        let clr = ClearanceSet {
+            clearances: vec![
+                Clearance {
+                    ceiling: l("secret"),
+                    cap: Capability::WRITE,
+                    scope: Some(ClearanceScope::Path("src/**".into())),
+                },
+                Clearance {
+                    ceiling: l("public"),
+                    cap: Capability::WRITE,
+                    scope: Some(ClearanceScope::Path("public/**".into())),
+                },
+            ],
+            confined: true,
+        };
+        let agent = Accessor::from_parts(lat, Arc::new(LabelRuleSet::default()), clr);
+
+        // Writing secret-derived content DOWN into an internal-labeled src path
+        // must be refused: the only in-scope authorizer (secret) writes down, and
+        // the public grant is out of scope for src/**. Before bole-kt8 the public
+        // grant silently disabled the guard and this was ALLOWED.
+        assert!(
+            !agent.can_write(&l("internal"), ResourceRef::Path("src/notes.txt")),
+            "confined write-down must be denied despite an unrelated low grant"
+        );
+        // explain() must report the same verdict (eval_cap mirrors can_write).
+        let (_r, w) = agent.explain(&l("internal"), ResourceRef::Path("src/notes.txt"));
+        assert!(!w.allowed);
+        assert!(w.confined_write_down_block, "trace should flag the write-down block");
+
+        // And a legitimate at-level write (public grant, in scope) is allowed.
+        assert!(agent.can_write(&l("public"), ResourceRef::Path("public/ok.txt")));
     }
 }
