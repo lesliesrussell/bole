@@ -19,7 +19,9 @@ use crate::acl::memory::MemoryAclBackend;
 use crate::acl::{Accessor, AclStore, PathAcl};
 // bole-fo2
 use crate::acl::ResourceRef;
+use crate::acl::attestation::{ApproverRegistry, Attestation};
 use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent, PolicyRegistry};
+use crate::acl::policy_object::PolicyObject;
 use crate::acl::lattice::LabelLattice;
 use crate::acl::rules::LabelRuleSet;
 use crate::error::{Error, Result};
@@ -200,6 +202,51 @@ impl Repository {
             reg.push(crate::acl::hook::resolve_hook(spec)?);
         }
         Ok(reg)
+    }
+
+    // bole-6i7
+    /// Stores/overwrites the content-addressed approver registry — the set of
+    /// keys whose signatures a `signed-approval` hook will accept — pinned by the
+    /// `refs/policy/approvers` ref.
+    pub async fn set_approvers(&self, registry: &ApproverRegistry) -> Result<()> {
+        let id = self
+            .objects
+            .put(&Object::Policy(PolicyObject::Approvers(registry.clone())))
+            .await?;
+        let name = RefName::new(crate::acl::attestation::APPROVERS_REF)?;
+        let mut tx = self.refs.transaction();
+        tx.set(name, Ref::Tag(crate::refs::Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(())
+    }
+
+    // bole-6i7
+    /// Loads the approver registry (empty if none has been set).
+    pub async fn approvers(&self) -> Result<ApproverRegistry> {
+        crate::acl::attestation::load_approvers(&self.refs, &self.objects).await
+    }
+
+    // bole-6i7
+    /// Stores a signed [`Attestation`] as a content-addressed object, pinned by a
+    /// `refs/attestations/<object-id>` ref. Idempotent (the ref name is the
+    /// object id). Returns the attestation's object id.
+    pub async fn add_attestation(&self, att: &Attestation) -> Result<ObjectId> {
+        let id = self
+            .objects
+            .put(&Object::Policy(PolicyObject::Attestation(att.clone())))
+            .await?;
+        let leaf = format!("{}{}", crate::acl::attestation::ATTESTATIONS_PREFIX, id);
+        let name = RefName::new(leaf)?;
+        let mut tx = self.refs.transaction();
+        tx.set(name, Ref::Tag(crate::refs::Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(id)
+    }
+
+    // bole-6i7
+    /// Loads every stored attestation.
+    pub async fn attestations(&self) -> Result<Vec<Attestation>> {
+        crate::acl::attestation::load_attestations(&self.refs, &self.objects).await
     }
 
     // bole-p8u
@@ -1605,24 +1652,26 @@ mod tests {
     }
 
     // bole-fo2
+    // bole-6i7
     #[tokio::test]
-    async fn merge_into_release_requires_two_approvals() {
-        use crate::acl::hook::approval_ref_prefix;
+    async fn merge_into_release_requires_two_signed_approvals() {
+        use crate::acl::attestation::{ApproverRegistry, AttestationSigner};
         use crate::acl::policy_object::HookSpec;
-        use crate::acl::{Accessor, TimelineRole, Permission};
-        use crate::object::{EntryKind, ObjectId, Snapshot, TreeEntry};
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
         use crate::refs::{RefName, TimelinePolicy};
         use crate::MergeCheck;
-        use std::collections::{BTreeMap, BTreeSet};
+        use std::collections::BTreeMap;
 
         let mut repo = Repository::memory();
         repo.register_hook(HookSpec {
-            kind: "approval".into(),
+            kind: "signed-approval".into(),
             pattern: "release/**".into(),
             params: BTreeMap::from([("needed".to_string(), 2u64)]),
         });
 
-        // A clean source (no protected paths) merging into release/1.0.
+        // A clean source (no protected paths) merging into release/1.0. Both
+        // timelines start at `snap`, so check_merge's result_head is `snap`.
         let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
         let mut entries = BTreeMap::new();
         entries.insert("src/lib.rs".into(), TreeEntry { id: blob, kind: EntryKind::Blob });
@@ -1638,24 +1687,77 @@ mod tests {
         let writer = Accessor::new()
             .with_timeline_role(TimelineRole { pattern: "release/**".into(), permission: Permission::Write });
 
-        // No approvals yet -> RequiresApproval.
+        // Register the approver set; no attestations yet -> RequiresApproval.
+        let alice = AttestationSigner::from_seed("alice", [1u8; 32]);
+        let bob = AttestationSigner::from_seed("bob", [2u8; 32]);
+        let mut reg = ApproverRegistry::new();
+        reg.add(alice.approver());
+        reg.add(bob.approver());
+        repo.set_approvers(&reg).await.unwrap();
+
         let r1 = repo.check_merge(&source, &dest, &writer).await.unwrap();
         assert!(matches!(r1, MergeCheck::RequiresApproval(_)), "got {r1:?}");
 
-        // Record two approval refs, then -> Allowed.
-        let prefix = approval_ref_prefix(dest.as_str());
-        for approver in ["alice", "bob"] {
-            let rn = RefName::new(format!("{prefix}{approver}")).unwrap();
-            repo.refs.create_tag(rn, ObjectId::new([7u8; 32]), None, 0).unwrap();
-        }
-        let _ = BTreeSet::<u8>::new();
+        // Two distinct signed approvals of the exact result head -> Allowed.
+        repo.add_attestation(&alice.attest("release/1.0", snap)).await.unwrap();
+        repo.add_attestation(&bob.attest("release/1.0", snap)).await.unwrap();
         let r2 = repo.check_merge(&source, &dest, &writer).await.unwrap();
         assert_eq!(r2, MergeCheck::Allowed);
+
+        // A forged approval by an UNREGISTERED key does not count.
+        let mallory = AttestationSigner::from_seed("mallory", [9u8; 32]);
+        let mut repo2 = Repository::memory();
+        repo2.register_hook(HookSpec {
+            kind: "signed-approval".into(),
+            pattern: "release/**".into(),
+            params: BTreeMap::from([("needed".to_string(), 1u64)]),
+        });
+        repo2.refs.create_timeline(source.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo2.refs.create_timeline(dest.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo2.objects.put_blob(Bytes::from("x")).await.unwrap();
+        repo2.objects.put_tree(BTreeMap::from([("src/lib.rs".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob })])).await.unwrap();
+        repo2.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo2.set_approvers(&reg).await.unwrap(); // alice/bob registered, NOT mallory
+        repo2.add_attestation(&mallory.attest("release/1.0", snap)).await.unwrap();
+        let r3 = repo2.check_merge(&source, &dest, &writer).await.unwrap();
+        assert!(matches!(r3, MergeCheck::RequiresApproval(_)), "forged approver must not count: {r3:?}");
+    }
+
+    // bole-6i7
+    #[tokio::test]
+    async fn approver_and_attestation_persistence_roundtrip() {
+        use crate::acl::attestation::{ApproverRegistry, AttestationSigner};
+
+        let repo = Repository::memory();
+        // Empty by default.
+        assert!(repo.approvers().await.unwrap().approvers.is_empty());
+        assert!(repo.attestations().await.unwrap().is_empty());
+
+        let alice = AttestationSigner::from_seed("alice", [1u8; 32]);
+        let mut reg = ApproverRegistry::new();
+        reg.add(alice.approver());
+        repo.set_approvers(&reg).await.unwrap();
+        let loaded = repo.approvers().await.unwrap();
+        assert_eq!(loaded.approvers.len(), 1);
+        assert!(loaded.find("alice").is_some());
+
+        let head = crate::object::ObjectId::new([5u8; 32]);
+        repo.add_attestation(&alice.attest("release/1.0", head)).await.unwrap();
+        let atts = repo.attestations().await.unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].target, "release/1.0");
+        assert_eq!(atts[0].head, head);
+
+        // set_approvers overwrites the pin (idempotent single source of truth).
+        reg.add(AttestationSigner::from_seed("bob", [2u8; 32]).approver());
+        repo.set_approvers(&reg).await.unwrap();
+        assert_eq!(repo.approvers().await.unwrap().approvers.len(), 2);
     }
 
     // bole-rdh
     #[tokio::test]
-    async fn approval_hook_gates_direct_advance() {
+    async fn signed_approval_gates_direct_advance() {
+        use crate::acl::attestation::{ApproverRegistry, AttestationSigner};
         use crate::acl::policy_object::HookSpec;
         use crate::acl::{Accessor, Permission, TimelineRole};
         use crate::object::Snapshot;
@@ -1664,7 +1766,7 @@ mod tests {
 
         let mut repo = Repository::memory();
         repo.register_hook(HookSpec {
-            kind: "approval".into(),
+            kind: "signed-approval".into(),
             pattern: "release/**".into(),
             params: BTreeMap::from([("needed".to_string(), 1u64)]),
         });
@@ -1672,24 +1774,12 @@ mod tests {
         let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
         let base = repo
             .objects
-            .put_snapshot(Snapshot {
-                root: tree,
-                parents: vec![],
-                author: "t".into(),
-                created_at: 0,
-                message: "b".into(),
-            })
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() })
             .await
             .unwrap();
         let child = repo
             .objects
-            .put_snapshot(Snapshot {
-                root: tree,
-                parents: vec![base],
-                author: "t".into(),
-                created_at: 1,
-                message: "c".into(),
-            })
+            .put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "c".into() })
             .await
             .unwrap();
         let dest = RefName::new("release/1.0").unwrap();
@@ -1702,14 +1792,29 @@ mod tests {
             permission: Permission::Write,
         });
 
-        // Zero approvals: advancing the protected timeline must be refused, even
-        // though this is an Advance (not a Merge) event. Before bole-rdh the
-        // approval hook ignored Advance and this advance silently succeeded.
+        // Register an approver.
+        let alice = AttestationSigner::from_seed("alice", [1u8; 32]);
+        let mut reg = ApproverRegistry::new();
+        reg.add(alice.approver());
+        repo.set_approvers(&reg).await.unwrap();
+
+        // No attestation for `child`: advancing the gated timeline is refused
+        // (Advance event, signed-approval hook — bole-rdh + bole-6i7).
         let err = repo.advance_timeline(&dest, child, &writer).await.unwrap_err();
         assert!(
             matches!(err, crate::error::Error::PolicyViolation(_)),
-            "expected the approval gate to fire on a direct advance, got {err:?}"
+            "expected the signed-approval gate to fire on a direct advance, got {err:?}"
         );
+        assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, base, "head must not move");
+
+        // An attestation of the WRONG head does not unlock this advance.
+        repo.add_attestation(&alice.attest("release/1.0", base)).await.unwrap();
+        assert!(repo.advance_timeline(&dest, child, &writer).await.is_err());
+
+        // A signed approval of the EXACT head unlocks the advance.
+        repo.add_attestation(&alice.attest("release/1.0", child)).await.unwrap();
+        repo.advance_timeline(&dest, child, &writer).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, child);
     }
 
     // bole-wy4

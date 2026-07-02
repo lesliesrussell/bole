@@ -3,7 +3,6 @@ use crate::acl::Accessor;
 // bole-fo2
 use crate::error::{Error, Result};
 // bole-fo2
-use crate::acl::glob::glob_matches;
 use crate::acl::policy_object::HookSpec;
 use crate::object::{Object, ObjectId};
 use crate::refs::{RefName, RefStore, TimelinePolicy};
@@ -251,94 +250,20 @@ impl PolicyHook for TimelinePolicyHook {
     }
 }
 
-// bole-fo2
-/// The ref-namespace prefix under which placeholder approval refs for `target`
-/// live.
-///
-/// **Superseded by [`crate::acl::attestation`] (bole-fz1):** a bare ref cannot
-/// prove *who* approved or *which head*. Prefer signed [`Attestation`]s counted
-/// by [`count_valid_approvals`]. This ref-counting path remains only for the
-/// `HookSpec`-resolvable `"approval"` hook kind.
-///
-/// [`Attestation`]: crate::acl::attestation::Attestation
-/// [`count_valid_approvals`]: crate::acl::attestation::count_valid_approvals
-pub fn approval_ref_prefix(target: &str) -> String {
-    format!("refs/approval/{}/", target)
-}
-
-// bole-fo2
-/// Counts recorded placeholder approval refs for `target`. Superseded by
-/// [`crate::acl::attestation::count_valid_approvals`] (verifies signatures).
-pub fn count_approvals(refs: &RefStore, target: &str) -> Result<u32> {
-    let prefix = approval_ref_prefix(target);
-    let n = refs.list(&prefix)?.len();
-    Ok(n as u32)
-}
-
-// bole-fo2
-/// "Merges into `<pattern>` need `needed` approvals", counted as bare refs.
-///
-/// **Superseded by [`crate::acl::attestation::SignedApprovalHook`]** (bole-fz1),
-/// which requires distinct *signed* approvals of the exact result head. This
-/// unsigned variant is retained only for the `HookSpec`-resolvable path.
-pub struct ApprovalHook {
-    pub pattern: String,
-    pub needed: u32,
-}
-
-#[async_trait::async_trait]
-impl PolicyHook for ApprovalHook {
-    fn name(&self) -> &str {
-        "approval"
-    }
-
-    // bole-7c1
-    /// Non-deterministic: the verdict counts *live* approval refs
-    /// ([`PolicyContext::refs`]) that are not bound to the result head and race
-    /// across replicas, so two nodes can disagree. Prefer the head-bound,
-    /// replayable [`crate::acl::attestation::SignedApprovalHook`].
-    fn deterministic(&self) -> bool {
-        false
-    }
-
-    async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
-        // bole-rdh: gate BOTH the merge event and the advance event. The state
-        // change into a protected timeline actually happens via advance_timeline
-        // (the CLI's `merge run` builds a snapshot then advances), so matching
-        // only Merge left the real mutation ungated.
-        let target = match &ctx.event {
-            PolicyEvent::Merge { target, .. } => *target,
-            PolicyEvent::Advance { timeline, .. } => *timeline,
-        };
-        if glob_matches(&self.pattern, target.as_str()) {
-            let approvals = match count_approvals(ctx.refs, target.as_str()) {
-                Ok(n) => n,
-                Err(e) => return PolicyDecision::Deny(format!("approval lookup failed: {e}")),
-            };
-            if approvals < self.needed {
-                return PolicyDecision::RequiresApproval {
-                    reason: format!(
-                        "{} needs {} approvals, has {}",
-                        target.as_str(),
-                        self.needed,
-                        approvals
-                    ),
-                    needed: self.needed - approvals,
-                };
-            }
-        }
-        PolicyDecision::Allow
-    }
-}
+// bole-6i7: the forgeable ref-counting `ApprovalHook` (and its
+// `approval_ref_prefix` / `count_approvals` helpers) is removed. The only
+// resolvable approval hook is now the signed, head-bound
+// `crate::acl::attestation::SignedApprovalHook`.
 
 // bole-fo2
 /// Resolves a declarative `HookSpec` into a hook instance. Fail-closed: an
 /// unknown `kind` is rejected rather than silently skipped (decision O5).
 pub fn resolve_hook(spec: &HookSpec) -> Result<Box<dyn PolicyHook>> {
     match spec.kind.as_str() {
-        "approval" => {
+        // bole-6i7: signed, head-bound approvals loaded from the repo.
+        "signed-approval" => {
             let needed = *spec.params.get("needed").unwrap_or(&1) as u32;
-            Ok(Box::new(ApprovalHook {
+            Ok(Box::new(crate::acl::attestation::SignedApprovalHook {
                 pattern: spec.pattern.clone(),
                 needed,
             }))
@@ -457,13 +382,14 @@ mod tests {
     // bole-7c1
     #[tokio::test]
     async fn builtins_have_expected_determinism() {
-        use super::ApprovalHook;
+        use crate::acl::attestation::SignedApprovalHook;
         // The built-in FF hook is a pure function of the object DAG + config.
         assert!(TimelinePolicyHook.deterministic());
         // A fresh registry (only TimelinePolicyHook) is deterministic.
         assert!(PolicyRegistry::new().deterministic());
-        // The unsigned approval hook reads the live ref store — non-deterministic.
-        assert!(!ApprovalHook { pattern: "release/**".into(), needed: 1 }.deterministic());
+        // bole-6i7: the signed-approval hook loads attestations from the repo's
+        // mutable ref namespace — non-deterministic across replicas.
+        assert!(!SignedApprovalHook { pattern: "release/**".into(), needed: 1 }.deterministic());
     }
 
     // bole-7c1
@@ -508,25 +434,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn approval_hook_blocks_then_allows() {
-        use super::{approval_ref_prefix, ApprovalHook};
-        let objects = ObjectStore::new(MemoryBackend::new());
-        let refs = RefStore::new(MemoryRefBackend::new());
-        let source = RefName::new("feature/x").unwrap();
-        let target = RefName::new("release/1.0").unwrap();
-        let accessor = Accessor::privileged();
-        let head = objects.put_tree(BTreeMap::new()).await.unwrap();
-
-        let hook = ApprovalHook { pattern: "release/**".into(), needed: 1 };
-        let ctx = PolicyContext {
-            event: PolicyEvent::Merge { source: &source, target: &target, old_head: head, result_head: head },
-            accessor: &accessor, objects: &objects, refs: &refs, now: 0,
-        };
-        assert!(matches!(hook.check(&ctx).await, PolicyDecision::RequiresApproval { .. }));
-
-        let rn = RefName::new(format!("{}alice", approval_ref_prefix(target.as_str()))).unwrap();
-        refs.create_tag(rn, head, None, 0).unwrap();
-        assert_eq!(hook.check(&ctx).await, PolicyDecision::Allow);
-    }
+    // bole-6i7: the forgeable ApprovalHook was removed; signed-approval gating is
+    // exercised in `acl::attestation` tests and the repo integration tests.
 }

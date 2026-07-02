@@ -44,6 +44,14 @@ pub enum PolicyObject {
     RuleSet(LabelRuleSet),
     Grant(ClearanceGrant),
     Root(PolicyRoot),
+    // bole-6i7
+    /// The content-addressed set of keys allowed to sign approvals, pinned by the
+    /// `refs/policy/approvers` ref.
+    Approvers(crate::acl::attestation::ApproverRegistry),
+    // bole-6i7
+    /// A single stored, head-bound signed approval, pinned by a
+    /// `refs/attestations/<id>` ref.
+    Attestation(crate::acl::attestation::Attestation),
 }
 
 // bole-fo2

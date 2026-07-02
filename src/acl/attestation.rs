@@ -15,7 +15,50 @@ use serde::{Deserialize, Serialize};
 
 use crate::acl::glob::glob_matches;
 use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent, PolicyHook};
-use crate::object::ObjectId;
+use crate::acl::policy_object::PolicyObject;
+use crate::error::Result;
+use crate::object::{Object, ObjectId};
+use crate::refs::{RefName, RefStore};
+use crate::store::ObjectStore;
+
+// bole-6i7
+/// Well-known ref pinning the content-addressed [`ApproverRegistry`].
+pub const APPROVERS_REF: &str = "refs/policy/approvers";
+// bole-6i7
+/// Prefix for per-attestation refs (`refs/attestations/<attestation-object-id>`).
+pub const ATTESTATIONS_PREFIX: &str = "refs/attestations/";
+
+// bole-6i7
+/// Loads the approver registry pinned by [`APPROVERS_REF`], or an empty registry
+/// if none is set. Both the persistence helpers and the repo-loading hook use it,
+/// so approver state has a single source of truth.
+pub async fn load_approvers(refs: &RefStore, objects: &ObjectStore) -> Result<ApproverRegistry> {
+    let name = RefName::new(APPROVERS_REF)?;
+    let tag = match refs.get_tag(&name)? {
+        Some(t) => t,
+        None => return Ok(ApproverRegistry::new()),
+    };
+    match objects.get(&tag.target).await? {
+        Some(Object::Policy(PolicyObject::Approvers(reg))) => Ok(reg),
+        _ => Ok(ApproverRegistry::new()),
+    }
+}
+
+// bole-6i7
+/// Loads every stored attestation (the refs under [`ATTESTATIONS_PREFIX`]).
+pub async fn load_attestations(refs: &RefStore, objects: &ObjectStore) -> Result<Vec<Attestation>> {
+    let mut out = Vec::new();
+    for name in refs.list(ATTESTATIONS_PREFIX)? {
+        if let Some(tag) = refs.get_tag(&name)? {
+            if let Some(Object::Policy(PolicyObject::Attestation(att))) =
+                objects.get(&tag.target).await?
+            {
+                out.push(att);
+            }
+        }
+    }
+    Ok(out)
+}
 
 // bole-fz1
 /// An authorized approver's public key.
@@ -27,7 +70,7 @@ pub struct Approver {
 
 // bole-fz1
 /// The set of keys allowed to approve merges/advances for a repo.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApproverRegistry {
     pub approvers: Vec<Approver>,
 }
@@ -135,14 +178,16 @@ pub fn count_valid_approvals(
 }
 
 // bole-fz1
-/// "Merges into `<pattern>` need `needed` distinct signed approvals of the exact
-/// result head." Supersedes the ref-counting `ApprovalHook`.
+// bole-6i7
+/// "Advances/merges into `<pattern>` need `needed` distinct signed approvals of
+/// the exact head." The approver registry and attestations are loaded from the
+/// repository at evaluation time ([`load_approvers`] / [`load_attestations`]), so
+/// this hook is fully configured by `(pattern, needed)` and resolvable from a
+/// `HookSpec` (kind `"signed-approval"`). Replaces the forgeable ref-counting
+/// `ApprovalHook`.
 pub struct SignedApprovalHook {
     pub pattern: String,
     pub needed: u32,
-    pub approvers: ApproverRegistry,
-    /// The attestations available at evaluation time (loaded by the caller).
-    pub attestations: Vec<Attestation>,
 }
 
 #[async_trait::async_trait]
@@ -151,39 +196,52 @@ impl PolicyHook for SignedApprovalHook {
         "signed-approval"
     }
 
-    // bole-7c1
-    /// Deterministic: the verdict is a pure function of the event's
-    /// `result_head` and the *replicated* attestation/approver sets this hook
-    /// carries — head-bound and identical on every replica, unlike the unsigned
-    /// [`ApprovalHook`](crate::acl::hook::ApprovalHook) that counts live refs.
-    /// This is the replayable approval path safe to gate a replicated advance.
+    // bole-6i7
+    /// **Non-deterministic.** The verdict counts attestations stored in the
+    /// repository's mutable `refs/attestations/` namespace, which is not
+    /// guaranteed identical across replicas (approvers add attestations over
+    /// time), so two nodes can disagree. It therefore gates **local**
+    /// advance/merge (via `Repository::advance_timeline` / `check_merge`); a
+    /// replicated push into an approval-gated timeline is refused fail-closed by
+    /// `apply_push_ops` (bole-7c1). Unlike the removed `ApprovalHook`, the
+    /// approvals it counts are Ed25519-signed and head-bound, not forgeable refs.
+    /// A deterministic variant would bind approvals into the head's object
+    /// closure (an "approval commit"); tracked as future work.
     fn deterministic(&self) -> bool {
-        true
+        false
     }
 
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
-        // bole-rdh: gate BOTH merge and advance, bound to the head being moved
-        // to. The mutation into a protected timeline happens via advance_timeline
-        // (Advance) as well as merge; matching only Merge left it ungated.
+        // bole-rdh: gate BOTH merge and advance, bound to the head being moved to.
         let (target, head) = match &ctx.event {
             PolicyEvent::Merge { target, result_head, .. } => (*target, *result_head),
             PolicyEvent::Advance { timeline, new_head, .. } => (*timeline, *new_head),
         };
-        if glob_matches(&self.pattern, target.as_str()) {
-            let have =
-                count_valid_approvals(&self.attestations, &self.approvers, target.as_str(), head);
-            if have < self.needed {
-                return PolicyDecision::RequiresApproval {
-                    reason: format!(
-                        "{} needs {} signed approval(s) of head {}, has {}",
-                        target.as_str(),
-                        self.needed,
-                        head,
-                        have
-                    ),
-                    needed: self.needed - have,
-                };
-            }
+        if !glob_matches(&self.pattern, target.as_str()) {
+            return PolicyDecision::Allow;
+        }
+        // bole-6i7: load the governing approver set + stored attestations from the
+        // repo. Fail closed if either cannot be loaded.
+        let approvers = match load_approvers(ctx.refs, ctx.objects).await {
+            Ok(a) => a,
+            Err(e) => return PolicyDecision::Deny(format!("approver load failed: {e}")),
+        };
+        let attestations = match load_attestations(ctx.refs, ctx.objects).await {
+            Ok(a) => a,
+            Err(e) => return PolicyDecision::Deny(format!("attestation load failed: {e}")),
+        };
+        let have = count_valid_approvals(&attestations, &approvers, target.as_str(), head);
+        if have < self.needed {
+            return PolicyDecision::RequiresApproval {
+                reason: format!(
+                    "{} needs {} signed approval(s) of head {}, has {}",
+                    target.as_str(),
+                    self.needed,
+                    head,
+                    have
+                ),
+                needed: self.needed - have,
+            };
         }
         PolicyDecision::Allow
     }
@@ -192,7 +250,7 @@ impl PolicyHook for SignedApprovalHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acl::hook::{PolicyEvent, PolicyRegistry};
+    use crate::acl::hook::PolicyEvent;
     use crate::acl::Accessor;
     use crate::object::Snapshot;
     use crate::refs::memory::MemoryRefBackend;
@@ -267,24 +325,29 @@ mod tests {
             now: 0,
         };
 
-        // No attestations → RequiresApproval.
-        let none = SignedApprovalHook {
-            pattern: "release/**".into(),
-            needed: 2,
-            approvers: reg.clone(),
-            attestations: vec![],
-        };
-        assert!(matches!(none.check(&ctx).await, PolicyDecision::RequiresApproval { .. }));
+        // bole-6i7: the hook loads approvers + attestations from the repo, so we
+        // persist them via the same refs/objects scheme load_* reads.
+        let reg_id = objects.put(&Object::Policy(PolicyObject::Approvers(reg))).await.unwrap();
+        refs.create_tag(RefName::new(APPROVERS_REF).unwrap(), reg_id, None, 0).unwrap();
 
-        // Two valid approvals of the result head → Allow (through a registry).
-        let hook = SignedApprovalHook {
-            pattern: "release/**".into(),
-            needed: 2,
-            approvers: reg,
-            attestations: vec![alice.attest("release/1.0", base), bob.attest("release/1.0", base)],
-        };
-        let mut registry = PolicyRegistry::new();
-        registry.push(Box::new(hook));
-        assert_eq!(registry.evaluate(&ctx).await, PolicyDecision::Allow);
+        let hook = SignedApprovalHook { pattern: "release/**".into(), needed: 2 };
+
+        // No attestations yet → RequiresApproval.
+        assert!(matches!(hook.check(&ctx).await, PolicyDecision::RequiresApproval { .. }));
+
+        // Store two valid approvals of the result head.
+        for att in [alice.attest("release/1.0", base), bob.attest("release/1.0", base)] {
+            let id = objects.put(&Object::Policy(PolicyObject::Attestation(att))).await.unwrap();
+            refs.create_tag(
+                RefName::new(format!("{ATTESTATIONS_PREFIX}{id}")).unwrap(),
+                id,
+                None,
+                0,
+            )
+            .unwrap();
+        }
+
+        // Now enough distinct signed approvals of the head → Allow.
+        assert_eq!(hook.check(&ctx).await, PolicyDecision::Allow);
     }
 }

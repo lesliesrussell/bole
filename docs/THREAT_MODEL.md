@@ -77,14 +77,20 @@ These are real gaps a deployer must account for; each is tracked as a bead.
   a repository/namespace id, so the same key trusted in two repos could allow
   same-scheme cross-*repo* replay of an admin-authored artifact. Use distinct keys
   per repo until repo-binding lands. (No repo-identity primitive exists yet.)
-- **Signed approvals are not wired into enforcement.** The strong, head-bound
-  `SignedApprovalHook` is not reachable from `resolve_hook`, and there is no
-  persistent approver/attestation store (`bole-6i7`, `bole-rdh`). The only
-  configurable approval hook is the unsigned, ref-counting `ApprovalHook`, which
-  is **forgeable** by anyone who can write a ref in its namespace and is therefore
-  a placeholder. **Do not rely on approval gates for security yet.** (The approval
-  hooks now at least gate the actual mutation path — `bole-rdh` — so the shape is
-  correct once a real signed hook is wired.)
+- **Signed approvals gate local operations only (`bole-6i7`).** The strong,
+  head-bound `SignedApprovalHook` is now the *only* configurable approval hook
+  (kind `"signed-approval"`): it verifies distinct Ed25519 attestations of the
+  exact head against a content-addressed approver registry loaded from the repo
+  (`Repository::set_approvers` / `add_attestation`). The forgeable ref-counting
+  `ApprovalHook` is **removed**. It gates local `advance_timeline` / `check_merge`
+  (both mutate via advance — `bole-rdh`). **Limitation:** because it counts
+  attestations in the repo's mutable `refs/attestations/` namespace, it is
+  *non-deterministic* across replicas, so a **replicated push** into an
+  approval-gated timeline is refused fail-closed (`bole-7c1`) rather than
+  enforced remotely. A deterministic variant (binding approvals into the head's
+  object closure — an "approval commit") is future work; until then, perform
+  approval-gated advances locally, and treat approvals as defense-in-depth on top
+  of write capability, not a remote-enforced control.
 - **Forward-only secret revocation.** `MultiRecipientSecret::revoke` drops a
   recipient's key wrap but does not rotate the data key; a reader who already
   extracted the DK can still decrypt existing ciphertext. Pair a revocation with a

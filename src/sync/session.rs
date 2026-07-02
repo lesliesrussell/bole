@@ -458,10 +458,11 @@ mod tests {
         let ok = apply_push_ops(&repo, &writer(), std::slice::from_ref(&op)).await.unwrap();
         assert!(matches!(ok[0].status, RefApplyStatus::Ok), "clean repo should accept: {:?}", ok[0].status);
 
-        // Bind the non-deterministic unsigned approval hook. The guard fires
-        // before any head check, so the current head state is irrelevant.
+        // Bind the non-deterministic signed-approval hook (bole-6i7: it loads
+        // attestations from mutable refs). The guard fires before any head check,
+        // so the current head state is irrelevant.
         repo.register_hook(HookSpec {
-            kind: "approval".into(),
+            kind: "signed-approval".into(),
             pattern: "**".into(),
             params: BTreeMap::from([("needed".to_string(), 1u64)]),
         });
@@ -470,7 +471,7 @@ mod tests {
         match &denied[0].status {
             RefApplyStatus::Denied(r) => {
                 assert!(r.contains("non-deterministic"), "reason: {r}");
-                assert!(r.contains("approval"), "reason should name the hook: {r}");
+                assert!(r.contains("signed-approval"), "reason should name the hook: {r}");
             }
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }

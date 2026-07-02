@@ -909,7 +909,17 @@ all-or-nothing (a write-ahead journal on disk; idempotent replay on `open`).
   highest-rooted-wins conflict resolution.
 - `acl::attestation::{Approver, ApproverRegistry, AttestationSigner, Attestation,
   verify_attestation, count_valid_approvals, SignedApprovalHook}` — signed,
-  head-bound merge approvals.
+  head-bound advance/merge approvals.
+- **Wiring (bole-6i7):** a `HookSpec { kind: "signed-approval", pattern, params:{needed} }`
+  resolves to a `SignedApprovalHook` that loads the approver set + attestations
+  from the repo at check time. Persist them with `Repository::set_approvers(&reg)`
+  and `Repository::add_attestation(&att)` (read back via `approvers()` /
+  `attestations()`); they live in content-addressed `PolicyObject::Approvers` /
+  `PolicyObject::Attestation` objects pinned by `refs/policy/approvers` and
+  `refs/attestations/<id>`. The forgeable ref-counting `ApprovalHook` is removed.
+  The hook is **non-deterministic** (it reads the mutable attestation namespace),
+  so it gates local `advance_timeline` / `check_merge` and is refused fail-closed
+  on a replicated push — see the determinism contract below and the threat model.
 
 #### PolicyHook determinism contract
 
@@ -921,9 +931,10 @@ reachable from those ids, and the hook's own (replicated) configuration — neve
 wall-clock (`PolicyContext::now`), live ref state, randomness, or environment.
 
 - `PolicyHook::deterministic(&self) -> bool` (default `true`) — a hook that
-  cannot honour the contract overrides it to `false`. The unsigned `ApprovalHook`
-  (counts live refs) is `false`; `SignedApprovalHook` (head-bound, replicated
-  attestations) is `true`.
+  cannot honour the contract overrides it to `false`. `TimelinePolicyHook`
+  (ancestry over the object DAG) is `true`; `SignedApprovalHook` is `false`
+  because it counts attestations in the mutable `refs/attestations/` namespace,
+  which is not identical across replicas.
 - `PolicyRegistry::{deterministic, non_deterministic, evaluate_replayable}` —
   `evaluate_replayable` is fail-closed: if any bound hook is non-deterministic it
   refuses the whole decision rather than risk divergence. The sync push-acceptance
