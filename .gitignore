@@ -9,3 +9,6 @@
 # Added by cargo
 
 /target
+
+# oh-my-claudecode session/HUD state (transient)
+.omc/
