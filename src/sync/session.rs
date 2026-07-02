@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent};
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};
-use crate::object::ObjectId;
+use crate::object::{Object, ObjectId};
 use crate::refs::{Ref, RefName, Tag, TimelinePolicy};
 use crate::repo::Repository;
 use crate::store::pack::{decode_pack, PackBuilder};
@@ -127,6 +127,16 @@ pub(crate) async fn apply_push_ops(
             });
             continue;
         }
+        // bole-e9a: a ref may only point at a real Snapshot. Reject an op whose
+        // new_head is absent or is some other object type, so a peer cannot make
+        // a timeline dangle at a blob/tree id.
+        if !matches!(repo.objects.get(&op.new_head).await?, Some(Object::Snapshot(_))) {
+            results.push(RefStatusEntry {
+                name: op.name.clone(),
+                status: RefApplyStatus::Denied("new head is not a snapshot".into()),
+            });
+            continue;
+        }
         let current = repo.refs.get_timeline(&op.name)?;
         if let (Some(old), Some(remote)) = (op.expected_old, current.as_ref()) {
             let ff = repo.find_common_ancestor(old, op.new_head).await? == Some(old);
@@ -181,10 +191,14 @@ pub(crate) async fn apply_push_ops(
                 tx.advance_head_if(op.name.clone(), old, op.new_head);
             }
             None => {
+                // bole-e9a: a pushed-created timeline defaults to FastForwardOnly,
+                // not Unrestricted. Unrestricted would permanently allow history
+                // rewrite on that timeline via later pushes; fast-forward-only is
+                // the safe default (the wire op carries no policy to honour).
                 tx.create_timeline(
                     op.name.clone(),
                     op.new_head,
-                    TimelinePolicy::Unrestricted,
+                    TimelinePolicy::FastForwardOnly,
                     0,
                     "persistent".into(),
                     None,
@@ -410,6 +424,51 @@ mod tests {
             }
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }
+    }
+
+    // bole-e9a
+    #[tokio::test]
+    async fn push_create_defaults_to_fast_forward_and_rejects_non_snapshot() {
+        let repo = Repository::memory();
+        // A real snapshot to create a timeline at.
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: tree,
+                parents: vec![],
+                author: "t".into(),
+                created_at: 0,
+                message: "m".into(),
+            })
+            .await
+            .unwrap();
+
+        // Create via push -> the new timeline must be FastForwardOnly, not
+        // Unrestricted (which would permanently allow history rewrite).
+        let name = RefName::new("main").unwrap();
+        let create = RefUpdateOp { name: name.clone(), expected_old: None, new_head: snap };
+        let res = apply_push_ops(&repo, &writer(), std::slice::from_ref(&create)).await.unwrap();
+        assert!(matches!(res[0].status, RefApplyStatus::Ok), "create should succeed: {:?}", res[0].status);
+        assert_eq!(
+            repo.refs.get_timeline(&name).unwrap().unwrap().policy,
+            TimelinePolicy::FastForwardOnly
+        );
+
+        // A ref op whose new_head is a blob (not a snapshot) must be refused.
+        let blob = repo.objects.put_blob(bytes::Bytes::from("x")).await.unwrap();
+        let bad = RefUpdateOp {
+            name: RefName::new("evil").unwrap(),
+            expected_old: None,
+            new_head: blob,
+        };
+        let res2 = apply_push_ops(&repo, &writer(), std::slice::from_ref(&bad)).await.unwrap();
+        assert!(
+            matches!(&res2[0].status, RefApplyStatus::Denied(m) if m.contains("not a snapshot")),
+            "non-snapshot head must be denied, got {:?}",
+            res2[0].status
+        );
+        assert!(repo.refs.get_timeline(&RefName::new("evil").unwrap()).unwrap().is_none());
     }
 
     fn writer() -> Accessor {
