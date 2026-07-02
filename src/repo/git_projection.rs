@@ -56,14 +56,19 @@ async fn project_impl(
             .map_err(|e| Error::GitProjection(e.to_string()))?
     };
 
-    // Pass 2: collect timeline heads, then topo-sort reachable snapshots
-    let all_refs = repo.refs.list("")?;
+    // Pass 2: collect timeline heads, then topo-sort reachable snapshots.
+    // bole-x8w: use the repository's canonical visibility filter
+    // (`list_refs_filtered`) — the same one sync advertising uses. It computes a
+    // timeline's label from the REPOSITORY's rules and treats an unprotected
+    // (bottom-label) timeline as public. The previous `accessor.can_read_timeline`
+    // loop used the accessor's OWN rules with no public short-circuit, so a bound
+    // actor lacking an explicit timeline grant could not see even a public
+    // timeline — producing an empty export.
+    let visible = repo.list_refs_filtered("", accessor)?;
     let mut timeline_heads: Vec<(crate::refs::RefName, ObjectId)> = Vec::new();
-    for name in &all_refs {
+    for name in &visible {
         if let Some(Ref::Timeline(tl)) = repo.refs.get(name)? {
-            if accessor.can_read_timeline(name.as_str()) {
-                timeline_heads.push((name.clone(), tl.head));
-            }
+            timeline_heads.push((name.clone(), tl.head));
         }
     }
     let starts: Vec<ObjectId> = timeline_heads.iter().map(|(_, h)| *h).collect();
@@ -107,7 +112,9 @@ async fn project_impl(
 
     // Pass 5: write tag refs. Lightweight tags (message None) point directly at
     // the commit; annotated tags (message Some) write a git tag object first.
-    for name in &all_refs {
+    // bole-x8w: iterate the visible refs (same filter as timelines) so tag
+    // visibility is consistent with timeline visibility.
+    for name in &visible {
         if let Some(Ref::Tag(tag)) = repo.refs.get(name)? {
             if let Some(git_commit) = id_map.get(&tag.target).cloned() {
                 let git_ref_target = match &tag.message {
@@ -479,11 +486,14 @@ mod tests {
 
     #[tokio::test]
     async fn acl_denied_timeline_has_no_branch_ref() {
-        use crate::acl::{PathRole, Permission, TimelineRole};
+        use crate::acl::{PathRole, Permission, TimelineAcl, TimelineRole};
         let dir = tempdir().unwrap();
         let (repo, _, _, _) = linear_repo().await;
         let target = dir.path().join("out.git");
-        // accessor that cannot read the "main" timeline
+        // bole-x8w: an *unprotected* timeline is public (visible to any accessor),
+        // so to test genuine ACL denial we must PROTECT `main` in the repository.
+        repo.acls.set_timeline_acl(TimelineAcl { pattern: "main".into() }).unwrap();
+        // Accessor cleared only for other/** timelines -> cannot read protected main.
         let restricted = Accessor::new()
             .with_timeline_role(TimelineRole { pattern: "other/**".into(), permission: Permission::Read })
             .with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });

@@ -560,3 +560,51 @@ async fn t7_secret_entries_skipped() {
         "secret.key must be excluded"
     );
 }
+
+// bole-x8w
+/// An accessor with only a PATH grant (no timeline grant) must still see an
+/// unprotected (public) timeline in the export — public visibility mirrors how
+/// public files are shown. Before bole-x8w, project_to_git filtered timelines via
+/// accessor.can_read_timeline (accessor's own rules, no public/bottom
+/// short-circuit) and produced an empty repo for such an accessor.
+#[tokio::test]
+async fn export_includes_public_timeline_for_path_only_accessor() {
+    let repo = Repository::memory();
+    let blob = repo.objects.put_blob(Bytes::from("hello")).await.unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert("src/main.rs".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
+    let tree = repo.objects.put_tree(entries).await.unwrap();
+    let snap = repo
+        .objects
+        .put_snapshot(Snapshot {
+            root: tree,
+            parents: vec![],
+            author: "a".into(),
+            created_at: 1,
+            message: "init".into(),
+        })
+        .await
+        .unwrap();
+    repo.refs
+        .create_timeline(
+            RefName::new("main").unwrap(),
+            snap,
+            TimelinePolicy::Unrestricted,
+            1,
+            "persistent".into(),
+            None,
+        )
+        .unwrap();
+
+    // Path-only accessor: read everything by path, but NO timeline grant.
+    let accessor =
+        Accessor::new().with_path_role(PathRole { glob: "**".into(), permission: Permission::Read });
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("out.git");
+    bole::project_to_git(&repo, &target, &accessor).await.unwrap();
+
+    assert!(
+        target.join("refs/heads/main").exists(),
+        "public timeline must be exported even without an explicit timeline grant"
+    );
+}
