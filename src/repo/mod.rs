@@ -550,6 +550,26 @@ impl Repository {
         let timeline = self.refs.get_timeline(name)?.ok_or_else(|| {
             Error::Storage(format!("timeline not found: {}", name.as_str()))
         })?;
+        // bole-48r
+        // Deleting a path is a write to that path, but walk_tree_filtered over the
+        // NEW tree cannot see a path that is no longer there. Enumerate the OLD
+        // head's paths and require write on every one that the new snapshot
+        // removes, so an actor cannot drop protected paths they cannot write.
+        let old_paths = match self.objects.get(&timeline.head).await? {
+            Some(Object::Snapshot(s)) => self.tree_as_map(s.root).await?,
+            _ => BTreeMap::new(),
+        };
+        for path in old_paths.keys() {
+            if !paths.contains_key(path) {
+                let label = rules.label_for_path(&lattice, path);
+                if !accessor.can_write(&label, ResourceRef::Path(path)) {
+                    return Err(Error::AccessDenied(format!(
+                        "write denied on removed path: {}",
+                        path
+                    )));
+                }
+            }
+        }
         let registry = self.policy_registry()?;
         let ctx = PolicyContext {
             event: PolicyEvent::Advance {
@@ -1657,6 +1677,70 @@ mod tests {
         assert!(
             matches!(err, crate::error::Error::PolicyViolation(_)),
             "expected the approval gate to fire on a direct advance, got {err:?}"
+        );
+    }
+
+    // bole-48r
+    #[tokio::test]
+    async fn advance_denies_deleting_unwritable_protected_path() {
+        use crate::acl::clearance::{Capability, Clearance, ClearanceScope, ClearanceSet};
+        use crate::acl::lattice::{Label, LabelLattice};
+        use crate::acl::rules::LabelRuleSet;
+        use crate::acl::{Accessor, PathAcl};
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        let repo = Repository::memory();
+        repo.acls.set_path_acl(PathAcl { glob: "secrets/**".into() }).unwrap();
+
+        // Old head has a protected secret plus a public doc.
+        let sec = repo.objects.put_blob(Bytes::from("k")).await.unwrap();
+        let doc = repo.objects.put_blob(Bytes::from("d")).await.unwrap();
+        let mut old_entries = BTreeMap::new();
+        old_entries.insert("secrets/prod.key".into(), TreeEntry { id: sec, kind: EntryKind::Blob });
+        old_entries.insert("docs/a".into(), TreeEntry { id: doc, kind: EntryKind::Blob });
+        let old_tree = repo.objects.put_tree(old_entries).await.unwrap();
+        let base = repo
+            .objects
+            .put_snapshot(Snapshot { root: old_tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() })
+            .await
+            .unwrap();
+
+        // New snapshot DROPS secrets/prod.key, keeps docs/a.
+        let mut new_entries = BTreeMap::new();
+        new_entries.insert("docs/a".into(), TreeEntry { id: doc, kind: EntryKind::Blob });
+        let new_tree = repo.objects.put_tree(new_entries).await.unwrap();
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot { root: new_tree, parents: vec![base], author: "t".into(), created_at: 1, message: "drop".into() })
+            .await
+            .unwrap();
+
+        let main = RefName::new("main").unwrap();
+        repo.refs
+            .create_timeline(main.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+
+        // Actor: write on public paths + write on timelines, but NOT on the
+        // protected secrets/** label (public ceiling doesn't dominate protected).
+        let clr = ClearanceSet {
+            clearances: vec![
+                Clearance { ceiling: Label::public(), cap: Capability::WRITE, scope: Some(ClearanceScope::Path("**".into())) },
+                Clearance { ceiling: Label::protected(), cap: Capability::WRITE, scope: Some(ClearanceScope::Timeline("**".into())) },
+            ],
+            confined: false,
+        };
+        let actor = Accessor::from_parts(Arc::new(LabelLattice::two_point()), Arc::new(LabelRuleSet::default()), clr);
+
+        // Dropping the protected path must be refused (it's a write to secrets/**
+        // the actor cannot perform). Before bole-48r only the new tree was walked,
+        // so the deletion slipped through.
+        let err = repo.advance_timeline(&main, child, &actor).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::AccessDenied(_)),
+            "deleting a protected path must be denied, got {err:?}"
         );
     }
 
