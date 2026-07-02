@@ -79,9 +79,16 @@ impl AttestationSigner {
 }
 
 // bole-fz1
-/// The canonical signed message: target bytes, a separator, then the head id.
+// bole-m2p
+/// Domain-separation tag for approval attestations (see the analogous tag in
+/// `acl::authority`). Binds the signature to this scheme so a key reused across
+/// bole's other Ed25519 schemes cannot cross-verify.
+const ATTESTATION_DOMAIN: &[u8] = b"bole-attestation-v1\0";
+
+/// The canonical signed message: domain tag, target bytes, a separator, head id.
 fn attestation_message(target: &str, head: ObjectId) -> Vec<u8> {
-    let mut m = Vec::with_capacity(target.len() + 33);
+    let mut m = Vec::with_capacity(ATTESTATION_DOMAIN.len() + target.len() + 33);
+    m.extend_from_slice(ATTESTATION_DOMAIN);
     m.extend_from_slice(target.as_bytes());
     m.push(0);
     m.extend_from_slice(head.as_bytes());

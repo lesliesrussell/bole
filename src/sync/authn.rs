@@ -143,10 +143,17 @@ pub fn verify_ref_op(
     vk.verify(&ref_op_message(name, expected_old, new_head), &signature).is_ok()
 }
 
+// bole-m2p
+/// Domain-separation tag for signed ref updates (see the analogous tags in
+/// `acl::authority` / `acl::attestation`). Binds the signature to this scheme.
+const REF_OP_DOMAIN: &[u8] = b"bole-ref-op-v1\0";
+
 // bole-6h7
 /// Canonical signed message for a ref update.
 fn ref_op_message(name: &RefName, expected_old: &Option<ObjectId>, new_head: &ObjectId) -> Vec<u8> {
     let mut m = Vec::new();
+    // bole-m2p: domain tag first, so this can't be confused with another scheme.
+    m.extend_from_slice(REF_OP_DOMAIN);
     m.extend_from_slice(name.as_str().as_bytes());
     m.push(0);
     if let Some(old) = expected_old {

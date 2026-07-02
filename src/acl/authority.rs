@@ -102,11 +102,29 @@ impl PolicySigner {
         }
     }
 
-    /// A detached signature over `root`'s id bytes.
+    /// A detached signature over `root`'s domain-separated message.
     pub fn sign_root(&self, root: ObjectId) -> RootSignature {
-        let sig = self.signing.sign(root.as_bytes());
+        let sig = self.signing.sign(&policy_root_message(root));
         RootSignature { root, key_id: self.key_id.clone(), sig: sig.to_bytes().to_vec() }
     }
+}
+
+// bole-m2p
+/// Domain-separation tag for policy-root signatures. Prefixing the signed bytes
+/// with a per-scheme constant prevents a signature made in one context (or by a
+/// key reused across bole's other Ed25519 schemes — attestations, ref-ops) from
+/// verifying as a policy-root signature. Without it, sign_root signed the bare
+/// 32-byte id, so cross-scheme reuse was prevented only by incidental length
+/// differences. Versioned so the format can evolve.
+const POLICY_ROOT_DOMAIN: &[u8] = b"bole-policy-root-v1\0";
+
+// bole-m2p
+/// The domain-separated message signed for a policy root: tag || id.
+fn policy_root_message(root: ObjectId) -> Vec<u8> {
+    let mut m = Vec::with_capacity(POLICY_ROOT_DOMAIN.len() + 32);
+    m.extend_from_slice(POLICY_ROOT_DOMAIN);
+    m.extend_from_slice(root.as_bytes());
+    m
 }
 
 // bole-0tp
@@ -138,7 +156,8 @@ fn verify_root_signature(root: ObjectId, sig: &RootSignature, trust: &TrustStore
         Err(_) => return false,
     };
     let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-    vk.verify(root.as_bytes(), &signature).is_ok()
+    // bole-m2p: verify over the domain-separated message, matching sign_root.
+    vk.verify(&policy_root_message(root), &signature).is_ok()
 }
 
 // bole-0tp
@@ -293,6 +312,29 @@ mod tests {
             .put(&Object::Policy(PolicyObject::Root(PolicyRoot { lattice, rules, parent, hooks })))
             .await
             .unwrap()
+    }
+
+    // bole-m2p
+    #[test]
+    fn bare_id_signature_is_rejected_domain_separation() {
+        // A signature over the BARE id (the pre-bole-m2p format, and the shape a
+        // cross-scheme reuse would produce) must not verify as a policy root.
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let root = ObjectId::new([3u8; 32]);
+        let mut trust = TrustStore::new();
+        trust.add(TrustAnchor { key_id: "admin".into(), public_key: sk.verifying_key().to_bytes() });
+
+        let bare = sk.sign(root.as_bytes());
+        let bad = RootSignature { root, key_id: "admin".into(), sig: bare.to_bytes().to_vec() };
+        assert!(
+            !verify_root_signature(root, &bad, &trust),
+            "a bare-id signature must be rejected — domain separation not enforced"
+        );
+
+        // The domain-separated signature verifies.
+        let good_sig = sk.sign(&policy_root_message(root));
+        let good = RootSignature { root, key_id: "admin".into(), sig: good_sig.to_bytes().to_vec() };
+        assert!(verify_root_signature(root, &good, &trust));
     }
 
     #[tokio::test]
