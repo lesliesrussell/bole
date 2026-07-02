@@ -760,7 +760,7 @@ project_to_git(
 ) -> Result<()>  // async
 ```
 
-Exports the bole repo to a bare Git repository at `target_path`. The export is filtered by `accessor` — paths and timelines the accessor cannot read are excluded.
+Exports the bole repo to a bare Git repository at `target_path`. The export is filtered by `accessor` using the repository's canonical visibility rules (the same `list_refs_filtered` sync uses): an **unprotected** timeline (bottom label) is public and always exported; a **protected** timeline is exported only when `accessor` is cleared for it. Within each projected snapshot, only paths the accessor may read are included (public paths always; protected paths when cleared). `Accessor::privileged()` sees everything.
 
 - If `target_path` does not exist, a new bare repo is created.
 - If `target_path` is an existing bare Git repo, it is opened and updated (idempotent).

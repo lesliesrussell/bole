@@ -289,6 +289,17 @@ bole git import <path> \             # import branches + tags from a local Git r
 Import keeps an identity map under `.bole/git-map/` so re-importing after upstream
 pushes only translates new commits and advances the affected timelines.
 
+**Export visibility.** `git export` projects every timeline the bound actor may
+read, and within each snapshot only the paths that actor may read. Visibility
+follows the label model: an **unprotected** timeline is *public* — exported for
+any actor — while a timeline **protected** by `acl timeline protect` is exported
+only for an actor holding a matching `grant-timeline`. With no actor bound (`actor
+current` shows none) the CLI has full access and exports everything. So a bound
+actor with only path grants still sees public timelines; if an export looks empty,
+check whether the bound actor is cleared for the timelines you expect
+(`acl can-read-timeline --actor <a> <name>`, and `acl timeline list` for what's
+protected).
+
 ### Plumbing
 
 ```bash

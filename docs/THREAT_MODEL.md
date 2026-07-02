@@ -126,6 +126,7 @@ The internal audit's confirmed findings are fixed and regression-tested:
 | Max HTTP header block | 64 KiB | `sync::http` |
 | Max HTTP body | 256 MiB | `sync::http` |
 | Max glob pattern/path | 8 KiB | `acl::glob::MAX_GLOB_LEN` |
+| Max tree nesting depth | 256 | `repo::MAX_TREE_DEPTH` |
 
 ## Deployment guidance
 
