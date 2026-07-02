@@ -223,6 +223,11 @@ mod tests {
         let a_other = alice.attest("release/1.0", other);
         assert_eq!(count_valid_approvals(&[a_other], &reg, "release/1.0", head), 0);
 
+        // bole-zqx: an attestation for a DIFFERENT target does not count for this
+        // target (no cross-target replay).
+        let a_other_target = alice.attest("release/2.0", head);
+        assert_eq!(count_valid_approvals(&[a_other_target], &reg, "release/1.0", head), 0);
+
         // An unregistered approver does not count.
         let mallory = AttestationSigner::from_seed("mallory", [9u8; 32]);
         let m = mallory.attest("release/1.0", head);
