@@ -141,10 +141,18 @@ The internal audit's confirmed findings are fixed and regression-tested:
 
 ## Audit history
 
-- **2026-07** — Internal multi-agent adversarial review across nine surfaces
-  (envelope, key provider, signatures, attestations, access-control, filtering,
-  policy hooks, sync, deps/RNG/panics). 15 findings confirmed and remediated
-  (`bole-oby`, `bole-yl2`, `bole-rdh`, `bole-kt8`, `bole-1hu`, `bole-48r`,
-  `bole-e9a`, `bole-zez`, `bole-m2p`). A second-pass review covered structural
-  decode DoS, serde limits, ref-CAS concurrency, filesystem path safety, and a
-  dependency scan. **No external audit has been performed.**
+- **2026-07 (pass 1)** — Internal multi-agent adversarial review across nine
+  surfaces (envelope, key provider, signatures, attestations, access-control,
+  filtering, policy hooks, sync, deps/RNG/panics). 15 findings confirmed and
+  remediated (`bole-oby`, `bole-yl2`, `bole-rdh`, `bole-kt8`, `bole-1hu`,
+  `bole-48r`, `bole-e9a`, `bole-zez`, `bole-m2p`).
+- **2026-07 (pass 2)** — Second-pass review of the surfaces pass 1 did not cover:
+  structural/cyclic decode DoS, serde decode limits, ref-CAS concurrency/TOCTOU,
+  filesystem path traversal, and a real `cargo audit` dependency scan. 7 findings
+  confirmed and remediated (`bole-daf` RefName path-traversal, `bole-wy4`
+  tree-walk stack-overflow, `bole-bti` ref-CAS serialization, `bole-qj4`
+  advance-timeline CAS, `bole-sq4` push closure verification, `bole-1hd` worktree
+  id validation, `bole-0x3` journal filename uniqueness), plus `bole-jio`
+  (dependency advisories: bumped gix, cleared `cargo audit`).
+- **No external / third-party cryptographic audit has been performed.** Both
+  passes were internal adversarial reviews with per-finding verification.
