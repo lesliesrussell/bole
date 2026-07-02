@@ -10,8 +10,25 @@ use std::fmt;
 /// must not start with `.`, must not contain null bytes, and the name must not
 /// begin or end with `/`.  These rules mirror Git's ref naming restrictions to
 /// keep projection straightforward.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct RefName(String);
+
+// bole-daf
+/// Manual `Deserialize` so a decoded `RefName` (e.g. from an untrusted sync wire
+/// message) is validated through [`RefName::new`], not constructed raw. The
+/// derived impl skipped validation, letting a peer inject a name containing
+/// `..`/leading-`.`/NUL that `ref_path` would then join into a filesystem path
+/// escaping `<root>/refs` (arbitrary-file write). Every deserialized `RefName`
+/// now satisfies the same invariants as one built by `new`.
+impl<'de> Deserialize<'de> for RefName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        RefName::new(s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl RefName {
     // bole-p8u
@@ -135,5 +152,22 @@ mod tests {
         assert!(RefName::new(".foo").is_err());
         assert!(RefName::new("a/.foo").is_err());
         assert!(RefName::new(".foo/bar").is_err());
+    }
+
+    // bole-daf
+    #[test]
+    fn deserialize_rejects_path_traversal() {
+        // A wire payload that encodes a raw traversal string as a RefName must be
+        // rejected at decode — the derived Deserialize used to accept it, which is
+        // how a pushed ref name could escape <root>/refs on disk.
+        for evil in ["../../etc/passwd", "/abs", "a/../../b", "a//b", ".hidden", "x\0y"] {
+            let bytes = postcard::to_allocvec(&evil.to_string()).unwrap();
+            let decoded: std::result::Result<RefName, _> = postcard::from_bytes(&bytes);
+            assert!(decoded.is_err(), "RefName deserialize must reject {evil:?}");
+        }
+        // A valid name still round-trips through the wire codec.
+        let ok = RefName::new("release/1.0").unwrap();
+        let bytes = postcard::to_allocvec(&ok).unwrap();
+        assert_eq!(postcard::from_bytes::<RefName>(&bytes).unwrap(), ok);
     }
 }

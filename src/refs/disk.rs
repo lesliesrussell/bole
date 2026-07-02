@@ -26,6 +26,14 @@ impl DiskRefBackend {
     fn ref_path(&self, name: &RefName) -> PathBuf {
         let mut path = self.root.join("refs");
         for segment in name.as_str().split('/') {
+            // bole-daf: defense-in-depth. RefName::new / its Deserialize already
+            // reject `.`/`..`/empty/NUL segments, so this never fires for a valid
+            // RefName; the guard makes store-escape impossible even if a future
+            // construction path regresses.
+            debug_assert!(
+                !segment.is_empty() && segment != "." && segment != ".." && !segment.contains('\0'),
+                "ref_path given an unsafe segment: {segment:?}"
+            );
             path = path.join(segment);
         }
         path
