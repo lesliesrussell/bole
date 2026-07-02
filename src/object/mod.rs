@@ -30,7 +30,7 @@ pub use tree::{EntryKind, Tree, TreeEntry};
 pub use env::{EnvOverlay, EnvValue};
 pub use secret::Secret;
 // bole-9mz
-pub use secret::{SecretAad, SecretV2};
+pub use secret::{MultiRecipientSecret, SecretAad, SecretV2};
 
 use serde::{Deserialize, Serialize};
 // bole-fo2

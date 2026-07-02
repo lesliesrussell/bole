@@ -850,6 +850,26 @@ value; the data key is **wrapped** under a **master key** provided by a
   `rekey(ids, old_chain, new_provider)`.
 - KMS slot (feature `kms`): `crypto::kms::{KmsClient, KmsKeyProvider, LocalKmsClient}`.
 
+#### Actor-scoped (multi-recipient) secrets
+
+`MultiRecipientSecret` extends the envelope from one shared master key to
+*per-actor* wrapping: one random data key encrypts the value once, and that DK is
+wrapped independently for each recipient under **their own** master key. Each
+actor decrypts with a key only they hold — there is no shared master key.
+
+- `encrypt_for(plaintext, &[&dyn KeyProvider], aad)` — wrap for an initial
+  recipient set (empty set rejected).
+- `decrypt(chain)` — open with whichever recipient wrap the chain can unwrap.
+- `grant(chain, recipient)` — add a recipient (unwrap via a chain that can
+  already read, re-wrap for the newcomer); the value ciphertext is untouched.
+- `revoke(key_ref)` — drop a recipient's wrap (forward revocation; pair with a
+  value rotation to defeat a reader who already extracted the DK). Refuses to
+  remove the last recipient.
+
+This is the cryptographic core; wiring it into the `Object` model and CLI
+porcelain (`secret grant-actor` / `secret revoke-actor`) is tracked separately
+(`bole-amy`).
+
 ### Storage: packs, GC, and cheap counts (`bole::store`)
 
 `Repository::disk` uses a `PackedDiskBackend` — loose objects first, then immutable

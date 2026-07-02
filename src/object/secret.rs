@@ -155,6 +155,124 @@ impl SecretV2 {
     }
 }
 
+// bole-21g
+/// A **multi-recipient** envelope secret: one random data key (DK) encrypts the
+/// value exactly once, and that DK is wrapped independently for each *recipient*
+/// — typically one per actor, under that actor's own master key.
+///
+/// This moves secrets from *access-gated* (any cleared reader shares one master
+/// key, and the repo decides who is cleared) to *cryptographically per-actor*
+/// (each actor unwraps with a key only they hold; no shared master key exists).
+///
+/// - [`encrypt_for`](Self::encrypt_for) wraps the DK for an initial recipient set.
+/// - [`grant`](Self::grant) adds a recipient (unwrap the DK via a chain that can
+///   already read, then re-wrap for the newcomer) — the value ciphertext is
+///   never recomputed.
+/// - [`revoke`](Self::revoke) drops a recipient's wrap. This is *forward*
+///   revocation: a reader who already extracted the DK is not un-taught it, so
+///   revoking a compromised recipient should be paired with a value rotation
+///   (fresh DK via a new `encrypt_for`).
+///
+/// The [`SecretAad`] (version + label) is bound into both the value AEAD and
+/// every DK wrap, exactly as in [`SecretV2`], so a wrap cannot be lifted between
+/// secrets and a silent relabel is detected on decrypt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiRecipientSecret {
+    /// The DK wrapped once per recipient; any one wrap recovers the same DK.
+    pub recipients: Vec<WrappedKey>,
+    /// AEAD nonce for the value encryption.
+    pub nonce: [u8; 12],
+    /// AEAD ciphertext of the value (plaintext length + 16-byte tag).
+    pub ciphertext: Vec<u8>,
+    /// AAD bound into the value AEAD and every recipient wrap.
+    pub aad: SecretAad,
+}
+
+impl MultiRecipientSecret {
+    /// Envelope-encrypt `plaintext` for one or more recipients: generate a random
+    /// DK, AEAD the value once under `(DK, nonce, aad)`, then wrap the DK for each
+    /// provider with the SAME aad. Rejects an empty recipient set — a secret no
+    /// one can read is a bug, not a valid state.
+    pub async fn encrypt_for(
+        plaintext: &[u8],
+        recipients: &[&dyn KeyProvider],
+        aad: SecretAad,
+    ) -> Result<Self> {
+        if recipients.is_empty() {
+            return Err(Error::Codec("a multi-recipient secret needs at least one recipient".into()));
+        }
+        let aad_bytes = aad.to_bytes()?;
+        let dk: [u8; 32] = random();
+        let cipher = ChaCha20Poly1305::new_from_slice(&dk)
+            .map_err(|_| Error::Codec("invalid data key length".into()))?;
+        let nonce_bytes: [u8; 12] = random();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(nonce, Payload { msg: plaintext, aad: &aad_bytes })
+            .map_err(|_| Error::Codec("value encryption failed".into()))?;
+        let mut wraps = Vec::with_capacity(recipients.len());
+        for provider in recipients {
+            wraps.push(provider.wrap_dk(&dk, &aad_bytes).await?);
+        }
+        Ok(Self { recipients: wraps, nonce: nonce_bytes, ciphertext, aad })
+    }
+
+    /// Decrypt: find the first recipient wrap this `chain` can unwrap, recover the
+    /// DK, and AEAD-open the value. Fail-closed if no recipient matches, the DK is
+    /// wrong, or the aad/label was tampered with.
+    pub async fn decrypt(&self, chain: &ProviderChain) -> Result<Vec<u8>> {
+        let aad_bytes = self.aad.to_bytes()?;
+        for wrap in &self.recipients {
+            if let Ok(dk) = chain.unwrap(wrap, &aad_bytes).await {
+                let cipher = ChaCha20Poly1305::new_from_slice(&dk)
+                    .map_err(|_| Error::Codec("invalid data key length".into()))?;
+                let nonce = Nonce::from_slice(&self.nonce);
+                return cipher
+                    .decrypt(nonce, Payload { msg: self.ciphertext.as_slice(), aad: &aad_bytes })
+                    .map_err(|_| Error::DecryptionFailed);
+            }
+        }
+        Err(Error::DecryptionFailed)
+    }
+
+    /// Grant `recipient` access: recover the DK via `chain` (which must already be
+    /// able to read this secret), then wrap it for the newcomer. The value AEAD is
+    /// untouched. A no-op (Ok) if `recipient`'s key_ref is already present.
+    pub async fn grant(&mut self, chain: &ProviderChain, recipient: &dyn KeyProvider) -> Result<()> {
+        let aad_bytes = self.aad.to_bytes()?;
+        // Recover the DK from any wrap the chain can open.
+        let mut dk_opt = None;
+        for wrap in &self.recipients {
+            if let Ok(dk) = chain.unwrap(wrap, &aad_bytes).await {
+                dk_opt = Some(dk);
+                break;
+            }
+        }
+        let dk = dk_opt.ok_or(Error::DecryptionFailed)?;
+        let new_wrap = recipient.wrap_dk(&dk, &aad_bytes).await?;
+        if self.recipients.iter().any(|w| w.key_ref == new_wrap.key_ref) {
+            return Ok(());
+        }
+        self.recipients.push(new_wrap);
+        Ok(())
+    }
+
+    /// Revoke every recipient wrap whose `key_ref` equals `key_ref`. Returns
+    /// whether any wrap was removed. Refuses to remove the *last* recipient, which
+    /// would leave the secret unreadable by anyone.
+    pub fn revoke(&mut self, key_ref: &str) -> Result<bool> {
+        let matching = self.recipients.iter().filter(|w| w.key_ref == key_ref).count();
+        if matching == 0 {
+            return Ok(false);
+        }
+        if matching >= self.recipients.len() {
+            return Err(Error::Codec("cannot revoke the last recipient of a secret".into()));
+        }
+        self.recipients.retain(|w| w.key_ref != key_ref);
+        Ok(true)
+    }
+}
+
 // bole-hto
 #[cfg(test)]
 mod tests {
@@ -230,6 +348,105 @@ mod tests {
         y.wrapped_dk = x.wrapped_dk.clone();
         let chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([9u8; 32], "env")));
         assert!(matches!(y.decrypt(&chain).await.unwrap_err(), Error::DecryptionFailed));
+    }
+
+    // bole-21g
+    use super::MultiRecipientSecret;
+    use crate::crypto::key_provider::KeyProvider;
+
+    /// Two actors, each holding their own master key, can both read the same
+    /// secret; an actor with neither key cannot.
+    #[tokio::test]
+    async fn multi_recipient_each_actor_reads_with_own_key() {
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let bob = LocalKeyProvider::new([2u8; 32], "actor:bob");
+        let recipients: [&dyn KeyProvider; 2] = [&alice, &bob];
+
+        let s = MultiRecipientSecret::encrypt_for(b"shared secret", &recipients, SecretAad::v2(None))
+            .await
+            .unwrap();
+        assert_eq!(s.recipients.len(), 2);
+
+        // Alice decrypts with only her key.
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        assert_eq!(s.decrypt(&a_chain).await.unwrap(), b"shared secret");
+
+        // Bob decrypts with only his key.
+        let b_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "actor:bob")));
+        assert_eq!(s.decrypt(&b_chain).await.unwrap(), b"shared secret");
+
+        // Carol, cleared for neither, cannot.
+        let c_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([9u8; 32], "actor:carol")));
+        assert!(matches!(s.decrypt(&c_chain).await.unwrap_err(), Error::DecryptionFailed));
+    }
+
+    /// Granting a new actor adds a wrap without re-encrypting the value; the new
+    /// actor can then read, and the value bytes are byte-identical.
+    #[tokio::test]
+    async fn grant_adds_recipient_without_touching_value() {
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let one: [&dyn KeyProvider; 1] = [&alice];
+        let mut s = MultiRecipientSecret::encrypt_for(b"v", &one, SecretAad::v2(None)).await.unwrap();
+        let ct_before = s.ciphertext.clone();
+        let nonce_before = s.nonce;
+
+        // Bob is not yet a recipient.
+        let b_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "actor:bob")));
+        assert!(s.decrypt(&b_chain).await.is_err());
+
+        // Alice grants Bob: unwrap via Alice's chain, wrap for Bob.
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        let bob = LocalKeyProvider::new([2u8; 32], "actor:bob");
+        s.grant(&a_chain, &bob).await.unwrap();
+
+        // Value AEAD untouched; Bob can now read.
+        assert_eq!(s.ciphertext, ct_before);
+        assert_eq!(s.nonce, nonce_before);
+        assert_eq!(s.recipients.len(), 2);
+        assert_eq!(s.decrypt(&b_chain).await.unwrap(), b"v");
+    }
+
+    /// Revoking an actor removes their wrap; they can no longer decrypt, but
+    /// remaining recipients still can. Revoking the last recipient is refused.
+    #[tokio::test]
+    async fn revoke_removes_recipient_and_guards_last() {
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let bob = LocalKeyProvider::new([2u8; 32], "actor:bob");
+        let recipients: [&dyn KeyProvider; 2] = [&alice, &bob];
+        let mut s = MultiRecipientSecret::encrypt_for(b"v", &recipients, SecretAad::v2(None)).await.unwrap();
+
+        let bob_ref = LocalKeyProvider::new([2u8; 32], "actor:bob").active_key_ref().to_string();
+        assert!(s.revoke(&bob_ref).unwrap());
+
+        // Bob can no longer read; Alice still can.
+        let b_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([2u8; 32], "actor:bob")));
+        assert!(s.decrypt(&b_chain).await.is_err());
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        assert_eq!(s.decrypt(&a_chain).await.unwrap(), b"v");
+
+        // Revoking the last recipient would orphan the secret — refused.
+        let alice_ref = LocalKeyProvider::new([1u8; 32], "actor:alice").active_key_ref().to_string();
+        assert!(s.revoke(&alice_ref).is_err());
+    }
+
+    /// A recipient wrap lifted from another secret cannot open this value.
+    #[tokio::test]
+    async fn multi_recipient_lifted_wrap_fails() {
+        let alice = LocalKeyProvider::new([1u8; 32], "actor:alice");
+        let one: [&dyn KeyProvider; 1] = [&alice];
+        let x = MultiRecipientSecret::encrypt_for(b"x", &one, SecretAad::v2(None)).await.unwrap();
+        let mut y = MultiRecipientSecret::encrypt_for(b"y", &one, SecretAad::v2(None)).await.unwrap();
+        // Lift X's recipient wrap into Y: unwraps to X's DK, which cannot open Y.
+        y.recipients = x.recipients.clone();
+        let a_chain = ProviderChain::with_provider(Box::new(LocalKeyProvider::new([1u8; 32], "actor:alice")));
+        assert!(matches!(y.decrypt(&a_chain).await.unwrap_err(), Error::DecryptionFailed));
+    }
+
+    /// Encrypting with no recipients is refused — an unreadable secret is a bug.
+    #[tokio::test]
+    async fn encrypt_for_requires_a_recipient() {
+        let none: [&dyn KeyProvider; 0] = [];
+        assert!(MultiRecipientSecret::encrypt_for(b"v", &none, SecretAad::v2(None)).await.is_err());
     }
 
     #[tokio::test]
