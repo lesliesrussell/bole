@@ -103,3 +103,43 @@ fn t2_get_returns_correct_variant() {
         Ref::Timeline(_) => panic!("expected tag"),
     }
 }
+
+// bole-bti
+/// Two concurrent compare-and-swap advances from the same base head must have
+/// exactly one winner — the ref CAS is serialized, so no update is silently lost
+/// and the fast-forward gate cannot be bypassed by interleaving.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cas_advance_has_exactly_one_winner() {
+    use std::sync::Arc;
+    let base = ObjectId::new([0u8; 32]);
+    let a = ObjectId::new([1u8; 32]);
+    let b = ObjectId::new([2u8; 32]);
+
+    for _ in 0..200 {
+        let store = Arc::new(RefStore::new(MemoryRefBackend::new()));
+        store
+            .create_timeline(name("main"), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let t1 = tokio::spawn(async move {
+            let mut tx = s1.transaction();
+            tx.advance_head_if(name("main"), base, a);
+            tx.commit()
+        });
+        let t2 = tokio::spawn(async move {
+            let mut tx = s2.transaction();
+            tx.advance_head_if(name("main"), base, b);
+            tx.commit()
+        });
+        let r1 = t1.await.unwrap();
+        let r2 = t2.await.unwrap();
+
+        let oks = [r1.is_ok(), r2.is_ok()].iter().filter(|x| **x).count();
+        assert_eq!(oks, 1, "exactly one concurrent CAS advance from base must win");
+        // The final head is the winner's target, never a torn/lost state.
+        let head = store.get_timeline(&name("main")).unwrap().unwrap().head;
+        assert!(head == a || head == b);
+    }
+}

@@ -38,11 +38,16 @@ mod store {
 
     pub struct RefStore {
         backend: Box<dyn RefBackend>,
+        // bole-bti: serializes the read-validate-write of commit_transaction so a
+        // compare-and-swap is atomic against concurrent in-process committers
+        // (e.g. two sync pushes on one Arc-shared server). Held only across the
+        // synchronous commit — never across an await.
+        commit_lock: std::sync::Mutex<()>,
     }
 
     impl RefStore {
         pub fn new(backend: impl RefBackend + 'static) -> Self {
-            Self { backend: Box::new(backend) }
+            Self { backend: Box::new(backend), commit_lock: std::sync::Mutex::new(()) }
         }
 
         pub fn create_tag(
@@ -163,6 +168,13 @@ mod store {
         // bole-sk6
         /// Resolves and atomically applies a transaction's ops. All-or-nothing.
         pub(crate) fn commit_transaction(&self, ops: &[super::RefOp]) -> Result<()> {
+            // bole-bti: hold the lock across resolve (read + CAS validate) AND
+            // apply_atomic (write) so the compare-and-swap is atomic. Without it
+            // two concurrent committers could both validate against the same old
+            // head and both write, silently losing one update and bypassing the
+            // fast-forward gate. Poisoned-lock recovers the guard (no state is
+            // left inconsistent — apply_atomic is itself all-or-nothing).
+            let _guard = self.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
             let plan = super::transaction::resolve(&*self.backend, ops)?;
             self.backend.apply_atomic(&plan)
         }
