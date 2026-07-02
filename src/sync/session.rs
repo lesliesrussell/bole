@@ -87,6 +87,27 @@ pub(crate) async fn apply_push_ops(
     let mut results = Vec::new();
     let mut accepted: Vec<RefUpdateOp> = Vec::new();
 
+    // bole-7c1
+    // A replicated advance may only be gated by policy that every replica would
+    // evaluate identically. If the repo binds any non-deterministic hook, refuse
+    // all incoming ops fail-closed rather than accept a history a peer might
+    // reject (divergence under CAS-on-heads). Default repos bind only the
+    // deterministic built-in, so this is a no-op for them.
+    let registry = repo.policy_registry()?;
+    if !registry.deterministic() {
+        let reason = format!(
+            "repository binds non-deterministic policy hook(s) [{}]; refusing replicated push (fail-closed)",
+            registry.non_deterministic().join(", ")
+        );
+        return Ok(ops
+            .iter()
+            .map(|op| RefStatusEntry {
+                name: op.name.clone(),
+                status: RefApplyStatus::Denied(reason.clone()),
+            })
+            .collect());
+    }
+
     for op in ops {
         let label = rules.label_for_timeline(&lattice, op.name.as_str());
         if !accessor.can_write(&label, ResourceRef::Timeline(op.name.as_str())) {
@@ -305,6 +326,51 @@ mod tests {
     use std::sync::Arc;
 
     /// A write-capable accessor (server authorizes pushes with this).
+    // bole-7c1
+    /// A repo that binds a non-deterministic hook must refuse a replicated push
+    /// fail-closed, and accept it once the hook is absent.
+    #[tokio::test]
+    async fn push_refused_when_policy_non_deterministic() {
+        use crate::acl::policy_object::HookSpec;
+        let mut repo = Repository::memory();
+        let (name, base) = seed(&repo, "main", b"a").await;
+
+        // A real child advance base -> child.
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: repo.objects.put_tree(BTreeMap::new()).await.unwrap(),
+                parents: vec![base],
+                author: "t".into(),
+                created_at: 1,
+                message: "c".into(),
+            })
+            .await
+            .unwrap();
+        let op = RefUpdateOp { name: name.clone(), expected_old: Some(base), new_head: child };
+
+        // With no custom hook (only the deterministic built-in), the push applies.
+        let ok = apply_push_ops(&repo, &writer(), std::slice::from_ref(&op)).await.unwrap();
+        assert!(matches!(ok[0].status, RefApplyStatus::Ok), "clean repo should accept: {:?}", ok[0].status);
+
+        // Bind the non-deterministic unsigned approval hook. The guard fires
+        // before any head check, so the current head state is irrelevant.
+        repo.register_hook(HookSpec {
+            kind: "approval".into(),
+            pattern: "**".into(),
+            params: BTreeMap::from([("needed".to_string(), 1u64)]),
+        });
+
+        let denied = apply_push_ops(&repo, &writer(), std::slice::from_ref(&op)).await.unwrap();
+        match &denied[0].status {
+            RefApplyStatus::Denied(r) => {
+                assert!(r.contains("non-deterministic"), "reason: {r}");
+                assert!(r.contains("approval"), "reason should name the hook: {r}");
+            }
+            other => panic!("expected fail-closed Denied, got {other:?}"),
+        }
+    }
+
     fn writer() -> Accessor {
         let clr = ClearanceSet {
             clearances: vec![Clearance {

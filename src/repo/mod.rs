@@ -192,7 +192,9 @@ impl Repository {
     // bole-fo2
     /// Builds the active policy registry: the built-in `TimelinePolicyHook` plus
     /// every resolved declarative hook (fail-closed on unknown kinds).
-    fn policy_registry(&self) -> Result<PolicyRegistry> {
+    // bole-7c1: pub(crate) so the sync push-acceptance path can assert the bound
+    // policy is deterministic before letting it gate a replicated advance.
+    pub(crate) fn policy_registry(&self) -> Result<PolicyRegistry> {
         let mut reg = PolicyRegistry::new();
         for spec in &self.hooks {
             reg.push(crate::acl::hook::resolve_hook(spec)?);

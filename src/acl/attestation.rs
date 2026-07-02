@@ -144,6 +144,16 @@ impl PolicyHook for SignedApprovalHook {
         "signed-approval"
     }
 
+    // bole-7c1
+    /// Deterministic: the verdict is a pure function of the event's
+    /// `result_head` and the *replicated* attestation/approver sets this hook
+    /// carries — head-bound and identical on every replica, unlike the unsigned
+    /// [`ApprovalHook`](crate::acl::hook::ApprovalHook) that counts live refs.
+    /// This is the replayable approval path safe to gate a replicated advance.
+    fn deterministic(&self) -> bool {
+        true
+    }
+
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
         if let PolicyEvent::Merge { target, result_head, .. } = &ctx.event {
             if glob_matches(&self.pattern, target.as_str()) {

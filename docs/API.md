@@ -888,6 +888,25 @@ all-or-nothing (a write-ahead journal on disk; idempotent replay on `open`).
   verify_attestation, count_valid_approvals, SignedApprovalHook}` — signed,
   head-bound merge approvals.
 
+#### PolicyHook determinism contract
+
+Because sync accepts a ref advance by compare-and-swap on heads, two replicas
+must reach the *same* verdict for the same decision point or they can accept
+divergent histories. A `PolicyHook::check` therefore should be a pure function of
+the `PolicyEvent` (timeline + head ids), the content-addressed object graph
+reachable from those ids, and the hook's own (replicated) configuration — never
+wall-clock (`PolicyContext::now`), live ref state, randomness, or environment.
+
+- `PolicyHook::deterministic(&self) -> bool` (default `true`) — a hook that
+  cannot honour the contract overrides it to `false`. The unsigned `ApprovalHook`
+  (counts live refs) is `false`; `SignedApprovalHook` (head-bound, replicated
+  attestations) is `true`.
+- `PolicyRegistry::{deterministic, non_deterministic, evaluate_replayable}` —
+  `evaluate_replayable` is fail-closed: if any bound hook is non-deterministic it
+  refuses the whole decision rather than risk divergence. The sync push-acceptance
+  path uses this, so a repo binding a non-deterministic hook rejects replicated
+  pushes outright.
+
 ### Git import (`bole::repo::git_import`)
 
 `git_import(repo, source, identity_map_dir, ImportOptions)` imports branches/tags

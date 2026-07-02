@@ -42,16 +42,52 @@ pub struct PolicyContext<'a> {
     pub accessor: &'a Accessor,
     pub objects: &'a ObjectStore,
     pub refs: &'a RefStore,
+    // bole-7c1
+    /// Wall-clock seconds. **Non-deterministic input**: a hook that branches on
+    /// `now` is not replayable and must report [`PolicyHook::deterministic`] as
+    /// `false`. See the determinism contract on [`PolicyHook`].
     pub now: u64,
 }
 
 // bole-fo2
 /// A predicate evaluated at a write decision point, for rules the label lattice
 /// cannot express. Hooks run after the label check passes and may only deny.
+///
+/// # Determinism contract (bole-7c1)
+///
+/// bole's distributed sync accepts a ref advance via compare-and-swap on heads.
+/// If two replicas evaluate the *same* decision point but reach *different*
+/// verdicts, they can accept divergent histories — the policy stops being a
+/// global invariant. To prevent this, a hook's [`check`](PolicyHook::check)
+/// **should be a pure function of**:
+///
+/// - the [`PolicyEvent`] (timeline name plus the old/new/result head ids), and
+/// - the content-addressed object graph reachable from those ids
+///   ([`PolicyContext::objects`] — identical on every replica by construction), and
+/// - the hook's own configuration and any *replicated* data it carries.
+///
+/// It **must not** depend on wall-clock time ([`PolicyContext::now`]), the live
+/// mutable ref store ([`PolicyContext::refs`], which races across replicas),
+/// randomness, or process environment.
+///
+/// A hook that cannot honour this overrides [`deterministic`](PolicyHook::deterministic)
+/// to return `false`. The replication path
+/// ([`PolicyRegistry::evaluate_replayable`]) then refuses it fail-closed rather
+/// than risk divergence; interactive local evaluation ([`PolicyRegistry::evaluate`])
+/// still runs it.
 #[async_trait::async_trait]
 pub trait PolicyHook: Send + Sync {
     fn name(&self) -> &str;
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision;
+
+    // bole-7c1
+    /// Whether this hook's verdict is a pure, replayable function of the event
+    /// and the content-addressed object graph (see the determinism contract on
+    /// the trait). Defaults to `true`; hooks that consult wall-clock, live ref
+    /// state, randomness, or environment must override this to `false`.
+    fn deterministic(&self) -> bool {
+        true
+    }
 }
 
 // bole-fo2
@@ -120,6 +156,42 @@ impl PolicyRegistry {
             decision = more_restrictive(decision, hook.check(ctx).await);
         }
         decision
+    }
+
+    // bole-7c1
+    /// True iff every bound hook honours the determinism contract (see
+    /// [`PolicyHook`]). Only a deterministic registry can safely gate a
+    /// replicated (CAS-on-heads) advance.
+    pub fn deterministic(&self) -> bool {
+        self.hooks.iter().all(|h| h.deterministic())
+    }
+
+    // bole-7c1
+    /// The names of the bound hooks that report themselves non-deterministic.
+    pub fn non_deterministic(&self) -> Vec<String> {
+        self.hooks
+            .iter()
+            .filter(|h| !h.deterministic())
+            .map(|h| h.name().to_string())
+            .collect()
+    }
+
+    // bole-7c1
+    /// Evaluate for a *replicated* decision point (e.g. accepting a pushed
+    /// advance). Fail-closed: if any bound hook is non-deterministic, refuse the
+    /// whole decision with a [`PolicyDecision::Deny`] naming the offenders,
+    /// because a non-replayable verdict cannot be a global invariant. Otherwise
+    /// this is exactly [`evaluate`](Self::evaluate).
+    pub async fn evaluate_replayable(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
+        let offenders = self.non_deterministic();
+        if !offenders.is_empty() {
+            return PolicyDecision::Deny(format!(
+                "non-deterministic policy hook(s) [{}] cannot gate a replicated advance (fail-closed); \
+                 use replayable hooks (e.g. signed attestations) instead",
+                offenders.join(", ")
+            ));
+        }
+        self.evaluate(ctx).await
     }
 }
 
@@ -218,6 +290,15 @@ pub struct ApprovalHook {
 impl PolicyHook for ApprovalHook {
     fn name(&self) -> &str {
         "approval"
+    }
+
+    // bole-7c1
+    /// Non-deterministic: the verdict counts *live* approval refs
+    /// ([`PolicyContext::refs`]) that are not bound to the result head and race
+    /// across replicas, so two nodes can disagree. Prefer the head-bound,
+    /// replayable [`crate::acl::attestation::SignedApprovalHook`].
+    fn deterministic(&self) -> bool {
+        false
     }
 
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
@@ -352,6 +433,75 @@ mod tests {
     }
 
     // bole-fo2
+    // bole-7c1
+    /// A hook that consults wall-clock `now` — the canonical non-deterministic
+    /// hook. It declares itself non-deterministic so the replication guard can
+    /// refuse it, even though its verdict here is Allow.
+    struct NowGatedHook;
+    #[async_trait::async_trait]
+    impl PolicyHook for NowGatedHook {
+        fn name(&self) -> &str { "now-gated" }
+        fn deterministic(&self) -> bool { false }
+        async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
+            // Pretend "business hours only": depends on ambient time.
+            if ctx.now.is_multiple_of(2) { PolicyDecision::Allow } else { PolicyDecision::Deny("after hours".into()) }
+        }
+    }
+
+    // bole-7c1
+    #[tokio::test]
+    async fn builtins_have_expected_determinism() {
+        use super::ApprovalHook;
+        // The built-in FF hook is a pure function of the object DAG + config.
+        assert!(TimelinePolicyHook.deterministic());
+        // A fresh registry (only TimelinePolicyHook) is deterministic.
+        assert!(PolicyRegistry::new().deterministic());
+        // The unsigned approval hook reads the live ref store — non-deterministic.
+        assert!(!ApprovalHook { pattern: "release/**".into(), needed: 1 }.deterministic());
+    }
+
+    // bole-7c1
+    #[tokio::test]
+    async fn registry_reports_non_deterministic_hooks() {
+        let mut reg = PolicyRegistry::new();
+        reg.push(Box::new(NowGatedHook));
+        assert!(!reg.deterministic());
+        assert_eq!(reg.non_deterministic(), vec!["now-gated".to_string()]);
+    }
+
+    // bole-7c1
+    #[tokio::test]
+    async fn evaluate_replayable_is_fail_closed() {
+        let objects = ObjectStore::new(MemoryBackend::new());
+        let refs = RefStore::new(MemoryRefBackend::new());
+        let tree = objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = objects.put_snapshot(Snapshot {
+            root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into(),
+        }).await.unwrap();
+        let name = RefName::new("main").unwrap();
+        refs.create_timeline(name.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        let accessor = Accessor::privileged();
+        // now is even, so NowGatedHook::check would return Allow — but the
+        // replication path must refuse it anyway because it is non-deterministic.
+        let ctx = PolicyContext {
+            event: PolicyEvent::Advance { timeline: &name, old_head: base, new_head: base },
+            accessor: &accessor, objects: &objects, refs: &refs, now: 0,
+        };
+
+        // Deterministic registry: evaluate_replayable agrees with evaluate.
+        let det = PolicyRegistry::new();
+        assert_eq!(det.evaluate_replayable(&ctx).await, PolicyDecision::Allow);
+
+        // Non-deterministic registry: fail-closed Deny naming the offending hook,
+        // regardless of what the hook's own verdict would be.
+        let mut nondet = PolicyRegistry::new();
+        nondet.push(Box::new(NowGatedHook));
+        match nondet.evaluate_replayable(&ctx).await {
+            PolicyDecision::Deny(reason) => assert!(reason.contains("now-gated"), "reason: {reason}"),
+            other => panic!("expected fail-closed Deny, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn approval_hook_blocks_then_allows() {
         use super::{approval_ref_prefix, ApprovalHook};
