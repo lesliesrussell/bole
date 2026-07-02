@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 
+use crate::acl::hook::{PolicyContext, PolicyDecision, PolicyEvent};
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};
 use crate::object::ObjectId;
@@ -126,7 +127,8 @@ pub(crate) async fn apply_push_ops(
             });
             continue;
         }
-        if let (Some(old), Some(remote)) = (op.expected_old, repo.refs.get_timeline(&op.name)?) {
+        let current = repo.refs.get_timeline(&op.name)?;
+        if let (Some(old), Some(remote)) = (op.expected_old, current.as_ref()) {
             let ff = repo.find_common_ancestor(old, op.new_head).await? == Some(old);
             if !matches!(remote.policy, TimelinePolicy::Unrestricted) && !ff {
                 results.push(RefStatusEntry {
@@ -134,6 +136,36 @@ pub(crate) async fn apply_push_ops(
                     status: RefApplyStatus::NonFastForward { server_head: remote.head },
                 });
                 continue;
+            }
+        }
+        // bole-rdh: run the deterministic policy registry on a REPLICATED advance
+        // to an EXISTING timeline (a create is governed by the can_write check
+        // above). The registry is known-deterministic here — a non-deterministic
+        // hook already fail-closed all ops above — so evaluate_replayable's
+        // verdict is safe to enforce. This is the sync-side analogue of the
+        // registry.evaluate call in Repository::advance_timeline.
+        if let Some(remote) = current.as_ref() {
+            let ctx = PolicyContext {
+                event: PolicyEvent::Advance {
+                    timeline: &op.name,
+                    old_head: remote.head,
+                    new_head: op.new_head,
+                },
+                accessor,
+                objects: &repo.objects,
+                refs: &repo.refs,
+                now: 0,
+            };
+            match registry.evaluate_replayable(&ctx).await {
+                PolicyDecision::Allow => {}
+                PolicyDecision::Deny(reason)
+                | PolicyDecision::RequiresApproval { reason, .. } => {
+                    results.push(RefStatusEntry {
+                        name: op.name.clone(),
+                        status: RefApplyStatus::Denied(reason),
+                    });
+                    continue;
+                }
             }
         }
         accepted.push(op.clone());

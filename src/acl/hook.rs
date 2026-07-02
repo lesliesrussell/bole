@@ -302,23 +302,29 @@ impl PolicyHook for ApprovalHook {
     }
 
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
-        if let PolicyEvent::Merge { target, .. } = &ctx.event {
-            if glob_matches(&self.pattern, target.as_str()) {
-                let approvals = match count_approvals(ctx.refs, target.as_str()) {
-                    Ok(n) => n,
-                    Err(e) => return PolicyDecision::Deny(format!("approval lookup failed: {e}")),
+        // bole-rdh: gate BOTH the merge event and the advance event. The state
+        // change into a protected timeline actually happens via advance_timeline
+        // (the CLI's `merge run` builds a snapshot then advances), so matching
+        // only Merge left the real mutation ungated.
+        let target = match &ctx.event {
+            PolicyEvent::Merge { target, .. } => *target,
+            PolicyEvent::Advance { timeline, .. } => *timeline,
+        };
+        if glob_matches(&self.pattern, target.as_str()) {
+            let approvals = match count_approvals(ctx.refs, target.as_str()) {
+                Ok(n) => n,
+                Err(e) => return PolicyDecision::Deny(format!("approval lookup failed: {e}")),
+            };
+            if approvals < self.needed {
+                return PolicyDecision::RequiresApproval {
+                    reason: format!(
+                        "{} needs {} approvals, has {}",
+                        target.as_str(),
+                        self.needed,
+                        approvals
+                    ),
+                    needed: self.needed - approvals,
                 };
-                if approvals < self.needed {
-                    return PolicyDecision::RequiresApproval {
-                        reason: format!(
-                            "{} needs {} approvals, has {}",
-                            target.as_str(),
-                            self.needed,
-                            approvals
-                        ),
-                        needed: self.needed - approvals,
-                    };
-                }
             }
         }
         PolicyDecision::Allow

@@ -155,22 +155,27 @@ impl PolicyHook for SignedApprovalHook {
     }
 
     async fn check(&self, ctx: &PolicyContext<'_>) -> PolicyDecision {
-        if let PolicyEvent::Merge { target, result_head, .. } = &ctx.event {
-            if glob_matches(&self.pattern, target.as_str()) {
-                let have =
-                    count_valid_approvals(&self.attestations, &self.approvers, target.as_str(), *result_head);
-                if have < self.needed {
-                    return PolicyDecision::RequiresApproval {
-                        reason: format!(
-                            "{} needs {} signed approval(s) of head {}, has {}",
-                            target.as_str(),
-                            self.needed,
-                            result_head,
-                            have
-                        ),
-                        needed: self.needed - have,
-                    };
-                }
+        // bole-rdh: gate BOTH merge and advance, bound to the head being moved
+        // to. The mutation into a protected timeline happens via advance_timeline
+        // (Advance) as well as merge; matching only Merge left it ungated.
+        let (target, head) = match &ctx.event {
+            PolicyEvent::Merge { target, result_head, .. } => (*target, *result_head),
+            PolicyEvent::Advance { timeline, new_head, .. } => (*timeline, *new_head),
+        };
+        if glob_matches(&self.pattern, target.as_str()) {
+            let have =
+                count_valid_approvals(&self.attestations, &self.approvers, target.as_str(), head);
+            if have < self.needed {
+                return PolicyDecision::RequiresApproval {
+                    reason: format!(
+                        "{} needs {} signed approval(s) of head {}, has {}",
+                        target.as_str(),
+                        self.needed,
+                        head,
+                        have
+                    ),
+                    needed: self.needed - have,
+                };
             }
         }
         PolicyDecision::Allow

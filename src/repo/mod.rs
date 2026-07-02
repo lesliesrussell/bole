@@ -1601,6 +1601,65 @@ mod tests {
         assert_eq!(r2, MergeCheck::Allowed);
     }
 
+    // bole-rdh
+    #[tokio::test]
+    async fn approval_hook_gates_direct_advance() {
+        use crate::acl::policy_object::HookSpec;
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let mut repo = Repository::memory();
+        repo.register_hook(HookSpec {
+            kind: "approval".into(),
+            pattern: "release/**".into(),
+            params: BTreeMap::from([("needed".to_string(), 1u64)]),
+        });
+        // Empty-tree snapshots so advance_timeline's per-path check is a no-op.
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: tree,
+                parents: vec![],
+                author: "t".into(),
+                created_at: 0,
+                message: "b".into(),
+            })
+            .await
+            .unwrap();
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: tree,
+                parents: vec![base],
+                author: "t".into(),
+                created_at: 1,
+                message: "c".into(),
+            })
+            .await
+            .unwrap();
+        let dest = RefName::new("release/1.0").unwrap();
+        repo.refs
+            .create_timeline(dest.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+
+        let writer = Accessor::new().with_timeline_role(TimelineRole {
+            pattern: "release/**".into(),
+            permission: Permission::Write,
+        });
+
+        // Zero approvals: advancing the protected timeline must be refused, even
+        // though this is an Advance (not a Merge) event. Before bole-rdh the
+        // approval hook ignored Advance and this advance silently succeeded.
+        let err = repo.advance_timeline(&dest, child, &writer).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::PolicyViolation(_)),
+            "expected the approval gate to fire on a direct advance, got {err:?}"
+        );
+    }
+
     // bole-9mz
     #[tokio::test]
     async fn resolve_overlay_gates_secrets_by_clearance() {
