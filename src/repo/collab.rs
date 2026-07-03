@@ -8,7 +8,8 @@
 
 use async_trait::async_trait;
 
-use crate::collab::discovery::PublicObjectSource;
+use crate::collab::discovery::{Index, PublicObjectSource};
+use crate::collab::trust::TrustGraph;
 use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key, Profile, TrustEdge, TrustKind};
 use crate::error::{Error, Result};
 use crate::object::{Object, ObjectId};
@@ -151,6 +152,65 @@ impl Repository {
         }
         Ok(out)
     }
+
+    // bole-440
+    /// Every verified collab object currently tracked from pulled peers (under
+    /// `refs/collab/remotes/`).
+    pub async fn tracked_collab(&self) -> Result<Vec<CollabObject>> {
+        let mut out = Vec::new();
+        for name in self.refs.list(COLLAB_REMOTES_PREFIX)? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                if let Some(Object::Collab(obj)) = self.objects.get(&tag.target).await? {
+                    out.push(obj);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // bole-440
+    /// Builds the WS8a discovery [`Index`] from local state: own public objects at
+    /// distance 0, plus tracked peers whose key is within `hops` of `self_key` in
+    /// the combined `Follow` graph. Peers outside the neighborhood are excluded.
+    pub async fn local_discovery_index(&self, self_key: &Key, hops: u8) -> Result<Index> {
+        // Own public objects (distance 0).
+        let mut own: Vec<CollabObject> = Vec::new();
+        for p in self.public_profiles().await? {
+            own.push(CollabObject::Profile(p));
+        }
+        for e in self.public_edges().await? {
+            own.push(CollabObject::TrustEdge(e));
+        }
+        let tracked = self.tracked_collab().await?;
+
+        // Combined edge set drives the follow neighborhood.
+        let mut edges: Vec<TrustEdge> = Vec::new();
+        for o in own.iter().chain(tracked.iter()) {
+            if let CollabObject::TrustEdge(e) = o {
+                edges.push(e.clone());
+            }
+        }
+        let graph = TrustGraph::from_edges(edges);
+        let neighborhood = graph.follow_neighborhood(self_key, hops);
+
+        // Group tracked objects by author, keep only in-neighborhood authors.
+        use std::collections::BTreeMap;
+        let mut by_author: BTreeMap<Key, Vec<CollabObject>> = BTreeMap::new();
+        for o in tracked {
+            let a = match &o {
+                CollabObject::Profile(p) => p.key,
+                CollabObject::TrustEdge(e) => e.from_key,
+            };
+            by_author.entry(a).or_default().push(o);
+        }
+        let mut pulled: Vec<(Key, u8, Vec<Key>, Vec<CollabObject>)> = Vec::new();
+        for (author, objs) in by_author {
+            if let Some(dist) = neighborhood.get(&author) {
+                pulled.push((author, *dist, vec![*self_key, author], objs));
+            }
+        }
+        Ok(Index::build(*self_key, own, pulled))
+    }
 }
 
 // bole-18p
@@ -276,5 +336,60 @@ mod tests {
         // Whichever ordering occurred, a lower seq must never overwrite a higher one.
         let cur = repo.profile(&a.public_key()).await.unwrap().unwrap();
         assert_eq!(cur.seq, 3, "highest seq must be current after concurrent publish");
+    }
+
+    // bole-440
+    #[tokio::test]
+    async fn local_index_ranks_by_distance() {
+        use crate::collab::{CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([60u8; 32]);
+        let bob = CollabSigner::from_seed([61u8; 32]);
+        // I publish my profile and follow bob.
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_edge(&me.sign_edge(bob.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+        // Track bob's profile under the remotes prefix (as a pull would).
+        let bp = bob.sign_profile("bob".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(bp))).await.unwrap();
+        let fp = crate::collab::fingerprint(&bob.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{fp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let idx = repo.local_discovery_index(&me.public_key(), 2).await.unwrap();
+        assert!(!idx.query("me").is_empty(), "own profile at distance 0");
+        let bob_hits = idx.query("bob");
+        assert_eq!(bob_hits.len(), 1);
+        assert_eq!(bob_hits[0].distance, 1, "followed peer at distance 1");
+    }
+
+    // bole-440
+    #[tokio::test]
+    async fn local_index_excludes_unfollowed() {
+        use crate::collab::{CollabObject, CollabSigner};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([62u8; 32]);
+        let stranger = CollabSigner::from_seed([63u8; 32]);
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // Track a stranger I do NOT follow.
+        let sp = stranger.sign_profile("stranger".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(sp))).await.unwrap();
+        let fp = crate::collab::fingerprint(&stranger.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{fp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let idx = repo.local_discovery_index(&me.public_key(), 2).await.unwrap();
+        assert!(idx.query("stranger").is_empty(), "unfollowed peer is not in the neighborhood");
     }
 }
