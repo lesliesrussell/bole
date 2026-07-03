@@ -9,7 +9,7 @@ use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key}
 use crate::error::{Error, Result};
 use crate::object::Object;
 use crate::refs::{Ref, RefName, Tag};
-use crate::repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX};
+use crate::repo::collab::{kind_seg, COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX};
 use crate::repo::Repository;
 use crate::store::pack::decode_pack;
 use crate::sync::negotiate;
@@ -107,7 +107,10 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
         Message::Pack(p) => p,
         _ => return Err(Error::Storage("collab: expected Pack".into())),
     };
-    let _done = conn.recv().await?; // Done
+    match conn.recv().await? {
+        Message::Done => {}
+        other => return Err(Error::Storage(format!("collab: expected Done, got {other:?}"))),
+    }
     for (_id, canonical) in decode_pack(&pack)? {
         repo.objects.put_raw(&canonical).await?;
     }
@@ -142,14 +145,9 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
         let tracking = match obj {
             CollabObject::Profile(_) => format!("{COLLAB_REMOTES_PREFIX}{fp}/profile"),
             CollabObject::TrustEdge(e) => {
-                let kind_str = match e.kind {
-                    crate::collab::TrustKind::Vouch => "vouch",
-                    crate::collab::TrustKind::Follow => "follow",
-                    crate::collab::TrustKind::Review => "review",
-                };
                 format!(
                     "{COLLAB_REMOTES_PREFIX}{fp}/edge/{}/{}",
-                    kind_str,
+                    kind_seg(e.kind),
                     fingerprint(&e.to_key),
                 )
             }
@@ -280,5 +278,34 @@ mod tests {
         let names = client_repo.refs.list(&format!("{COLLAB_REMOTES_PREFIX}{fp}/")).unwrap();
         assert!(names.iter().any(|n| n.as_str().contains("/profile")), "valid profile kept");
         assert!(!names.iter().any(|n| n.as_str().contains("/edge/")), "tampered edge dropped");
+    }
+
+    // bole-x5u
+    #[tokio::test]
+    async fn pull_errors_with_no_valid_profile() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::CollabObject;
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_PUBLIC_PREFIX;
+        use crate::collab::CollabSigner;
+
+        let server_repo = Repository::memory();
+        let b = CollabSigner::from_seed([7u8; 32]);
+        // Only a TAMPERED profile is served — nothing verifies.
+        let mut bad = b.sign_profile("bob".into(), String::new(), vec![], vec![], 1);
+        bad.display_name = "tampered".into();
+        let id = server_repo.objects.put(&Object::Collab(CollabObject::Profile(bad))).await.unwrap();
+        let mut tx = server_repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_PUBLIC_PREFIX}profile/x")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let client_repo = Repository::memory();
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        let res = collab_pull(&mut cl, &client_repo).await;
+        srv.await.unwrap().unwrap();
+        assert!(res.is_err(), "pull must error when no valid profile is served");
     }
 }

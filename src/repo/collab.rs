@@ -26,7 +26,7 @@ pub const COLLAB_SCOPED_PREFIX: &str = "refs/collab/scoped/";
 /// published set (`refs/collab/public/`).
 pub const COLLAB_REMOTES_PREFIX: &str = "refs/collab/remotes/";
 
-fn kind_seg(kind: TrustKind) -> &'static str {
+pub(crate) fn kind_seg(kind: TrustKind) -> &'static str {
     match kind {
         TrustKind::Vouch => "vouch",
         TrustKind::Follow => "follow",
