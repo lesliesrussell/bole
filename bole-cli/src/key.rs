@@ -40,7 +40,8 @@ pub fn resolve(key_env: &str, key_file: Option<&Path>) -> Result<[u8; 32]> {
     parse_hex_32(hex.trim())
 }
 
-fn parse_hex_32(s: &str) -> Result<[u8; 32]> {
+// bole-ehx: also used for approver Ed25519 seeds / public keys.
+pub fn parse_hex_32(s: &str) -> Result<[u8; 32]> {
     if s.len() != 64 {
         bail!("key must be 64 hex characters (32 bytes), got {}", s.len());
     }

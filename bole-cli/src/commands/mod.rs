@@ -18,6 +18,9 @@ pub mod merge;
 // bole-1q9
 pub mod env;
 pub mod secret;
+// bole-ehx
+pub mod approver;
+pub mod policy;
 // bole-9mz
 pub mod run;
 // bole-0hg

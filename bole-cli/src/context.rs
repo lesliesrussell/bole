@@ -66,9 +66,13 @@ impl RepoContext {
             let candidate = d.join(REPO_DIR);
             if candidate.is_dir() {
                 // Primary repository.
-                let repo = Repository::disk(&candidate)
+                let mut repo = Repository::disk(&candidate)
                     .await
                     .with_context(|| format!("opening repository at {}", candidate.display()))?;
+                // bole-ehx: register persisted policy hooks so advance/merge enforce them.
+                for spec in crate::commands::policy::load_hooks(&candidate)? {
+                    repo.register_hook(spec);
+                }
                 let state_path = candidate.join("cli-state.json");
                 return Ok(Self {
                     repo_dir: candidate,
@@ -91,9 +95,13 @@ impl RepoContext {
                 crate::worktrees::validate_id(&ptr.id)
                     .with_context(|| format!("in worktree pointer {}", candidate.display()))?;
                 let store = PathBuf::from(&ptr.store);
-                let repo = Repository::disk(&store)
+                let mut repo = Repository::disk(&store)
                     .await
                     .with_context(|| format!("opening shared store at {}", store.display()))?;
+                // bole-ehx: register persisted policy hooks so advance/merge enforce them.
+                for spec in crate::commands::policy::load_hooks(&store)? {
+                    repo.register_hook(spec);
+                }
                 let state_path = store.join("worktrees").join(&ptr.id).join("state.json");
                 return Ok(Self {
                     repo_dir: store,

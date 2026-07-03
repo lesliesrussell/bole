@@ -89,6 +89,7 @@ bole snapshot list                            # history, newest first
 - **Work tree**: `workspace open|show|diff|materialize|clear|add|list|remove` (add/list/remove = linked worktrees sharing one store)
 - **Merge**: `merge check <src> <dst>` (dry run), `merge run <src> <dst>` (advances dst when clean; reports conflicts otherwise)
 - **Access**: `actor create|grant-path|grant-timeline|use|show|list`, `acl path|timeline protect|unprotect|list`, `acl can-{read,write}-{path,timeline}`, `acl explain-path --actor <a> <path>` (full read/write decision trace — the "why is this hidden?" answer)
+- **Signed approvals**: `policy require-approval <pattern> --needed <n>` (gate advance/merge on N signed approvals), `policy list|unrequire`, `approver add <id> --public-key|--seed <64hex>`, `approver list`, `approve <timeline> <snapshot> --key-id <id>` (sign a head-bound attestation; enforced locally)
 - **Config**: `secret put|reveal|rotate|rekey|list|grant-actor|revoke-actor` (grant/revoke = per-actor key wrapping so each actor reads with their own key), `env create|set|set-secret|show|list`
 - **Export**: `git export --to <path>` (one-way projection to a bare Git repo)
 - **Plumbing**: `object`, `ref`, `store`

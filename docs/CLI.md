@@ -78,6 +78,7 @@ Beyond the library stores, the CLI keeps small JSON files under `.bole/`:
 | `actors.json` | named actors and their grants |
 | `secrets.json` | secret name → object id |
 | `envs.json` | overlay name → object id |
+| `policy-hooks.json` | configured policy hooks (signed-approval requirements) |
 
 ---
 
@@ -213,6 +214,34 @@ its effective label, the protection rules that set that label, and — for both
 read and write — the verdict, a reason, and every clearance the actor holds with
 the deciding one flagged. This is the answer to "why is this path hidden from
 this actor?". Add `--json` for the machine-readable trace.
+
+### Signed approvals
+
+Gate advances/merges into protected timelines on N distinct **signed** approvals
+of the exact resulting head. Approvers are Ed25519 keys registered in a
+content-addressed registry; each approval is a head-bound attestation.
+
+```bash
+bole policy require-approval <pattern> [--needed <n>]   # require n signed approvals for <pattern>
+bole policy unrequire <pattern>                         # drop the requirement
+bole policy list                                        # show configured policy hooks
+
+bole approver add <key-id> --public-key <64hex>         # register a raw public key
+bole approver add <key-id> --seed <64hex>               # ...or derive it from a seed
+bole approver list
+
+bole approve <timeline> <snapshot> --key-id <id> \      # sign an approval as <id>
+    [--key-env BOLE_APPROVER_KEY] [--key-file <path>]   #   seed from env (default) or file
+```
+
+Policy hooks are stored in `<store>/policy-hooks.json` and loaded on every
+invocation, so `timeline advance` / `merge run` / `snapshot create` (which
+advances) into a matching timeline are refused until `count` distinct valid
+approvals of that exact head exist. `approve` refuses to sign as an unregistered
+`key-id`. Because approvals live in the repo's mutable ref namespace, this is
+enforced **locally**; a replicated push into an approval-gated timeline is refused
+fail-closed rather than enforced remotely (see the
+[threat model](THREAT_MODEL.md)).
 
 ### Secrets
 

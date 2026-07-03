@@ -63,6 +63,8 @@ pub use acl::attestation::{
     count_valid_approvals, verify_attestation, Approver, ApproverRegistry, Attestation,
     AttestationSigner, SignedApprovalHook,
 };
+// bole-ehx
+pub use acl::policy_object::HookSpec;
 
 pub(crate) mod codec;
 

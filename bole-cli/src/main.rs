@@ -118,6 +118,33 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::env::Cmd,
     },
+    // bole-ehx
+    /// Configure content-gating policy (signed approvals).
+    Policy {
+        #[command(subcommand)]
+        cmd: commands::policy::Cmd,
+    },
+    /// Manage the signed-approval approver registry.
+    Approver {
+        #[command(subcommand)]
+        cmd: commands::approver::Cmd,
+    },
+    /// Sign a head-bound attestation approving a timeline advance/merge.
+    Approve {
+        /// Timeline being approved (e.g. `release/1.0`).
+        timeline: String,
+        /// Snapshot ref being approved (`@`, `@tag:x`, an id, or a timeline name).
+        snapshot: String,
+        /// Approver id you are signing as (must be registered).
+        #[arg(long)]
+        key_id: String,
+        /// Env var holding your 64-hex Ed25519 seed.
+        #[arg(long, default_value = "BOLE_APPROVER_KEY")]
+        key_env: String,
+        /// File holding your 64-hex Ed25519 seed.
+        #[arg(long)]
+        key_file: Option<std::path::PathBuf>,
+    },
     // bole-9mz
     /// Resolve an overlay and run a command with its variables injected.
     Run(commands::run::RunArgs),
@@ -210,6 +237,19 @@ async fn run() -> Result<()> {
         Command::Env { cmd } => {
             let ctx = open().await?;
             commands::env::run(&ctx, &out, cmd).await
+        }
+        // bole-ehx
+        Command::Policy { cmd } => {
+            let ctx = open().await?;
+            commands::policy::run(&ctx, &out, cmd).await
+        }
+        Command::Approver { cmd } => {
+            let ctx = open().await?;
+            commands::approver::run(&ctx, &out, cmd).await
+        }
+        Command::Approve { timeline, snapshot, key_id, key_env, key_file } => {
+            let ctx = open().await?;
+            commands::approver::approve(&ctx, &out, timeline, snapshot, key_id, key_env, key_file).await
         }
         // bole-9mz
         Command::Run(args) => {
