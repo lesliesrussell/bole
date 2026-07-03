@@ -35,6 +35,8 @@ pub use secret::{MultiRecipientSecret, SecretAad, SecretV2};
 use serde::{Deserialize, Serialize};
 // bole-fo2
 use crate::acl::policy_object::PolicyObject;
+// bole-eup
+use crate::collab::CollabObject;
 
 // bole-p8u
 /// The tagged union of every object type that the store can persist.
@@ -70,4 +72,7 @@ pub enum Object {
     /// An envelope-encrypted secret whose data key is wrapped per-recipient, so
     /// each actor decrypts with their own master key (no shared master key).
     MultiRecipientSecret(MultiRecipientSecret),
+    // bole-eup
+    /// A signed, content-addressed collaboration object (profile or trust edge).
+    Collab(CollabObject),
 }

@@ -44,6 +44,8 @@ pub mod store;
 pub mod repo;
 // bole-mhs
 pub mod acl;
+// bole-eup
+pub mod collab;
 // bole-9mz
 pub mod crypto;
 // bole-cy6
@@ -65,6 +67,8 @@ pub use acl::attestation::{
 };
 // bole-ehx
 pub use acl::policy_object::HookSpec;
+// bole-eup
+pub use collab::{fingerprint, verify_profile, CollabObject, CollabSigner, Key, Profile};
 
 pub(crate) mod codec;
 
