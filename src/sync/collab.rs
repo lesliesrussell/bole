@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key};
+use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key, TrustKind};
 use crate::error::{Error, Result};
 use crate::object::Object;
 use crate::refs::{Ref, RefName, Tag};
@@ -17,14 +17,29 @@ use crate::sync::session::build_pack;
 use crate::sync::transport::Conn;
 use crate::sync::wire::{CapSet, Intent, Message, RefAdvert, PROTO_VERSION};
 
-// bole-g7i
-/// Advertises exactly the refs under `refs/collab/public/` — the entire public
-/// collab surface, and nothing else. This is the single M2 enforcement point.
-pub fn collab_adverts(repo: &Repository) -> Result<Vec<RefAdvert>> {
+// bole-0nk
+/// Advertises the node's own public refs (`refs/collab/public/**`) plus the
+/// cached refs (`refs/collab/remotes/<fp>/**`) of authors this node DIRECTLY
+/// follows — and nothing else. Serve horizon: re-serve verified public state for
+/// authors you directly follow, and for no others. Never advertises `scoped/`.
+pub async fn collab_adverts(repo: &Repository) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
+    // Own authored public objects.
     for name in repo.refs.list(COLLAB_PUBLIC_PREFIX)? {
         if let Some(tag) = repo.refs.get_tag(&name)? {
             out.push(RefAdvert { name, target: tag.target, is_timeline: false });
+        }
+    }
+    // Cached objects of directly-followed authors, keyed by author fingerprint.
+    for e in repo.public_edges().await? {
+        if e.kind == TrustKind::Follow {
+            let fp = fingerprint(&e.to_key);
+            let prefix = format!("{COLLAB_REMOTES_PREFIX}{fp}/");
+            for name in repo.refs.list(&prefix)? {
+                if let Some(tag) = repo.refs.get_tag(&name)? {
+                    out.push(RefAdvert { name, target: tag.target, is_timeline: false });
+                }
+            }
         }
     }
     Ok(out)
@@ -46,7 +61,7 @@ pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository) -> Result<()> 
             return Err(Error::Storage("collab: expected Hello".into()));
         }
     }
-    let refs = collab_adverts(repo)?;
+    let refs = collab_adverts(repo).await?;
     let authorized: HashSet<_> = refs.iter().map(|r| r.target).collect();
     conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
     let (want, have) = match conn.recv().await? {
@@ -196,7 +211,7 @@ mod tests {
         tx.set(RefName::new(leaf).unwrap(), Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
-        let adverts = collab_adverts(&repo).unwrap();
+        let adverts = collab_adverts(&repo).await.unwrap();
         assert!(adverts.iter().all(|r| r.name.as_str().starts_with(COLLAB_PUBLIC_PREFIX)));
         assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")));
         assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")));
@@ -290,6 +305,61 @@ mod tests {
         let names = client_repo.refs.list(&format!("{COLLAB_REMOTES_PREFIX}{fp}/")).unwrap();
         assert!(names.iter().any(|n| n.as_str().contains("/profile")), "valid profile kept");
         assert!(!names.iter().any(|n| n.as_str().contains("/edge/")), "tampered edge dropped");
+    }
+
+    // bole-0nk
+    #[tokio::test]
+    async fn adverts_include_followed_remote() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([1u8; 32]);
+        let c = CollabSigner::from_seed([2u8; 32]);
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // I follow C.
+        repo.publish_edge(&me.sign_edge(c.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+        // I have C cached under remotes/<Cfp>/profile (as a pull would have stored).
+        let cp = c.sign_profile("cee".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(cp))).await.unwrap();
+        let cfp = fingerprint(&c.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let adverts = collab_adverts(&repo).await.unwrap();
+        assert!(adverts.iter().any(|r| r.name.as_str() == format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")),
+            "followed author's cached profile is advertised");
+        assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")), "own profile still advertised");
+    }
+
+    // bole-0nk
+    #[tokio::test]
+    async fn adverts_exclude_unfollowed_remote() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([3u8; 32]);
+        let stranger = CollabSigner::from_seed([4u8; 32]);
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // I do NOT follow the stranger, but I have their profile cached.
+        let sp = stranger.sign_profile("s".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(sp))).await.unwrap();
+        let sfp = fingerprint(&stranger.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{sfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let adverts = collab_adverts(&repo).await.unwrap();
+        assert!(!adverts.iter().any(|r| r.name.as_str().contains(&sfp)),
+            "unfollowed author's cache must NOT be advertised");
     }
 
     // bole-x5u
