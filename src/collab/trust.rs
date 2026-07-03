@@ -54,6 +54,34 @@ impl TrustGraph {
         dist
     }
 
+    // bole-36y
+    /// BFS over `Follow` edges from `root`, bounded to `hops`, returning each
+    /// reachable key mapped to its minimal-hop path `[root, …, key]` (root itself
+    /// excluded). Shortest-path by construction; WS8c ignores multi-path/weighted
+    /// trust.
+    pub fn follow_paths(&self, root: &Key, hops: u8) -> BTreeMap<Key, Vec<Key>> {
+        let mut paths: BTreeMap<Key, Vec<Key>> = BTreeMap::new();
+        paths.insert(*root, vec![*root]);
+        let mut q: VecDeque<Key> = VecDeque::new();
+        q.push_back(*root);
+        while let Some(node) = q.pop_front() {
+            let node_path = paths.get(&node).expect("visited nodes have a path").clone();
+            if (node_path.len() as u8 - 1) == hops {
+                continue;
+            }
+            for next in self.follows(&node) {
+                if let std::collections::btree_map::Entry::Vacant(e) = paths.entry(next) {
+                    let mut p = node_path.clone();
+                    p.push(next);
+                    e.insert(p);
+                    q.push_back(next);
+                }
+            }
+        }
+        paths.remove(root);
+        paths
+    }
+
     /// Vouch suggestions for `target` reachable from `root` within `max_depth`.
     /// Depth-1: a direct `Vouch` edge authored by `root`. Depth-2: a `Vouch`
     /// authored by a key `root` directly `Follow`s. Deeper is not returned.
@@ -159,5 +187,37 @@ mod tests {
         assert!(g.follow_neighborhood(&ak, 0).is_empty());
         assert_eq!(g.follow_neighborhood(&ak, 1).keys().next(), Some(&bk));
         assert_eq!(g.follow_neighborhood(&ak, 5).get(&bk), Some(&1));
+    }
+
+    // bole-36y
+    #[test]
+    fn follow_paths_depth2() {
+        let (a, ak) = k(1);
+        let (b, bk) = k(2);
+        let (_c, ck) = k(3);
+        // a -follow-> b -follow-> c
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            b.sign_edge(ck, TrustKind::Follow, None, 1),
+        ]);
+        let paths = g.follow_paths(&ak, 2);
+        assert_eq!(paths.get(&bk), Some(&vec![ak, bk]), "direct path [a,b]");
+        assert_eq!(paths.get(&ck), Some(&vec![ak, bk, ck]), "depth-2 path [a,b,c]");
+        assert!(!paths.contains_key(&ak), "root excluded");
+    }
+
+    // bole-36y
+    #[test]
+    fn follow_paths_hop_bound() {
+        let (a, ak) = k(4);
+        let (b, bk) = k(5);
+        let (_c, ck) = k(6);
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            b.sign_edge(ck, TrustKind::Follow, None, 1),
+        ]);
+        let paths = g.follow_paths(&ak, 1);
+        assert!(paths.contains_key(&bk), "b at depth 1 included");
+        assert!(!paths.contains_key(&ck), "c at depth 2 excluded at hops=1");
     }
 }
