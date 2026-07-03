@@ -197,7 +197,7 @@ impl Repository {
             }
         }
         let graph = TrustGraph::from_edges(edges);
-        let neighborhood = graph.follow_neighborhood(self_key, hops);
+        let paths = graph.follow_paths(self_key, hops);
 
         // Group tracked objects by author, keep only in-neighborhood authors.
         use std::collections::BTreeMap;
@@ -209,12 +209,12 @@ impl Repository {
             };
             by_author.entry(a).or_default().push(o);
         }
+        // bole-wg8
         let mut pulled: Vec<(Key, u8, Vec<Key>, Vec<CollabObject>)> = Vec::new();
         for (author, objs) in by_author {
-            if let Some(dist) = neighborhood.get(&author) {
-                // TODO(WS8c): trust_path for depth-2 peers omits the intermediary —
-                // follow_neighborhood returns only distances, not predecessors.
-                pulled.push((author, *dist, vec![*self_key, author], objs));
+            if let Some(path) = paths.get(&author) {
+                let dist = (path.len() as u8) - 1;
+                pulled.push((author, dist, path.clone(), objs));
             }
         }
         Ok(Index::build(*self_key, own, pulled))
@@ -401,5 +401,45 @@ mod tests {
 
         let idx = repo.local_discovery_index(&me.public_key(), 2).await.unwrap();
         assert!(idx.query("stranger").is_empty(), "unfollowed peer is not in the neighborhood");
+    }
+
+    // bole-wg8
+    #[tokio::test]
+    async fn index_emits_depth2_path() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([70u8; 32]);
+        let b = CollabSigner::from_seed([71u8; 32]);
+        let c = CollabSigner::from_seed([72u8; 32]);
+        // me -follow-> b ; and I have cached b's profile, b's follow-edge to c, and c's profile.
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_edge(&me.sign_edge(b.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+
+        async fn cache(repo: &Repository, obj: CollabObject) {
+            let author = match &obj { CollabObject::Profile(p) => p.key, CollabObject::TrustEdge(e) => e.from_key };
+            let leaf = match &obj {
+                CollabObject::Profile(_) => "profile".to_string(),
+                CollabObject::TrustEdge(e) => format!("edge/follow/{}", fingerprint(&e.to_key)),
+            };
+            let id = repo.objects.put(&Object::Collab(obj)).await.unwrap();
+            let fp = fingerprint(&author);
+            let mut tx = repo.refs.transaction();
+            tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{fp}/{leaf}")).unwrap(),
+                   Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+            tx.commit().unwrap();
+        }
+        cache(&repo, CollabObject::Profile(b.sign_profile("bob".into(), String::new(), vec![], vec![], 1))).await;
+        cache(&repo, CollabObject::TrustEdge(b.sign_edge(c.public_key(), TrustKind::Follow, None, 1))).await;
+        cache(&repo, CollabObject::Profile(c.sign_profile("cee".into(), String::new(), vec![], vec![], 1))).await;
+
+        let idx = repo.local_discovery_index(&me.public_key(), 2).await.unwrap();
+        let cee = idx.query("cee");
+        assert_eq!(cee.len(), 1);
+        assert_eq!(cee[0].distance, 2, "c reached at depth 2 via cache-forward");
+        assert_eq!(cee[0].trust_path, vec![me.public_key(), b.public_key(), c.public_key()], "path [me,b,c]");
     }
 }
