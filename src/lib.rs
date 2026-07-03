@@ -99,6 +99,8 @@ pub use store::{
 pub use repo::{copy_objects, materialize::materialize, Repository};
 // bole-18p
 pub use repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX, COLLAB_SCOPED_PREFIX};
+// bole-581
+pub use repo::collab::QueryHit;
 // bole-6bd
 pub use repo::git_projection::project_to_git;
 // bole-9by

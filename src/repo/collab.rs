@@ -35,6 +35,20 @@ pub(crate) fn kind_seg(kind: TrustKind) -> &'static str {
     }
 }
 
+// bole-581
+/// One resolved discovery hit for the CLI: the canonical key, the author's
+/// self-asserted display name (a hint), the trust-graph-resolved petname (None
+/// when only the fingerprint is known), the reach distance (0/1/2), and the
+/// minimal-hop trust path.
+#[derive(Debug, Clone)]
+pub struct QueryHit {
+    pub key: Key,
+    pub display_name: String,
+    pub petname: Option<String>,
+    pub reach: u8,
+    pub trust_path: Vec<Key>,
+}
+
 impl Repository {
     // bole-18p
     /// Publishes a signed `Profile` to the public prefix. Rejects an invalid
@@ -219,6 +233,47 @@ impl Repository {
             }
         }
         Ok(Index::build(*self_key, own, pulled))
+    }
+
+    // bole-581
+    /// Runs the local discovery index for `term` and resolves a trust-scoped
+    /// petname (via `Namer` over the combined follow/vouch graph; fingerprint
+    /// fallback → None) plus reach + trust path for each hit.
+    pub async fn query_discovery(&self, self_key: &Key, hops: u8, term: &str) -> Result<Vec<QueryHit>> {
+        use crate::collab::naming::{Namer, PetnameResolution};
+        let idx = self.local_discovery_index(self_key, hops).await?;
+
+        // Rebuild the combined edge graph for petname resolution.
+        let mut edges: Vec<TrustEdge> = self.public_edges().await?;
+        for o in self.tracked_collab().await? {
+            if let CollabObject::TrustEdge(e) = o {
+                edges.push(e);
+            }
+        }
+        let graph = TrustGraph::from_edges(edges);
+        let local: std::collections::BTreeMap<Key, String> = std::collections::BTreeMap::new();
+        let namer = Namer::new(*self_key, &local, &graph);
+
+        let mut hits = Vec::new();
+        for r in idx.query(term) {
+            let display_name = match &r.object {
+                CollabObject::Profile(p) => p.display_name.clone(),
+                CollabObject::TrustEdge(_) => String::new(),
+            };
+            let petname = match namer.resolve(&r.key) {
+                PetnameResolution::Local(n) => Some(n),
+                PetnameResolution::Vouch { name, .. } => Some(name),
+                PetnameResolution::Fingerprint(_) => None,
+            };
+            hits.push(QueryHit {
+                key: r.key,
+                display_name,
+                petname,
+                reach: r.distance,
+                trust_path: r.trust_path.clone(),
+            });
+        }
+        Ok(hits)
     }
 }
 
@@ -442,5 +497,50 @@ mod tests {
         assert_eq!(cee.len(), 1);
         assert_eq!(cee[0].distance, 2, "c reached at depth 2 via cache-forward");
         assert_eq!(cee[0].trust_path, vec![me.public_key(), b.public_key(), c.public_key()], "path [me,b,c]");
+    }
+
+    // bole-581
+    #[tokio::test]
+    async fn query_resolves_vouch_petname() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([80u8; 32]);
+        let b = CollabSigner::from_seed([81u8; 32]);
+        // me follows b AND vouches b as "bee".
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_edge(&me.sign_edge(b.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+        repo.publish_edge(&me.sign_edge(b.public_key(), TrustKind::Vouch, Some("bee".into()), 1)).await.unwrap();
+        // b's profile cached.
+        let bp = b.sign_profile("bob-selfname".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(bp))).await.unwrap();
+        let bfp = fingerprint(&b.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{bfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let hits = repo.query_discovery(&me.public_key(), 2, "bob-selfname").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].display_name, "bob-selfname", "self-asserted name is a hint");
+        assert_eq!(hits[0].petname.as_deref(), Some("bee"), "trust-graph petname resolved");
+        assert_eq!(hits[0].reach, 1, "direct follow");
+        assert_eq!(hits[0].trust_path, vec![me.public_key(), b.public_key()]);
+    }
+
+    // bole-581
+    #[tokio::test]
+    async fn query_reach_and_path() {
+        use crate::collab::CollabSigner;
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([82u8; 32]);
+        repo.publish_profile(&me.sign_profile("myself".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        let hits = repo.query_discovery(&me.public_key(), 2, "myself").await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].reach, 0, "own profile is self");
+        assert_eq!(hits[0].petname, None, "no vouch for self -> fingerprint fallback -> None");
     }
 }
