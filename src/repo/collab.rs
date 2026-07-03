@@ -20,6 +20,11 @@ pub const COLLAB_PUBLIC_PREFIX: &str = "refs/collab/public/";
 /// Ref prefix reserved for future capability-scoped collaboration objects. Never
 /// served or indexed by this slice.
 pub const COLLAB_SCOPED_PREFIX: &str = "refs/collab/scoped/";
+// bole-x5u
+/// Ref prefix under which a pulled peer's verified public objects are tracked,
+/// keyed by the peer's key fingerprint. Never merged into the node's own
+/// published set (`refs/collab/public/`).
+pub const COLLAB_REMOTES_PREFIX: &str = "refs/collab/remotes/";
 
 fn kind_seg(kind: TrustKind) -> &'static str {
     match kind {

@@ -5,9 +5,13 @@
 
 use std::collections::HashSet;
 
+use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key};
 use crate::error::{Error, Result};
-use crate::repo::collab::COLLAB_PUBLIC_PREFIX;
+use crate::object::Object;
+use crate::refs::{Ref, RefName, Tag};
+use crate::repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX};
 use crate::repo::Repository;
+use crate::store::pack::decode_pack;
 use crate::sync::negotiate;
 use crate::sync::session::build_pack;
 use crate::sync::transport::Conn;
@@ -57,6 +61,107 @@ pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository) -> Result<()> 
     conn.send(&Message::Pack(pack)).await?;
     conn.send(&Message::Done).await?;
     Ok(())
+}
+
+// bole-x5u
+/// Returns `true` iff the collab object's signature verifies against its embedded author key.
+fn verified(obj: &CollabObject) -> bool {
+    match obj {
+        CollabObject::Profile(p) => verify_profile(p),
+        CollabObject::TrustEdge(e) => verify_edge(e),
+    }
+}
+
+// bole-x5u
+/// Returns the author key of a collab object (the identity that signed it).
+fn author(obj: &CollabObject) -> Key {
+    match obj {
+        CollabObject::Profile(p) => p.key,
+        CollabObject::TrustEdge(e) => e.from_key,
+    }
+}
+
+// bole-x5u
+/// Pulls a peer's public collab objects over `conn`, verifying every signature
+/// (fail-closed) and keeping only those authored by the peer's own profile key
+/// (serve-own-only). Survivors are pinned under
+/// `refs/collab/remotes/<peerkey-fp>/`, never merged into the local public set.
+/// Returns the peer's key. Errors if the peer served no valid profile.
+pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> {
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CapSet::EMPTY,
+        intent: Intent::Fetch,
+    })
+    .await?;
+    let refs = match conn.recv().await? {
+        Message::Welcome { refs, .. } => refs,
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("collab: expected Welcome".into())),
+    };
+    let want: Vec<_> = refs.iter().map(|r| r.target).collect();
+    let have = repo.objects.list().await?;
+    conn.send(&Message::HaveWant { want, have }).await?;
+    let pack = match conn.recv().await? {
+        Message::Pack(p) => p,
+        _ => return Err(Error::Storage("collab: expected Pack".into())),
+    };
+    let _done = conn.recv().await?; // Done
+    for (_id, canonical) in decode_pack(&pack)? {
+        repo.objects.put_raw(&canonical).await?;
+    }
+
+    // Resolve advertised objects, verify signatures, and identify the peer (the
+    // single Profile's author key). Fail-closed: drop any object that doesn't verify.
+    let mut resolved: Vec<(RefName, CollabObject)> = Vec::new();
+    for r in &refs {
+        if let Some(Object::Collab(obj)) = repo.objects.get(&r.target).await? {
+            if verified(&obj) {
+                resolved.push((r.name.clone(), obj));
+            }
+        }
+    }
+    let peer = resolved
+        .iter()
+        .find_map(|(_, o)| {
+            if matches!(o, CollabObject::Profile(_)) {
+                Some(author(o))
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| Error::Storage("collab: peer served no valid profile".into()))?;
+
+    let fp = fingerprint(&peer);
+    let mut tx = repo.refs.transaction();
+    for (_, obj) in &resolved {
+        if author(obj) != peer {
+            continue; // serve-own-only: drop objects not authored by the peer
+        }
+        let tracking = match obj {
+            CollabObject::Profile(_) => format!("{COLLAB_REMOTES_PREFIX}{fp}/profile"),
+            CollabObject::TrustEdge(e) => {
+                let kind_str = match e.kind {
+                    crate::collab::TrustKind::Vouch => "vouch",
+                    crate::collab::TrustKind::Follow => "follow",
+                    crate::collab::TrustKind::Review => "review",
+                };
+                format!(
+                    "{COLLAB_REMOTES_PREFIX}{fp}/edge/{}/{}",
+                    kind_str,
+                    fingerprint(&e.to_key),
+                )
+            }
+        };
+        let target = repo
+            .objects
+            .put(&Object::Collab(obj.clone()))
+            .await?;
+        tx.set(RefName::new(tracking)?, Ref::Tag(Tag { target, created_at: 0, message: None }));
+    }
+    tx.commit()?;
+    Ok(peer)
 }
 
 // bole-g7i
@@ -113,5 +218,67 @@ mod tests {
         let _pack = client.recv().await.unwrap();
         let _done = client.recv().await.unwrap();
         srv.await.unwrap().unwrap();
+    }
+
+    // bole-x5u
+    #[tokio::test]
+    async fn pull_stores_under_remote_prefix() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::fingerprint;
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        // Server B publishes a profile + a follow edge.
+        let server_repo = Repository::memory();
+        let b = CollabSigner::from_seed([3u8; 32]);
+        let c = CollabSigner::from_seed([4u8; 32]);
+        server_repo.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        server_repo.publish_edge(&b.sign_edge(c.public_key(), crate::collab::TrustKind::Follow, None, 1)).await.unwrap();
+
+        // Client A pulls B.
+        let client_repo = Repository::memory();
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        let peer = collab_pull(&mut cl, &client_repo).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        assert_eq!(peer, b.public_key());
+        let fp = fingerprint(&b.public_key());
+        let names = client_repo.refs.list(&format!("{COLLAB_REMOTES_PREFIX}{fp}/")).unwrap();
+        assert!(names.iter().any(|n| n.as_str().contains("/profile")), "peer profile tracked");
+        assert!(names.iter().any(|n| n.as_str().contains("/edge/")), "peer edge tracked");
+    }
+
+    // bole-x5u
+    #[tokio::test]
+    async fn pull_drops_tampered_object() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::{fingerprint, CollabObject};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX};
+
+        // Server B has a VALID profile plus a TAMPERED edge pinned under public.
+        let server_repo = Repository::memory();
+        let b = CollabSigner::from_seed([5u8; 32]);
+        let c = CollabSigner::from_seed([6u8; 32]);
+        server_repo.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        let mut bad = b.sign_edge(c.public_key(), crate::collab::TrustKind::Follow, None, 1);
+        bad.kind = crate::collab::TrustKind::Vouch; // invalidates signature
+        let bad_id = server_repo.objects.put(&Object::Collab(CollabObject::TrustEdge(bad))).await.unwrap();
+        let mut tx = server_repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_PUBLIC_PREFIX}edge/bad")).unwrap(),
+               Ref::Tag(Tag { target: bad_id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let client_repo = Repository::memory();
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        collab_pull(&mut cl, &client_repo).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        let fp = fingerprint(&b.public_key());
+        let names = client_repo.refs.list(&format!("{COLLAB_REMOTES_PREFIX}{fp}/")).unwrap();
+        assert!(names.iter().any(|n| n.as_str().contains("/profile")), "valid profile kept");
+        assert!(!names.iter().any(|n| n.as_str().contains("/edge/")), "tampered edge dropped");
     }
 }
