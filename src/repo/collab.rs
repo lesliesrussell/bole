@@ -197,6 +197,7 @@ impl Repository {
             }
         }
         let graph = TrustGraph::from_edges(edges);
+        // bole-wg8
         let paths = graph.follow_paths(self_key, hops);
 
         // Group tracked objects by author, keep only in-neighborhood authors.
@@ -213,7 +214,7 @@ impl Repository {
         let mut pulled: Vec<(Key, u8, Vec<Key>, Vec<CollabObject>)> = Vec::new();
         for (author, objs) in by_author {
             if let Some(path) = paths.get(&author) {
-                let dist = (path.len() as u8) - 1;
+                let dist = path.len().saturating_sub(1) as u8;
                 pulled.push((author, dist, path.clone(), objs));
             }
         }
