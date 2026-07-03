@@ -36,7 +36,7 @@ impl<'a> Namer<'a> {
             return PetnameResolution::Local(name.clone());
         }
         let mut suggestions = self.graph.vouch_suggestions(&self.root, key, 2);
-        // Prefer the shallowest suggestion (depth-1 before depth-2); deterministic.
+        // Prefer the shallowest suggestion (depth-1 before depth-2); stable within a depth tier.
         suggestions.sort_by_key(|s| s.depth);
         if let Some(s) = suggestions.into_iter().next() {
             return PetnameResolution::Vouch { name: s.petname, depth: s.depth, path: s.path };
@@ -105,5 +105,50 @@ mod tests {
         assert!(matches!(&rx, PetnameResolution::Vouch { name, .. } if name == "alice"));
         assert!(matches!(&ry, PetnameResolution::Vouch { name, .. } if name == "alice"));
         assert_ne!(fingerprint(&xk), fingerprint(&yk));
+    }
+
+    // bole-t7c
+    #[test]
+    fn depth_one_beats_depth_two() {
+        let (root, rk) = key(20);
+        let (mid, mk) = key(21);
+        let (_t, tk) = key(22);
+        // root vouches tk directly ("d1"); root follows mid; mid vouches tk ("d2").
+        let g = TrustGraph::from_edges(vec![
+            root.sign_edge(tk, TrustKind::Vouch, Some("d1".into()), 1),
+            root.sign_edge(mk, TrustKind::Follow, None, 1),
+            mid.sign_edge(tk, TrustKind::Vouch, Some("d2".into()), 1),
+        ]);
+        let local = BTreeMap::new();
+        let namer = Namer::new(rk, &local, &g);
+        match namer.resolve(&tk) {
+            PetnameResolution::Vouch { name, depth, .. } => {
+                assert_eq!(depth, 1, "depth-1 must beat depth-2");
+                assert_eq!(name, "d1");
+            }
+            other => panic!("expected Vouch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depth_two_only_resolution() {
+        let (root, rk) = key(30);
+        let (mid, mk) = key(31);
+        let (_t, tk) = key(32);
+        // root follows mid; mid vouches tk. No direct vouch from root -> depth-2 only.
+        let g = TrustGraph::from_edges(vec![
+            root.sign_edge(mk, TrustKind::Follow, None, 1),
+            mid.sign_edge(tk, TrustKind::Vouch, Some("via-mid".into()), 1),
+        ]);
+        let local = BTreeMap::new();
+        let namer = Namer::new(rk, &local, &g);
+        match namer.resolve(&tk) {
+            PetnameResolution::Vouch { name, depth, path } => {
+                assert_eq!(depth, 2);
+                assert_eq!(name, "via-mid");
+                assert_eq!(path, vec![rk, mk], "depth-2 path is root -> voucher");
+            }
+            other => panic!("expected depth-2 Vouch, got {other:?}"),
+        }
     }
 }
