@@ -29,13 +29,25 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 || serde_json::json!({ "serving": listen }),
             );
             loop {
-                // Serve one accepted connection, then loop for the next. A
-                // per-connection failure is logged and never stops the daemon.
-                if let Err(e) = serve_collab_tcp_once(&listener, &ctx.repo).await {
-                    out.emit(
+                // bole-g87: Wrap per-connection serve in a 30-second timeout so a peer
+                // that connects and never sends data cannot wedge the accept loop forever.
+                // Fully-concurrent (spawned-per-connection) serving is deferred to WS8c;
+                // this timeout only prevents a permanent wedge.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    serve_collab_tcp_once(&listener, &ctx.repo),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => out.emit(
                         || format!("connection error: {e}"),
                         || serde_json::json!({ "error": e.to_string() }),
-                    );
+                    ),
+                    Err(_) => out.emit(
+                        || "connection timed out".to_string(),
+                        || serde_json::json!({ "error": "timeout" }),
+                    ),
                 }
             }
         }

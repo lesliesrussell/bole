@@ -55,10 +55,11 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             let seq = cur.map(|p| p.seq + 1).unwrap_or(1);
             let profile = signer.sign_profile(display_name, bio, endpoints, vec![], seq);
             ctx.repo.publish_profile(&profile).await?;
-            let fp = bole::fingerprint(&signer.public_key());
+            // bole-g87
+            let hex = key::hex32(&signer.public_key());
             out.emit(
-                || format!("profile published (seq={seq}, key={fp})"),
-                || serde_json::json!({ "seq": seq, "key": fp }),
+                || format!("profile published (seq={seq}, key={hex})"),
+                || serde_json::json!({ "seq": seq, "key": hex }),
             );
             Ok(())
         }

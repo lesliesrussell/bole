@@ -101,7 +101,8 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
         _ => return Err(Error::Storage("collab: expected Welcome".into())),
     };
     let want: Vec<_> = refs.iter().map(|r| r.target).collect();
-    let have = repo.objects.list().await?;
+    // bole-g87: send empty have to avoid leaking local store metadata to untrusted peers
+    let have: Vec<_> = vec![];
     conn.send(&Message::HaveWant { want, have }).await?;
     let pack = match conn.recv().await? {
         Message::Pack(p) => p,
