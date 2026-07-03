@@ -11,6 +11,8 @@ pub mod discovery;
 pub mod trust;
 // bole-t7c
 pub mod naming;
+// bole-0ms
+pub mod alias;
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
@@ -21,6 +23,8 @@ pub use object::{
 pub use trust::{TrustGraph, VouchSuggestion};
 // bole-t7c
 pub use naming::{Namer, PetnameResolution};
+// bole-0ms
+pub use alias::{verify_alias, AliasResolver, AliasStatus};
 
 /// The canonical identity of a collaboration participant: an Ed25519 public key.
 /// Petnames and DNS aliases are non-authoritative labels *for* a `Key`.
