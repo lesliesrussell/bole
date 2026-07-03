@@ -97,11 +97,12 @@ fn author(obj: &CollabObject) -> Key {
 }
 
 // bole-x5u
-/// Pulls a peer's public collab objects over `conn`, verifying every signature
-/// (fail-closed) and keeping only those authored by the peer's own profile key
-/// (serve-own-only). Survivors are pinned under
-/// `refs/collab/remotes/<peerkey-fp>/`, never merged into the local public set.
-/// Returns the peer's key. Errors if the peer served no valid profile.
+/// Pulls a node's advertised public + followed-cache collab objects over `conn`,
+/// verifying every object against its embedded author key (fail-closed; drop
+/// invalid). Each survivor is filed under the puller's
+/// `refs/collab/remotes/<intrinsic-author-fp>/…` by its TRUE author — the dialed
+/// server's own objects and its forwarded cache alike. Returns the dialed server's
+/// own key (author of a verified `public/` Profile); errors if none is served.
 pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> {
     conn.send(&Message::Hello {
         proto_min: PROTO_VERSION,
@@ -141,10 +142,14 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
             }
         }
     }
+    // bole-gvj
+    // The dialed server's identity is the author of a verified Profile advertised
+    // under `public/` (its own), not merely the first profile in the set — several
+    // cached profiles may also be present. Pin the invariant to the namespace.
     let peer = resolved
         .iter()
-        .find_map(|(_, o)| {
-            if matches!(o, CollabObject::Profile(_)) {
+        .find_map(|(name, o)| {
+            if name.as_str().starts_with(COLLAB_PUBLIC_PREFIX) && matches!(o, CollabObject::Profile(_)) {
                 Some(author(o))
             } else {
                 None
@@ -395,7 +400,8 @@ mod tests {
             "server-own profile filed under its author");
         assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap()).unwrap().is_some(),
             "cached C profile filed under C, not under B");
-        let _ = COLLAB_PUBLIC_PREFIX;
+        assert!(client.refs.list(COLLAB_PUBLIC_PREFIX).unwrap().is_empty(),
+            "pull files into remotes/, never the puller's own public/");
     }
 
     // bole-gvj
