@@ -25,6 +25,8 @@ pub use trust::{TrustGraph, VouchSuggestion};
 pub use naming::{Namer, PetnameResolution};
 // bole-0ms
 pub use alias::{verify_alias, AliasResolver, AliasStatus};
+// bole-3nk
+pub use discovery::{gather, DiscoveryResult, Index, PublicObjectSource};
 
 /// The canonical identity of a collaboration participant: an Ed25519 public key.
 /// Petnames and DNS aliases are non-authoritative labels *for* a `Key`.
