@@ -21,6 +21,9 @@ pub mod secret;
 // bole-ehx
 pub mod approver;
 pub mod policy;
+// bole-6i1
+pub mod profile;
+pub mod trust;
 // bole-9mz
 pub mod run;
 // bole-0hg

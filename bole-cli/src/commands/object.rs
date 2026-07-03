@@ -56,6 +56,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::SecretV2(_) => "secret",
         // bole-amy
         Object::MultiRecipientSecret(_) => "secret",
+        // bole-6i1
+        Object::Collab(_) => "collab",
     }
 }
 

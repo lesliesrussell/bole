@@ -18,6 +18,8 @@ mod actor;
 // bole-1q9
 mod key;
 mod registry;
+// bole-6i1
+mod collabkey;
 // bole-hrk
 mod worktrees;
 
@@ -145,6 +147,17 @@ enum Command {
         #[arg(long)]
         key_file: Option<std::path::PathBuf>,
     },
+    // bole-6i1
+    /// Author/inspect this node's collaboration profile.
+    Profile {
+        #[command(subcommand)]
+        cmd: commands::profile::Cmd,
+    },
+    /// Author/inspect this node's trust edges.
+    Trust {
+        #[command(subcommand)]
+        cmd: commands::trust::Cmd,
+    },
     // bole-9mz
     /// Resolve an overlay and run a command with its variables injected.
     Run(commands::run::RunArgs),
@@ -250,6 +263,15 @@ async fn run() -> Result<()> {
         Command::Approve { timeline, snapshot, key_id, key_env, key_file } => {
             let ctx = open().await?;
             commands::approver::approve(&ctx, &out, timeline, snapshot, key_id, key_env, key_file).await
+        }
+        // bole-6i1
+        Command::Profile { cmd } => {
+            let ctx = open().await?;
+            commands::profile::run(&ctx, &out, cmd).await
+        }
+        Command::Trust { cmd } => {
+            let ctx = open().await?;
+            commands::trust::run(&ctx, &out, cmd).await
         }
         // bole-9mz
         Command::Run(args) => {
