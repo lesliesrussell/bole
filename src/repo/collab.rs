@@ -35,7 +35,7 @@ impl Repository {
     /// signature and any `seq` not strictly greater than the current profile's.
     pub async fn publish_profile(&self, p: &Profile) -> Result<ObjectId> {
         if !verify_profile(p) {
-            return Err(Error::Codec("profile signature does not verify".into()));
+            return Err(Error::PolicyViolation("profile signature does not verify".into()));
         }
         if let Some(cur) = self.profile(&p.key).await? {
             if p.seq <= cur.seq {
@@ -78,7 +78,7 @@ impl Repository {
     /// not strictly greater than the current edge's for the same `(from,kind,to)`.
     pub async fn publish_edge(&self, e: &TrustEdge) -> Result<ObjectId> {
         if !verify_edge(e) {
-            return Err(Error::Codec("trust edge signature does not verify".into()));
+            return Err(Error::PolicyViolation("trust edge signature does not verify".into()));
         }
         let leaf = format!(
             "{COLLAB_PUBLIC_PREFIX}edge/{}/{}/{}",
@@ -218,6 +218,10 @@ mod tests {
         assert!(err.is_err(), "publishing a lower seq must be rejected");
         let cur = repo.profile(&a.public_key()).await.unwrap().unwrap();
         assert_eq!(cur.seq, 2);
+        // bole-18p
+        // equal seq is also stale, not an advance
+        let eq = repo.publish_profile(&a.sign_profile("v2-again".into(), String::new(), vec![], vec![], 2)).await;
+        assert!(eq.is_err(), "re-publishing the same seq must be rejected");
     }
 
     #[tokio::test]
