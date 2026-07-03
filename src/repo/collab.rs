@@ -161,7 +161,13 @@ impl Repository {
         for name in self.refs.list(COLLAB_REMOTES_PREFIX)? {
             if let Some(tag) = self.refs.get_tag(&name)? {
                 if let Some(Object::Collab(obj)) = self.objects.get(&tag.target).await? {
-                    out.push(obj);
+                    let ok = match &obj {
+                        CollabObject::Profile(p) => crate::collab::verify_profile(p),
+                        CollabObject::TrustEdge(e) => crate::collab::verify_edge(e),
+                    };
+                    if ok {
+                        out.push(obj);
+                    }
                 }
             }
         }
@@ -206,6 +212,8 @@ impl Repository {
         let mut pulled: Vec<(Key, u8, Vec<Key>, Vec<CollabObject>)> = Vec::new();
         for (author, objs) in by_author {
             if let Some(dist) = neighborhood.get(&author) {
+                // TODO(WS8c): trust_path for depth-2 peers omits the intermediary —
+                // follow_neighborhood returns only distances, not predecessors.
                 pulled.push((author, *dist, vec![*self_key, author], objs));
             }
         }
@@ -362,7 +370,9 @@ mod tests {
         tx.commit().unwrap();
 
         let idx = repo.local_discovery_index(&me.public_key(), 2).await.unwrap();
-        assert!(!idx.query("me").is_empty(), "own profile at distance 0");
+        let me_hits = idx.query("me");
+        assert_eq!(me_hits.len(), 1);
+        assert_eq!(me_hits[0].distance, 0, "own profile at distance 0");
         let bob_hits = idx.query("bob");
         assert_eq!(bob_hits.len(), 1);
         assert_eq!(bob_hits[0].distance, 1, "followed peer at distance 1");
