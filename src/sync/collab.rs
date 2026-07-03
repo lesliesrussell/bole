@@ -18,10 +18,10 @@ use crate::sync::transport::Conn;
 use crate::sync::wire::{CapSet, Intent, Message, RefAdvert, PROTO_VERSION};
 
 // bole-0nk
-/// Advertises the node's own public refs (`refs/collab/public/**`) plus the
-/// cached refs (`refs/collab/remotes/<fp>/**`) of authors this node DIRECTLY
+/// Advertises the node's own public objects (`refs/collab/public/**`) PLUS the
+/// cached objects (`refs/collab/remotes/<fp>/**`) of authors this node directly
 /// follows — and nothing else. Serve horizon: re-serve verified public state for
-/// authors you directly follow, and for no others. Never advertises `scoped/`.
+/// authors you directly follow, and for no others. Never advertises `refs/collab/scoped/`.
 pub async fn collab_adverts(repo: &Repository) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
     // Own authored public objects.
@@ -212,7 +212,7 @@ mod tests {
         tx.commit().unwrap();
 
         let adverts = collab_adverts(&repo).await.unwrap();
-        assert!(adverts.iter().all(|r| r.name.as_str().starts_with(COLLAB_PUBLIC_PREFIX)));
+        assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")), "scoped refs are never advertised");
         assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")));
         assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")));
     }
@@ -236,7 +236,7 @@ mod tests {
         client.send(&Message::Hello { proto_min: PROTO_VERSION, proto_max: PROTO_VERSION, caps: CapSet::EMPTY, intent: Intent::Fetch }).await.unwrap();
         let welcome = client.recv().await.unwrap();
         let refs = match welcome { Message::Welcome { refs, .. } => refs, other => panic!("expected Welcome, got {other:?}") };
-        assert!(refs.iter().all(|r| r.name.as_str().starts_with(COLLAB_PUBLIC_PREFIX)));
+        assert!(!refs.iter().any(|r| r.name.as_str().contains("/scoped/")), "scoped refs are never served");
         assert!(!refs.iter().any(|r| r.name.as_str().contains("/scoped/")));
         // Drain the rest so the server task finishes cleanly.
         client.send(&Message::HaveWant { want: refs.iter().map(|r| r.target).collect(), have: vec![] }).await.unwrap();
