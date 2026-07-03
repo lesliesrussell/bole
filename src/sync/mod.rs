@@ -16,6 +16,8 @@ pub mod negotiate;
 pub mod wire;
 pub mod transport;
 pub mod session;
+// bole-g7i
+pub mod collab;
 // bole-vih
 pub mod http;
 // bole-6h7
