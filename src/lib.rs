@@ -113,3 +113,5 @@ pub use repo::ephemeral::{build_tree, diff_paths, snapshot_paths, DiskWorkspace,
 pub use sync::collab::{collab_adverts, serve_collab};
 // bole-x5u
 pub use sync::collab::collab_pull;
+// bole-8lm
+pub use sync::collab::serve_collab_tcp_once;

@@ -162,6 +162,17 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
     Ok(peer)
 }
 
+// bole-8lm
+/// Accepts one TCP connection and serves the collab endpoint on it.
+pub async fn serve_collab_tcp_once(
+    listener: &tokio::net::TcpListener,
+    repo: &Repository,
+) -> Result<()> {
+    let (stream, _peer) = listener.accept().await.map_err(Error::Io)?;
+    let mut conn = crate::sync::transport::TcpConn::new(stream);
+    serve_collab(&mut conn, repo).await
+}
+
 // bole-g7i
 #[cfg(test)]
 mod tests {
