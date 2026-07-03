@@ -110,6 +110,15 @@ impl Index {
     }
 }
 
+// bole-6hw
+/// True iff a collab object's signature verifies against its embedded author key.
+fn verified(obj: &CollabObject) -> bool {
+    match obj {
+        CollabObject::Profile(p) => crate::collab::verify_profile(p),
+        CollabObject::TrustEdge(e) => crate::collab::verify_edge(e),
+    }
+}
+
 /// Gathers a discovery index for `root`: root's own public objects at distance 0,
 /// plus the public objects of each key in the bounded `Follow` neighborhood whose
 /// source is present in `sources`. A key with no reachable source is simply
@@ -121,13 +130,15 @@ pub async fn gather<S: PublicObjectSource>(
     hops: u8,
     sources: &BTreeMap<Key, &S>,
 ) -> Result<Index> {
-    let own_objs = own.public_objects().await?;
+    // bole-6hw
+    let own_objs: Vec<CollabObject> = own.public_objects().await?.into_iter().filter(verified).collect();
     let neighborhood = graph.follow_neighborhood(&root, hops);
     let mut pulled = Vec::new();
     for (peer, distance) in neighborhood {
         if let Some(src) = sources.get(&peer) {
             match src.public_objects().await {
-                Ok(objs) => pulled.push((peer, distance, vec![root, peer], objs)),
+                // bole-6hw
+                Ok(objs) => pulled.push((peer, distance, vec![root, peer], objs.into_iter().filter(verified).collect())),
                 Err(_) => continue, // unreachable/failed peer: degrade, don't fail
             }
         }
@@ -139,7 +150,8 @@ pub async fn gather<S: PublicObjectSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collab::{CollabObject, CollabSigner, Key};
+    use crate::collab::{CollabObject, CollabSigner, Key, TrustGraph, TrustKind};
+    use std::collections::BTreeMap;
 
     fn profile(signer: &CollabSigner, name: &str, seq: u64) -> CollabObject {
         CollabObject::Profile(signer.sign_profile(name.into(), String::new(), vec![], vec![], seq))
@@ -215,5 +227,34 @@ mod tests {
             })
             .collect();
         assert_eq!(seqs, vec![9, 3], "within a distance, higher seq (more recent) sorts first");
+    }
+
+    // bole-6hw
+    struct MockSource(Vec<CollabObject>);
+
+    #[async_trait::async_trait]
+    impl PublicObjectSource for MockSource {
+        async fn public_objects(&self) -> crate::error::Result<Vec<CollabObject>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn gather_excludes_unverified_objects() {
+        let root_s = CollabSigner::from_seed([40u8; 32]);
+        let peer_s = CollabSigner::from_seed([41u8; 32]);
+        let rk = root_s.public_key();
+        let pk = peer_s.public_key();
+        let good = peer_s.sign_profile("goodname".into(), String::new(), vec![], vec![], 1);
+        let mut bad = peer_s.sign_profile("origname".into(), String::new(), vec![], vec![], 2);
+        bad.display_name = "tamperedname".into(); // invalidates the signature
+        let own = MockSource(vec![]);
+        let peer = MockSource(vec![CollabObject::Profile(good), CollabObject::Profile(bad)]);
+        let graph = TrustGraph::from_edges(vec![root_s.sign_edge(pk, TrustKind::Follow, None, 1)]);
+        let mut sources: BTreeMap<Key, &MockSource> = BTreeMap::new();
+        sources.insert(pk, &peer);
+        let idx = gather(rk, &own, &graph, 2, &sources).await.unwrap();
+        assert!(!idx.query("goodname").is_empty(), "verified object is indexed");
+        assert!(idx.query("tamperedname").is_empty(), "unverified (tampered) object must be excluded");
     }
 }
