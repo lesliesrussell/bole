@@ -52,21 +52,24 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
+        // bole-cyw
         Cmd::Query { term, hops, key_env, key_file } => {
             let self_key = signer_from(&key_env, key_file.as_deref())?.public_key();
-            let idx = ctx.repo.local_discovery_index(&self_key, hops).await?;
-            let rows: Vec<_> = idx
-                .query(&term)
-                .into_iter()
-                .map(|r| {
-                    let name = match &r.object {
-                        bole::CollabObject::Profile(p) => p.display_name.clone(),
-                        bole::CollabObject::TrustEdge(_) => String::new(),
+            let hits = ctx.repo.query_discovery(&self_key, hops, &term).await?;
+            let rows: Vec<_> = hits
+                .iter()
+                .map(|h| {
+                    let reach = match h.reach {
+                        0 => "self",
+                        1 => "direct",
+                        _ => "transitive",
                     };
                     serde_json::json!({
-                        "key": key::hex32(&r.key),
-                        "name": name,
-                        "distance": r.distance,
+                        "key": key::hex32(&h.key),
+                        "display_name": h.display_name,
+                        "petname": h.petname,
+                        "reach": reach,
+                        "trust_path": h.trust_path.iter().map(key::hex32).collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -76,7 +79,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                         "no matches".to_string()
                     } else {
                         rows.iter()
-                            .map(|r| format!("{} {}", r["key"], r["name"]))
+                            .map(|r| format!("{} [{}] {}", r["key"], r["reach"], r["display_name"]))
                             .collect::<Vec<_>>()
                             .join("\n")
                     }

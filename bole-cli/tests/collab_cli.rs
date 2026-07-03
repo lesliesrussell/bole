@@ -71,6 +71,23 @@ fn cli_trust_vouch_and_list() {
     assert!(s.contains("buddy"), "petname present: {s}");
 }
 
+// bole-cyw
+#[test]
+fn cli_query_shows_petname_and_reach() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "a1".repeat(32);
+    ok(w, &["profile", "set", "--display-name", "Myself"], Some(&seed));
+    let out = ok(w, &["discover", "query", "Myself", "--json"], Some(&seed));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let row = &v[0];
+    assert_eq!(row["reach"], "self");
+    assert!(row.get("display_name").is_some(), "display_name field present");
+    assert!(row.get("petname").is_some(), "petname field present (may be null)");
+    assert!(row.get("trust_path").is_some(), "trust_path field present");
+}
+
 // bole-1n7
 #[test]
 fn cli_discover_pull_query_e2e() {
