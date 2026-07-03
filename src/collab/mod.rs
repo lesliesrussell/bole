@@ -5,6 +5,8 @@
 //! `docs/superpowers/specs/2026-07-03-ws8a-collaboration-substrate-design.md`.
 
 pub mod object;
+// bole-18p
+pub mod discovery;
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
