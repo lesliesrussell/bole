@@ -24,6 +24,9 @@ pub mod policy;
 // bole-6i1
 pub mod profile;
 pub mod trust;
+// bole-1n7
+pub mod discover;
+pub mod node;
 // bole-9mz
 pub mod run;
 // bole-0hg

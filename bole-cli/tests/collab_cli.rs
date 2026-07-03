@@ -70,3 +70,39 @@ fn cli_trust_vouch_and_list() {
     assert!(s.contains(&peer[..8]), "vouched key present: {s}");
     assert!(s.contains("buddy"), "petname present: {s}");
 }
+
+// bole-1n7
+#[test]
+fn cli_discover_pull_query_e2e() {
+    use std::process::Stdio;
+    // Server repo: publish a profile, serve on a fixed loopback port.
+    let stmp = tempfile::tempdir().unwrap();
+    let s = stmp.path();
+    ok(s, &["init", "."], None);
+    let sseed = "dd".repeat(32);
+    ok(s, &["profile", "set", "--display-name", "Server"], Some(&sseed));
+
+    let addr = "127.0.0.1:47653";
+    let mut server = bin();
+    server.args(["node", "serve", "--listen", addr]).current_dir(s)
+        .stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = server.spawn().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400)); // let it bind
+
+    // Client repo: pull the server, follow the pulled key, then query. A peer
+    // is only discoverable once it is inside the client's follow-neighborhood,
+    // so the pulled key is followed before querying.
+    let ctmp = tempfile::tempdir().unwrap();
+    let c = ctmp.path();
+    ok(c, &["init", "."], None);
+    let cseed = "ee".repeat(32);
+    ok(c, &["profile", "set", "--display-name", "Client"], Some(&cseed));
+    let pull = ok(c, &["discover", "pull", addr, "--json"], Some(&cseed));
+    let pv: serde_json::Value = serde_json::from_slice(&pull.stdout).unwrap();
+    let peer_key = pv["pulled"].as_str().unwrap().to_string();
+    ok(c, &["trust", "follow", &peer_key], Some(&cseed));
+    let q = ok(c, &["discover", "query", "Server", "--json"], Some(&cseed));
+    let _ = child.kill();
+    let _ = child.wait(); // reap the daemon so no zombie is left behind
+    assert!(String::from_utf8_lossy(&q.stdout).contains("Server"), "peer discoverable: {}", String::from_utf8_lossy(&q.stdout));
+}

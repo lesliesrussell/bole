@@ -158,6 +158,17 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::trust::Cmd,
     },
+    // bole-1n7
+    /// Run the read-only collaboration-serve daemon.
+    Node {
+        #[command(subcommand)]
+        cmd: commands::node::Cmd,
+    },
+    /// Pull peers and search the local discovery index.
+    Discover {
+        #[command(subcommand)]
+        cmd: commands::discover::Cmd,
+    },
     // bole-9mz
     /// Resolve an overlay and run a command with its variables injected.
     Run(commands::run::RunArgs),
@@ -272,6 +283,15 @@ async fn run() -> Result<()> {
         Command::Trust { cmd } => {
             let ctx = open().await?;
             commands::trust::run(&ctx, &out, cmd).await
+        }
+        // bole-1n7
+        Command::Node { cmd } => {
+            let ctx = open().await?;
+            commands::node::run(&ctx, &out, cmd).await
+        }
+        Command::Discover { cmd } => {
+            let ctx = open().await?;
+            commands::discover::run(&ctx, &out, cmd).await
         }
         // bole-9mz
         Command::Run(args) => {
