@@ -146,6 +146,10 @@ pub struct Repository {
     // bole-fo2
     /// Declarative policy hook bindings resolved into the registry per call.
     hooks: Vec<crate::acl::policy_object::HookSpec>,
+    // bole-eul
+    /// Serializes collab publish read-check-write so concurrent publishes cannot
+    /// both pass a stale monotonic-seq check (WS8b F4).
+    publish_lock: tokio::sync::Mutex<()>,
 }
 
 // bole-1vi
@@ -162,6 +166,8 @@ impl Repository {
             acls: AclStore::new(MemoryAclBackend::new()),
             // bole-fo2
             hooks: Vec::new(),
+            // bole-eul
+            publish_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -178,6 +184,8 @@ impl Repository {
             acls: AclStore::new(DiskAclBackend::open(root)?),
             // bole-fo2
             hooks: Vec::new(),
+            // bole-eul
+            publish_lock: tokio::sync::Mutex::new(()),
         })
     }
 

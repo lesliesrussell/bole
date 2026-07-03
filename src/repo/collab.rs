@@ -34,6 +34,8 @@ impl Repository {
     /// Publishes a signed `Profile` to the public prefix. Rejects an invalid
     /// signature and any `seq` not strictly greater than the current profile's.
     pub async fn publish_profile(&self, p: &Profile) -> Result<ObjectId> {
+        // bole-eul
+        let _publish_guard = self.publish_lock.lock().await;
         if !verify_profile(p) {
             return Err(Error::PolicyViolation("profile signature does not verify".into()));
         }
@@ -77,6 +79,8 @@ impl Repository {
     /// Publishes a signed `TrustEdge`. Rejects an invalid signature and any `seq`
     /// not strictly greater than the current edge's for the same `(from,kind,to)`.
     pub async fn publish_edge(&self, e: &TrustEdge) -> Result<ObjectId> {
+        // bole-eul
+        let _publish_guard = self.publish_lock.lock().await;
         if !verify_edge(e) {
             return Err(Error::PolicyViolation("trust edge signature does not verify".into()));
         }
@@ -244,5 +248,28 @@ mod tests {
         let mut p = a.sign_profile("A".into(), String::new(), vec![], vec![], 1);
         p.display_name = "forged".into();
         assert!(repo.publish_profile(&p).await.is_err());
+    }
+
+    // bole-eul
+    #[tokio::test]
+    async fn concurrent_publish_keeps_higher_seq() {
+        use std::sync::Arc;
+        let repo = Arc::new(Repository::memory());
+        let a = CollabSigner::from_seed([50u8; 32]);
+        // seq 1 exists first so both concurrent publishes are "advances".
+        repo.publish_profile(&a.sign_profile("v1".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+
+        let p2 = a.sign_profile("v2".into(), String::new(), vec![], vec![], 2);
+        let p3 = a.sign_profile("v3".into(), String::new(), vec![], vec![], 3);
+        let (r2, r3) = (repo.clone(), repo.clone());
+        let (a2, a3) = (p2.clone(), p3.clone());
+        let t2 = tokio::spawn(async move { let _ = r2.publish_profile(&a2).await; });
+        let t3 = tokio::spawn(async move { let _ = r3.publish_profile(&a3).await; });
+        t2.await.unwrap();
+        t3.await.unwrap();
+
+        // Whichever ordering occurred, a lower seq must never overwrite a higher one.
+        let cur = repo.profile(&a.public_key()).await.unwrap().unwrap();
+        assert_eq!(cur.seq, 3, "highest seq must be current after concurrent publish");
     }
 }
