@@ -76,13 +76,13 @@ impl Index {
     /// Builds an index from root's own public objects (distance 0) and objects
     /// pulled from follow-neighbors, each tuple `(via, distance, trust_path, objects)`.
     pub fn build(
-        _root: Key,
+        root: Key,
         own: Vec<CollabObject>,
         pulled: Vec<(Key, u8, Vec<Key>, Vec<CollabObject>)>,
     ) -> Self {
         let mut results = Vec::new();
         for obj in own {
-            results.push(DiscoveryResult { key: publisher_key(&obj), object: obj, distance: 0, trust_path: vec![_root] });
+            results.push(DiscoveryResult { key: publisher_key(&obj), object: obj, distance: 0, trust_path: vec![root] });
         }
         for (_via, distance, trust_path, objects) in pulled {
             for obj in objects {
@@ -135,6 +135,7 @@ pub async fn gather<S: PublicObjectSource>(
     Ok(Index::build(root, own_objs, pulled))
 }
 
+// bole-3nk
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +190,30 @@ mod tests {
         assert_eq!(hits[0].key, pk, "result carries the publishing key");
         assert_eq!(hits[0].trust_path, vec![rk, pk], "result carries the trust path");
         assert_eq!(key_of(&hits[0].object), pk);
+    }
+
+    // bole-3nk
+    #[test]
+    fn same_distance_orders_by_recency_desc() {
+        let root_s = CollabSigner::from_seed([11u8; 32]);
+        let p1 = CollabSigner::from_seed([12u8; 32]);
+        let p2 = CollabSigner::from_seed([13u8; 32]);
+        let rk = root_s.public_key();
+        // Two peers both at distance 1, seqs 3 and 9.
+        let own = vec![];
+        let pulled = vec![
+            (p1.public_key(), 1u8, vec![rk, p1.public_key()], vec![profile(&p1, "low", 3)]),
+            (p2.public_key(), 1u8, vec![rk, p2.public_key()], vec![profile(&p2, "high", 9)]),
+        ];
+        let idx = Index::build(rk, own, pulled);
+        let hits = idx.query("");
+        let seqs: Vec<u64> = hits
+            .iter()
+            .map(|r| match &r.object {
+                CollabObject::Profile(p) => p.seq,
+                CollabObject::TrustEdge(e) => e.seq,
+            })
+            .collect();
+        assert_eq!(seqs, vec![9, 3], "within a distance, higher seq (more recent) sorts first");
     }
 }
