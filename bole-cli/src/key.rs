@@ -63,3 +63,15 @@ fn nibble(c: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+// bole-6i1
+/// Encodes a 32-byte array as a 64-character lowercase hex string.
+/// Used wherever a raw key must be shown to the user so it can be
+/// copy-pasted directly into `trust follow` / `trust vouch`.
+pub fn hex32(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for x in bytes {
+        s.push_str(&format!("{x:02x}"));
+    }
+    s
+}

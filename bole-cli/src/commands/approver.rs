@@ -48,7 +48,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             reg.approvers.retain(|a| a.key_id != approver.key_id);
             reg.add(approver.clone());
             ctx.repo.set_approvers(&reg).await?;
-            let pk_hex = hex32(&approver.public_key);
+            let pk_hex = key::hex32(&approver.public_key);
             out.emit(
                 || format!("registered approver {} ({})", approver.key_id, pk_hex),
                 || serde_json::json!({ "action": "approver-add", "key_id": approver.key_id, "public_key": pk_hex }),
@@ -64,7 +64,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     } else {
                         reg.approvers
                             .iter()
-                            .map(|a| format!("{} {}", a.key_id, hex32(&a.public_key)))
+                            .map(|a| format!("{} {}", a.key_id, key::hex32(&a.public_key)))
                             .collect::<Vec<_>>()
                             .join("\n")
                     }
@@ -73,7 +73,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     serde_json::json!(reg
                         .approvers
                         .iter()
-                        .map(|a| serde_json::json!({ "key_id": a.key_id, "public_key": hex32(&a.public_key) }))
+                        .map(|a| serde_json::json!({ "key_id": a.key_id, "public_key": key::hex32(&a.public_key) }))
                         .collect::<Vec<_>>())
                 },
             );
@@ -125,10 +125,3 @@ pub async fn approve(
     Ok(())
 }
 
-fn hex32(b: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for x in b {
-        s.push_str(&format!("{x:02x}"));
-    }
-    s
-}

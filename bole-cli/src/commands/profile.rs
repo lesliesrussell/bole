@@ -75,7 +75,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                         "bio": p.bio,
                         "endpoints": p.endpoints,
                         "seq": p.seq,
-                        "key": bole::fingerprint(&p.key),
+                        "key": key::hex32(&p.key),
                     }),
                 ),
                 None => out.emit(

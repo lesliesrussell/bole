@@ -54,3 +54,19 @@ fn cli_trust_follow_and_list() {
     let list = ok(w, &["trust", "list", "--json"], Some(&seed));
     assert!(String::from_utf8_lossy(&list.stdout).contains(&peer[..8]));
 }
+
+// bole-6i1
+#[test]
+fn cli_trust_vouch_and_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "ab".repeat(32);
+    ok(w, &["profile", "set", "--display-name", "Me"], Some(&seed));
+    let peer = "cd".repeat(32);
+    ok(w, &["trust", "vouch", &peer, "--name", "buddy"], Some(&seed));
+    let list = ok(w, &["trust", "list", "--json"], Some(&seed));
+    let s = String::from_utf8_lossy(&list.stdout);
+    assert!(s.contains(&peer[..8]), "vouched key present: {s}");
+    assert!(s.contains("buddy"), "petname present: {s}");
+}
