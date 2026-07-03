@@ -152,26 +152,22 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
         })
         .ok_or_else(|| Error::Storage("collab: peer served no valid profile".into()))?;
 
-    let fp = fingerprint(&peer);
+    // bole-gvj
+    // Multi-author: file EVERY verified object under the puller's remotes namespace
+    // keyed by its INTRINSIC author (server-own and forwarded-cache alike). The
+    // `peer` (server's own key) is still returned for `discover pull`/`trust follow`.
     let mut tx = repo.refs.transaction();
     for (_, obj) in &resolved {
-        if author(obj) != peer {
-            continue; // serve-own-only: drop objects not authored by the peer
-        }
+        let afp = fingerprint(&author(obj));
         let tracking = match obj {
-            CollabObject::Profile(_) => format!("{COLLAB_REMOTES_PREFIX}{fp}/profile"),
-            CollabObject::TrustEdge(e) => {
-                format!(
-                    "{COLLAB_REMOTES_PREFIX}{fp}/edge/{}/{}",
-                    kind_seg(e.kind),
-                    fingerprint(&e.to_key),
-                )
-            }
+            CollabObject::Profile(_) => format!("{COLLAB_REMOTES_PREFIX}{afp}/profile"),
+            CollabObject::TrustEdge(e) => format!(
+                "{COLLAB_REMOTES_PREFIX}{afp}/edge/{}/{}",
+                kind_seg(e.kind),
+                fingerprint(&e.to_key),
+            ),
         };
-        let target = repo
-            .objects
-            .put(&Object::Collab(obj.clone()))
-            .await?;
+        let target = repo.objects.put(&Object::Collab(obj.clone())).await?;
         tx.set(RefName::new(tracking)?, Ref::Tag(Tag { target, created_at: 0, message: None }));
     }
     tx.commit()?;
@@ -360,6 +356,83 @@ mod tests {
         let adverts = collab_adverts(&repo).await.unwrap();
         assert!(!adverts.iter().any(|r| r.name.as_str().contains(&sfp)),
             "unfollowed author's cache must NOT be advertised");
+    }
+
+    // bole-gvj
+    #[tokio::test]
+    async fn pull_files_cached_by_author() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX};
+
+        // Server B: own profile (public/), follows C, and has C cached (remotes/<Cfp>/).
+        let server = Repository::memory();
+        let b = CollabSigner::from_seed([10u8; 32]);
+        let c = CollabSigner::from_seed([11u8; 32]);
+        server.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        server.publish_edge(&b.sign_edge(c.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+        let cp = c.sign_profile("cee".into(), String::new(), vec![], vec![], 1);
+        let cid = server.objects.put(&Object::Collab(CollabObject::Profile(cp))).await.unwrap();
+        let cfp = fingerprint(&c.public_key());
+        let mut tx = server.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: cid, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        // Client A pulls B.
+        let client = Repository::memory();
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server).await });
+        let peer = collab_pull(&mut cl, &client).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        assert_eq!(peer, b.public_key(), "returns the dialed server's own key");
+        // B filed under remotes/<Bfp>/, C filed under remotes/<Cfp>/ — by intrinsic author.
+        let bfp = fingerprint(&b.public_key());
+        assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{bfp}/profile")).unwrap()).unwrap().is_some(),
+            "server-own profile filed under its author");
+        assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap()).unwrap().is_some(),
+            "cached C profile filed under C, not under B");
+        let _ = COLLAB_PUBLIC_PREFIX;
+    }
+
+    // bole-gvj
+    #[tokio::test]
+    async fn pull_drops_tampered_cached() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let server = Repository::memory();
+        let b = CollabSigner::from_seed([12u8; 32]);
+        let c = CollabSigner::from_seed([13u8; 32]);
+        server.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        server.publish_edge(&b.sign_edge(c.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+        // A TAMPERED C profile cached on B.
+        let mut cp = c.sign_profile("cee".into(), String::new(), vec![], vec![], 1);
+        cp.display_name = "tampered".into();
+        let cid = server.objects.put(&Object::Collab(CollabObject::Profile(cp))).await.unwrap();
+        let cfp = fingerprint(&c.public_key());
+        let mut tx = server.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: cid, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let client = Repository::memory();
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server).await });
+        collab_pull(&mut cl, &client).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        let bfp = fingerprint(&b.public_key());
+        assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{bfp}/profile")).unwrap()).unwrap().is_some(),
+            "valid server profile kept");
+        assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap()).unwrap().is_none(),
+            "tampered cached C profile dropped (no ref)");
     }
 
     // bole-x5u
