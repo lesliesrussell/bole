@@ -613,12 +613,10 @@ tool. It is NOT Git":
 > - **`workspace prune` / `workspace repair`** clean up stale or moved linked
 >   worktree registrations; run them after moving directories or the store.
 
-#### 3.4.6 skills/codex/AGENTS.md and skills/hermes/SKILL.md
+#### 3.4.6 skills/hermes/SKILL.md
 
-Both files have identical content and `description`. Apply the same changes as
+The skill file provides guidance for Hermes Agent workflows with bole. Apply the same changes as
 §3.4.5 (description frontmatter + opening paragraph addendum + critical facts).
-The two files are kept in sync; they serve different agent runtimes (Codex and
-Hermes) but must present the same model.
 
 ### 3.5 Differentiator worked example
 
@@ -823,11 +821,9 @@ bead-closed workstreams are marked "Realized") or purely by convention?
 **Recommendation:** convention first; add CI gate when two or more workstreams
 have landed and diverged.
 
-**OQ7 — Skill file parity enforcement.** `skills/claude-code/SKILL.md`,
-`skills/codex/AGENTS.md`, and `skills/hermes/SKILL.md` must be kept in sync. Is
-there a CI check (e.g., assert their `description` frontmatter is identical) or
-is this manual? **Recommendation:** add a trivial CI step that diffs the three
-files and errors on divergence in the `description` and `Critical facts` sections.
+**OQ7 — Skill file parity enforcement.** `skills/hermes/SKILL.md` must be kept consistent with related agent guidance. Is
+there a CI check (e.g., assert description frontmatter is identical where expected) or
+is this manual? **Recommendation:** add a trivial CI step that diffs relevant sections and errors on divergence in the `description` and `Critical facts` sections.
 
 **OQ8 — Worked example in tests: how to handle WS1 roadmap callouts?** The
 integration test in `tests/example_multi_actor.sh` must skip the `PolicyHook`
