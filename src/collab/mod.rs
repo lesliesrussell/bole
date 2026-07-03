@@ -7,12 +7,16 @@
 pub mod object;
 // bole-18p
 pub mod discovery;
+// bole-p6j
+pub mod trust;
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
     // bole-2zq
     verify_edge, TrustEdge, TrustKind,
 };
+// bole-p6j
+pub use trust::{TrustGraph, VouchSuggestion};
 
 /// The canonical identity of a collaboration participant: an Ed25519 public key.
 /// Petnames and DNS aliases are non-authoritative labels *for* a `Key`.
