@@ -8,6 +8,8 @@ pub mod object;
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
+    // bole-2zq
+    verify_edge, TrustEdge, TrustKind,
 };
 
 /// The canonical identity of a collaboration participant: an Ed25519 public key.
