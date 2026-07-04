@@ -87,6 +87,9 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::workspace::Cmd,
     },
+    // bole-phxz
+    /// Manage `.boleignore` patterns (files/dirs excluded from snapshots).
+    Ignore(commands::ignore::Cmd),
     // bole-ef8
     /// Manage named actors (reusable access credentials).
     Actor {
@@ -240,6 +243,11 @@ async fn run() -> Result<()> {
         Command::Workspace { cmd } => {
             let ctx = open().await?;
             commands::workspace::run(&ctx, &out, cmd).await
+        }
+        // bole-phxz
+        Command::Ignore(cmd) => {
+            let ctx = open().await?;
+            commands::ignore::run(&ctx, &out, cmd).await
         }
         // bole-ef8
         Command::Actor { cmd } => {
