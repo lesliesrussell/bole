@@ -694,3 +694,144 @@ async fn multi_relay_dedups_shared_stranger() {
         "attributed to relay B"
     );
 }
+
+// bole-iz5c
+#[tokio::test]
+async fn relay_search_returns_only_matches_and_ball() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::store::pack::decode_pack;
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::sync::transport::Conn;
+    use bole::sync::wire::{Intent, Message, PROTO_VERSION, CAP_SEARCH};
+
+    // Relay corpus:
+    //  - relay's own profile (public/)
+    //  - matching stranger "Pat" (remotes/)
+    //  - edge X → Pat (incoming to Pat; in the reverse ball — INCLUDE)
+    //  - non-matching stranger "Zed" (remotes/)
+    //  - edge Pat → Zed (outgoing from Pat; NOT reverse-reachable — EXCLUDE)
+    let relay_signer = CollabSigner::from_seed([100u8; 32]);
+    let x = CollabSigner::from_seed([101u8; 32]);
+    let pat = CollabSigner::from_seed([102u8; 32]);
+    let zed = CollabSigner::from_seed([103u8; 32]);
+
+    let relay_repo = bole::Repository::memory();
+    relay_repo
+        .publish_profile(
+            &relay_signer.sign_profile("relay".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_repo,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_repo,
+        CollabObject::TrustEdge(x.sign_edge(pat.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_repo,
+        CollabObject::Profile(zed.sign_profile("Zed".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_repo,
+        CollabObject::TrustEdge(pat.sign_edge(zed.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay_signer2 = CollabSigner::from_seed([100u8; 32]);
+    let srv = tokio::spawn(async move {
+        serve_collab_tcp_once(&listener, &relay_repo, true, Some(&relay_signer2)).await
+    });
+
+    // Client: raw Message exchanges.
+    let mut conn = connect(addr).await;
+
+    // Hello advertising CAP_SEARCH.
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CAP_SEARCH,
+        intent: Intent::Fetch,
+        client_nonce: None,
+    })
+    .await
+    .unwrap();
+
+    // Welcome must advertise CAP_SEARCH (relay mode).
+    let welcome_caps = match conn.recv().await.unwrap() {
+        Message::Welcome { caps, .. } => caps,
+        other => panic!("expected Welcome, got {other:?}"),
+    };
+    assert!(
+        welcome_caps.contains(CAP_SEARCH),
+        "relay Welcome must include CAP_SEARCH"
+    );
+
+    // Send Search for "Pat".
+    conn.send(&Message::Search { term: "Pat".into(), max_hops: 4 })
+        .await
+        .unwrap();
+
+    // Receive Pack + Done.
+    let pack = match conn.recv().await.unwrap() {
+        Message::Pack(p) => p,
+        other => panic!("expected Pack, got {other:?}"),
+    };
+    match conn.recv().await.unwrap() {
+        Message::Done => {}
+        other => panic!("expected Done, got {other:?}"),
+    }
+
+    srv.await.unwrap().unwrap();
+
+    // Decode pack via a throw-away repo so we stay in the public API.
+    let decoded = decode_pack(&pack).unwrap();
+    let tmp = bole::Repository::memory();
+    for (_id, canonical) in &decoded {
+        tmp.objects.put_raw(canonical).await.unwrap();
+    }
+    let mut objects: Vec<CollabObject> = Vec::new();
+    for (id, _) in &decoded {
+        if let Some(bole::Object::Collab(obj)) = tmp.objects.get(id).await.unwrap() {
+            objects.push(obj);
+        }
+    }
+
+    // Pat's profile must be present.
+    assert!(
+        objects
+            .iter()
+            .any(|o| matches!(o, CollabObject::Profile(p) if p.key == pat.public_key())),
+        "Pat's profile must be in the search result"
+    );
+    // Zed's profile must be absent (non-matching term).
+    assert!(
+        !objects
+            .iter()
+            .any(|o| matches!(o, CollabObject::Profile(p) if p.key == zed.public_key())),
+        "Zed's profile must be absent (non-matching)"
+    );
+    // Edge X → Pat (incoming to Pat) must be present.
+    assert!(
+        objects.iter().any(|o| matches!(
+            o,
+            CollabObject::TrustEdge(e) if e.from_key == x.public_key() && e.to_key == pat.public_key()
+        )),
+        "edge X→Pat must be present (in the reverse ball)"
+    );
+    // Edge Pat → Zed (outgoing from Pat) must be absent.
+    assert!(
+        !objects.iter().any(|o| matches!(
+            o,
+            CollabObject::TrustEdge(e) if e.from_key == pat.public_key() && e.to_key == zed.public_key()
+        )),
+        "edge Pat→Zed must be absent (outgoing from match, not reverse-reachable)"
+    );
+}
