@@ -54,6 +54,11 @@ CLI commands discover the on-disk repo by walking up from the current directory
   human text is not. `--quiet` suppresses non-error output.
 - **Snapshots are created from the work tree**, not staged files. There is no
   "add"/staging step.
+- **`.boleignore` excludes files from snapshots.** A gitignore-syntax file at the
+  work-tree root; matching files and directories are skipped by the work-tree
+  walk (ignored dirs are pruned whole). Manage it with `bole ignore`. `.bole/`
+  and symlinks are always excluded regardless, and `.boleignore` itself is a
+  normal tracked, versioned file.
 - **Timeline policy is enforced**: `ff`/`append` timelines reject an advance to a
   non-descendant; `unrestricted` accepts any snapshot.
 - **Secrets need a key**: a 64-hex (32-byte) key via `$BOLE_KEY` or
@@ -87,6 +92,7 @@ bole snapshot list                            # history, newest first
 - **Lifecycle**: `init`, `status`, `repo info`
 - **History**: `snapshot create|show|list|parents|diff`, `timeline create|list|show|advance|delete` (alias `branch`/`branches`), `tag create|list|show|delete`
 - **Work tree**: `workspace open|show|diff|materialize|clear|add|list|remove` (add/list/remove = linked worktrees sharing one store)
+- **Ignore**: `ignore <pattern>...` (bare = add), `ignore list|remove <pattern>...|check <path>...` — gitignore-style `.boleignore` at the work-tree root; ignored files/dirs are excluded from snapshots. `check` is a dry-run using the same matcher as the snapshot walk.
 - **Merge**: `merge check <src> <dst>` (dry run), `merge run <src> <dst>` (advances dst when clean; reports conflicts otherwise)
 - **Access**: `actor create|grant-path|grant-timeline|use|show|list`, `acl path|timeline protect|unprotect|list`, `acl can-{read,write}-{path,timeline}`, `acl explain-path --actor <a> <path>` (full read/write decision trace — the "why is this hidden?" answer)
 - **Signed approvals**: `policy require-approval <pattern> --needed <n>` (gate advance/merge on N signed approvals), `policy list|unrequire`, `approver add <id> --public-key|--seed <64hex>`, `approver list`, `approve <timeline> <snapshot> --key-id <id>` (sign a head-bound attestation; enforced locally)
