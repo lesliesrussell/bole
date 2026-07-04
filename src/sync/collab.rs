@@ -260,6 +260,83 @@ pub async fn collab_fetch_transient(conn: &mut dyn Conn) -> Result<Vec<CollabObj
     Ok(out)
 }
 
+// bole-yc9x
+/// Authenticated transient fetch: sends a fresh single-use nonce, requires the
+/// relay to sign it (`verify_relay_challenge` against `pinned_key`), then fetches
+/// and verifies objects fail-closed. Errors (no/invalid signature, transport)
+/// bubble up so the caller can skip this relay. Writes nothing.
+pub async fn collab_fetch_authenticated(
+    conn: &mut dyn Conn,
+    pinned_key: &Key,
+) -> Result<Vec<CollabObject>> {
+    use rand::RngCore;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CapSet::EMPTY,
+        intent: Intent::Fetch,
+        client_nonce: Some(nonce),
+    })
+    .await?;
+    let (refs, relay_sig) = match conn.recv().await? {
+        Message::Welcome { refs, relay_sig, .. } => (refs, relay_sig),
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("collab: expected Welcome".into())),
+    };
+    let sig = relay_sig.ok_or_else(|| Error::Storage("relay did not authenticate".into()))?;
+    if !crate::collab::verify_relay_challenge(pinned_key, &nonce, &sig) {
+        return Err(Error::Storage("relay auth signature invalid".into()));
+    }
+    let want: Vec<_> = refs.iter().map(|r| r.target).collect();
+    conn.send(&Message::HaveWant { want, have: vec![] }).await?;
+    let pack = match conn.recv().await? {
+        Message::Pack(p) => p,
+        _ => return Err(Error::Storage("collab: expected Pack".into())),
+    };
+    match conn.recv().await? {
+        Message::Done => {}
+        other => return Err(Error::Storage(format!("collab: expected Done, got {other:?}"))),
+    }
+    let mut out = Vec::new();
+    for (_id, canonical) in decode_pack(&pack)? {
+        if let Ok(Object::Collab(obj)) = crate::codec::deserialize(&canonical) {
+            if verified(&obj) {
+                out.push(obj);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// bole-yc9x
+/// Queries every pinned relay: authenticate (possession proof against the pinned
+/// key), fetch transiently, verify fail-closed. Unreachable or auth-failing relays
+/// are skipped (completeness degrades, soundness holds). Merges + ranks once with
+/// per-relay attribution. Mutates no local state.
+pub async fn query_relay_set(
+    self_key: &Key,
+    own_edges: &[crate::collab::TrustEdge],
+    relays: &[crate::collab::RelayPin],
+    term: &str,
+    max_hops: u8,
+) -> Vec<crate::collab::discovery::StrangerHit> {
+    let mut per_relay: Vec<(Key, Vec<CollabObject>)> = Vec::new();
+    for pin in relays {
+        let stream = match tokio::net::TcpStream::connect(&pin.endpoint).await {
+            Ok(s) => s,
+            Err(_) => continue, // unreachable: skip
+        };
+        let mut conn = crate::sync::transport::TcpConn::new(stream);
+        match collab_fetch_authenticated(&mut conn, &pin.key).await {
+            Ok(objs) => per_relay.push((pin.key, objs)),
+            Err(_) => continue, // auth-fail / transport error: skip
+        }
+    }
+    crate::collab::discovery::rank_strangers_multi(self_key, own_edges, &per_relay, term, max_hops)
+}
+
 // bole-g7i
 #[cfg(test)]
 mod tests {
