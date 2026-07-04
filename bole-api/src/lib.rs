@@ -1,6 +1,7 @@
 // bole-3xj5
 //! bole-api: HTTP/JSON read API over a bole repository.
 
+pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handlers;

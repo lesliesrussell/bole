@@ -12,3 +12,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/status", get(handlers::status::get_status))
         .with_state(state)
 }
+
+// bole-3xj5
+use crate::auth::{principal_kind, RequestAuth};
+use axum::Json;
+use serde_json::json;
+
+/// A test-only router that echoes the resolved principal. Not mounted in the
+/// real server; used by auth tests.
+pub fn debug_auth_router(state: AppState) -> Router {
+    Router::new()
+        .route("/debug/whoami", get(debug_whoami))
+        .with_state(state)
+}
+
+async fn debug_whoami(auth: RequestAuth) -> Json<serde_json::Value> {
+    Json(json!({
+        "principal": principal_kind(&auth.principal),
+        "actor": auth.actor,
+    }))
+}

@@ -54,3 +54,46 @@ async fn unknown_route_is_404_envelope() {
     assert_eq!(json["error"]["code"], "not_found");
     assert!(json["error"]["message"].is_string());
 }
+
+// bole-3xj5
+#[tokio::test]
+async fn token_maps_to_actor_principal() {
+    use bole::sync::authn::Principal;
+    let (_dir, state) = state_with_temp_repo().await;
+
+    // Build config mapping a token to actor "alice".
+    let cfg = AuthConfig::parse("[tokens]\n\"t-secret\" = \"alice\"\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    // A debug router that echoes the resolved principal.
+    let app = bole_api::router::debug_auth_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/debug/whoami")
+                .header("authorization", "Bearer t-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["principal"], "Token");
+    assert_eq!(json["actor"], "alice");
+    let _ = Principal::Anonymous; // keep the import used
+}
+
+#[tokio::test]
+async fn no_credential_is_anonymous() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri("/debug/whoami").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["principal"], "Anonymous");
+    assert_eq!(json["actor"], serde_json::Value::Null);
+}
