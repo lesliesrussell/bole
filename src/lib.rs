@@ -72,6 +72,8 @@ pub use collab::{fingerprint, verify_profile, CollabObject, CollabSigner, Key, P
     // bole-2zq
     verify_edge, TrustEdge, TrustKind,
 };
+// bole-obb
+pub use collab::trust::TrustHop;
 
 pub(crate) mod codec;
 

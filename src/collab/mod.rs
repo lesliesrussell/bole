@@ -20,7 +20,7 @@ pub use object::{
     verify_edge, TrustEdge, TrustKind,
 };
 // bole-p6j
-pub use trust::{TrustGraph, VouchSuggestion};
+pub use trust::{TrustGraph, TrustHop, VouchSuggestion};
 // bole-t7c
 pub use naming::{Namer, PetnameResolution};
 // bole-0ms

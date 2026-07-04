@@ -9,6 +9,14 @@ pub struct TrustGraph {
     edges: Vec<TrustEdge>,
 }
 
+// bole-obb
+/// One hop on a trust path: the key reached and the edge kind that led into it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustHop {
+    pub key: Key,
+    pub via: TrustKind,
+}
+
 /// A petname suggested for a key by the trust graph, with its trust route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VouchSuggestion {
@@ -116,6 +124,61 @@ impl TrustGraph {
         }
         out
     }
+
+    // bole-obb
+    /// Trust neighbours of `from`: the `to_key` of every `Follow`/`Vouch` out-edge,
+    /// paired with the edge kind. When both a `Follow` and a `Vouch` edge connect
+    /// `from` to the same key, `Vouch` is recorded (the stronger link).
+    fn trust_neighbors(&self, from: &Key) -> Vec<(Key, TrustKind)> {
+        let mut best: BTreeMap<Key, TrustKind> = BTreeMap::new();
+        for e in &self.edges {
+            if &e.from_key == from && matches!(e.kind, TrustKind::Follow | TrustKind::Vouch) {
+                best.entry(e.to_key)
+                    .and_modify(|v| {
+                        if e.kind == TrustKind::Vouch {
+                            *v = TrustKind::Vouch;
+                        }
+                    })
+                    .or_insert(e.kind);
+            }
+        }
+        best.into_iter().collect()
+    }
+
+    // bole-obb
+    /// Shortest bounded trust path from `root` to `target` over combined
+    /// `Follow`∪`Vouch` edges, or `None` if `target` is unreachable within
+    /// `max_hops` edges. The returned vector is the ordered hops after `root`,
+    /// ending at `target`; each hop records the edge kind traversed into it.
+    /// A relay can only withhold or inject edges (injected fakes never verified
+    /// into the graph), so a returned path is always composed of real signed edges.
+    pub fn trust_path(&self, root: &Key, target: &Key, max_hops: u8) -> Option<Vec<TrustHop>> {
+        if root == target {
+            return Some(Vec::new());
+        }
+        let mut paths: BTreeMap<Key, Vec<TrustHop>> = BTreeMap::new();
+        paths.insert(*root, Vec::new());
+        let mut q: VecDeque<Key> = VecDeque::new();
+        q.push_back(*root);
+        while let Some(node) = q.pop_front() {
+            let node_path = paths.get(&node).expect("visited nodes have a path").clone();
+            if node_path.len() as u8 == max_hops {
+                continue;
+            }
+            for (next, via) in self.trust_neighbors(&node) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = paths.entry(next) {
+                    let mut p = node_path.clone();
+                    p.push(TrustHop { key: next, via });
+                    if next == *target {
+                        return Some(p);
+                    }
+                    slot.insert(p);
+                    q.push_back(next);
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +282,73 @@ mod tests {
         let paths = g.follow_paths(&ak, 1);
         assert!(paths.contains_key(&bk), "b at depth 1 included");
         assert!(!paths.contains_key(&ck), "c at depth 2 excluded at hops=1");
+    }
+
+    // bole-obb
+    #[test]
+    fn trust_path_mixed_follow_vouch() {
+        let (a, ak) = k(1);
+        let (b, bk) = k(2);
+        let (c, ck) = k(3);
+        let (_d, dk) = k(4);
+        // a -follow-> b -vouch-> c -follow-> d
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            b.sign_edge(ck, TrustKind::Vouch, Some("cee".into()), 1),
+            c.sign_edge(dk, TrustKind::Follow, None, 1),
+        ]);
+        let path = g.trust_path(&ak, &dk, 4).unwrap();
+        assert_eq!(path, vec![
+            TrustHop { key: bk, via: TrustKind::Follow },
+            TrustHop { key: ck, via: TrustKind::Vouch },
+            TrustHop { key: dk, via: TrustKind::Follow },
+        ]);
+    }
+
+    // bole-obb
+    #[test]
+    fn trust_path_none_beyond_max() {
+        let (a, ak) = k(5);
+        let (b, bk) = k(6);
+        let (_c, ck) = k(7);
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            b.sign_edge(ck, TrustKind::Follow, None, 1),
+        ]);
+        assert!(g.trust_path(&ak, &ck, 1).is_none(), "c is 2 hops, unreachable at max_hops=1");
+        assert!(g.trust_path(&ak, &ck, 2).is_some(), "reachable at max_hops=2");
+    }
+
+    // bole-obb
+    #[test]
+    fn trust_path_prefers_vouch() {
+        let (a, ak) = k(8);
+        let (_b, bk) = k(9);
+        // a has BOTH a follow and a vouch edge to b -> the hop records Vouch.
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            a.sign_edge(bk, TrustKind::Vouch, Some("bee".into()), 1),
+        ]);
+        let path = g.trust_path(&ak, &bk, 4).unwrap();
+        assert_eq!(path, vec![TrustHop { key: bk, via: TrustKind::Vouch }]);
+    }
+
+    // bole-obb
+    #[test]
+    fn trust_path_shortest() {
+        let (a, ak) = k(10);
+        let (b, bk) = k(11);
+        let (c, ck) = k(12);
+        let (_t, tk) = k(13);
+        // Two routes to t: a->t direct (follow) and a->b->c->t. Shortest wins.
+        let g = TrustGraph::from_edges(vec![
+            a.sign_edge(tk, TrustKind::Follow, None, 1),
+            a.sign_edge(bk, TrustKind::Follow, None, 1),
+            b.sign_edge(ck, TrustKind::Follow, None, 1),
+            c.sign_edge(tk, TrustKind::Follow, None, 1),
+        ]);
+        let path = g.trust_path(&ak, &tk, 4).unwrap();
+        assert_eq!(path.len(), 1, "direct 1-hop route is shortest");
+        assert_eq!(path[0].key, tk);
     }
 }
