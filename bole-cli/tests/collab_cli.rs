@@ -174,6 +174,54 @@ fn cli_discover_relay_shows_stranger() {
     assert!(tl.as_array().map(|a| a.is_empty()).unwrap_or(true), "querier followed nobody via relay search");
 }
 
+// bole-0vh
+#[test]
+fn cli_discover_relay_trust_path() {
+    use std::process::Stdio;
+    fn serve(dir: &std::path::Path, args: &[&str]) -> std::process::Child {
+        let mut c = bin();
+        c.args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null());
+        c.spawn().unwrap()
+    }
+    // Publisher P (a stranger to the querier) serves.
+    let ptmp = tempfile::tempdir().unwrap(); let p = ptmp.path();
+    ok(p, &["init", "."], None);
+    let pseed = "fa".repeat(32);
+    ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
+    let paddr = "127.0.0.1:47901";
+    let mut pchild = serve(p, &["node", "serve", "--listen", paddr]);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Relay R follows+pulls P (so P is in R's aggregate), then serves --relay.
+    let rtmp = tempfile::tempdir().unwrap(); let r = rtmp.path();
+    ok(r, &["init", "."], None);
+    let rseed = "eb".repeat(32);
+    ok(r, &["profile", "set", "--display-name", "Relay"], Some(&rseed));
+    let ppull = ok(r, &["discover", "pull", paddr, "--json"], Some(&rseed));
+    let pkey = serde_json::from_slice::<serde_json::Value>(&ppull.stdout).unwrap()["pulled"].as_str().unwrap().to_string();
+    let _ = pchild.kill(); let _ = pchild.wait();
+    let raddr = "127.0.0.1:47902";
+    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"]);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Querier Q follows P (its own edge), then searches the relay: P should be
+    // connected (1 hop) via a follow edge; trust_path non-null.
+    let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
+    ok(q, &["init", "."], None);
+    let qseed = "dc".repeat(32);
+    ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
+    ok(q, &["trust", "follow", &pkey], Some(&qseed));
+    let out = ok(q, &["discover", "relay", raddr, "Pat", "--json"], Some(&qseed));
+    let _ = rchild.kill(); let _ = rchild.wait();
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pat = v.as_array().unwrap().iter().find(|r| r["display_name"] == "Pat").expect("Pat found");
+    assert_eq!(pat["reach"], "stranger");
+    assert!(pat["trust_path"].is_array(), "connected stranger has a trust_path: {}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(pat["hops"], 1);
+    assert_eq!(pat["trust_path"][0]["via"], "follow");
+}
+
 // bole-95v
 #[test]
 fn cli_three_node_transitive() {
