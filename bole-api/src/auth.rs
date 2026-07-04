@@ -45,6 +45,19 @@ fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiEr
             return verify_signed(rest, parts, state);
         }
     }
+    // bole-3xj5
+    // mTLS via trusted-proxy header: only honored when the immediate peer is an
+    // allowlisted proxy (the proxy is trusted to have verified the client cert).
+    if let Some(subject) = parts.headers.get("x-bole-client-subject").and_then(|v| v.to_str().ok()) {
+        let peer_ip = peer_addr(parts).map(|a| a.ip().to_string());
+        let trusted = peer_ip
+            .as_deref()
+            .map(|ip| state.config.trusted_proxies.iter().any(|t| t == ip))
+            .unwrap_or(false);
+        if trusted {
+            return Ok(Principal::Mtls(subject.to_string()));
+        }
+    }
     Ok(Principal::Anonymous)
 }
 
@@ -117,9 +130,7 @@ fn extract_param(s: &str, name: &str) -> Option<String> {
     None
 }
 
-/// The `ConnectInfo` peer address, used by the mTLS proxy-header arm (Task 5).
-/// Extracted here so the signature is stable; unused until Task 5.
-#[allow(dead_code)]
+/// The `ConnectInfo` peer address, used by the mTLS proxy-header arm.
 pub(crate) fn peer_addr(parts: &Parts) -> Option<std::net::SocketAddr> {
     parts.extensions.get::<ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0)
 }

@@ -37,6 +37,11 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&cli.listen).await?;
     tracing::info!("bole-api listening on {}", cli.listen);
-    axum::serve(listener, build_router(state)).await?;
+    // bole-3xj5
+    axum::serve(
+        listener,
+        build_router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

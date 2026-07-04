@@ -181,3 +181,52 @@ async fn no_credential_is_anonymous() {
     assert_eq!(json["principal"], "Anonymous");
     assert_eq!(json["actor"], serde_json::Value::Null);
 }
+
+// bole-3xj5
+fn with_peer(req: Request<Body>, ip: &str) -> Request<Body> {
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+    let mut req = req;
+    let addr: SocketAddr = format!("{ip}:9999").parse().unwrap();
+    req.extensions_mut().insert(ConnectInfo(addr));
+    req
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn mtls_header_honored_from_trusted_peer() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = bole_api::router::debug_auth_router(state);
+    let req = with_peer(
+        Request::builder()
+            .uri("/debug/whoami")
+            .header("x-bole-client-subject", "CN=bob")
+            .body(Body::empty())
+            .unwrap(),
+        "127.0.0.1",
+    );
+    let json = body_json(app.oneshot(req).await.unwrap()).await;
+    assert_eq!(json["principal"], "Mtls");
+    assert_eq!(json["actor"], "bob");
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn mtls_header_ignored_from_untrusted_peer() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = bole_api::router::debug_auth_router(state);
+    let req = with_peer(
+        Request::builder()
+            .uri("/debug/whoami")
+            .header("x-bole-client-subject", "CN=bob")
+            .body(Body::empty())
+            .unwrap(),
+        "10.0.0.5",
+    );
+    let json = body_json(app.oneshot(req).await.unwrap()).await;
+    assert_eq!(json["principal"], "Anonymous");
+}
