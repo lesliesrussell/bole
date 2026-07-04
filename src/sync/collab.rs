@@ -202,6 +202,45 @@ pub async fn serve_collab_tcp_once(
     serve_collab(&mut conn, repo, relay).await
 }
 
+// bole-63b
+/// Fetches a node's advertised public collab objects over `conn` and returns the
+/// signature-verified ones, WITHOUT touching any repository. Pure fetch+verify:
+/// used by relay stranger-search, where results are transient and never persisted.
+/// Fail-closed: any object whose signature does not verify is dropped.
+pub async fn collab_fetch_transient(conn: &mut dyn Conn) -> Result<Vec<CollabObject>> {
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CapSet::EMPTY,
+        intent: Intent::Fetch,
+    })
+    .await?;
+    let refs = match conn.recv().await? {
+        Message::Welcome { refs, .. } => refs,
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("collab: expected Welcome".into())),
+    };
+    let want: Vec<_> = refs.iter().map(|r| r.target).collect();
+    conn.send(&Message::HaveWant { want, have: vec![] }).await?;
+    let pack = match conn.recv().await? {
+        Message::Pack(p) => p,
+        _ => return Err(Error::Storage("collab: expected Pack".into())),
+    };
+    match conn.recv().await? {
+        Message::Done => {}
+        other => return Err(Error::Storage(format!("collab: expected Done, got {other:?}"))),
+    }
+    let mut out = Vec::new();
+    for (_id, canonical) in decode_pack(&pack)? {
+        if let Ok(Object::Collab(obj)) = crate::codec::deserialize(&canonical) {
+            if verified(&obj) {
+                out.push(obj);
+            }
+        }
+    }
+    Ok(out)
+}
+
 // bole-g7i
 #[cfg(test)]
 mod tests {
@@ -541,5 +580,67 @@ mod tests {
         let res = collab_pull(&mut cl, &client_repo).await;
         srv.await.unwrap().unwrap();
         assert!(res.is_err(), "pull must error when no valid profile is served");
+    }
+
+    // bole-63b
+    #[tokio::test]
+    async fn transient_fetch_returns_verified() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::{CollabObject, CollabSigner};
+
+        // A relay-style server with two authors cached (B own profile + C cached).
+        let server = Repository::memory();
+        let b = CollabSigner::from_seed([93u8; 32]);
+        let c = CollabSigner::from_seed([94u8; 32]);
+        server.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // cache C directly under remotes and serve with relay=true so it's advertised
+        let cp = c.sign_profile("cee".into(), String::new(), vec![], vec![], 1);
+        let cid = server.objects.put(&Object::Collab(CollabObject::Profile(cp))).await.unwrap();
+        let cfp = crate::collab::fingerprint(&c.public_key());
+        let mut tx = server.refs.transaction();
+        tx.set(crate::refs::RefName::new(format!("{}{cfp}/profile", crate::repo::collab::COLLAB_REMOTES_PREFIX)).unwrap(),
+               crate::refs::Ref::Tag(crate::refs::Tag { target: cid, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server, true).await });
+        let objs = collab_fetch_transient(&mut cl).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        let names: Vec<String> = objs.iter().filter_map(|o| match o {
+            CollabObject::Profile(p) => Some(p.display_name.clone()),
+            _ => None,
+        }).collect();
+        assert!(names.contains(&"bob".to_string()) && names.contains(&"cee".to_string()),
+            "transient fetch returns both verified profiles");
+    }
+
+    // bole-63b
+    #[tokio::test]
+    async fn transient_fetch_drops_tampered() {
+        use crate::sync::transport::InProcessConn;
+        use crate::collab::{CollabObject, CollabSigner};
+
+        let server = Repository::memory();
+        let b = CollabSigner::from_seed([95u8; 32]);
+        server.publish_profile(&b.sign_profile("bob".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // A tampered profile pinned under public/ (so it's advertised) but won't verify.
+        let mut bad = b.sign_profile("origname".into(), String::new(), vec![], vec![], 2);
+        bad.display_name = "tampered".into();
+        let bid = server.objects.put(&Object::Collab(CollabObject::Profile(bad))).await.unwrap();
+        let mut tx = server.refs.transaction();
+        tx.set(crate::refs::RefName::new(format!("{}profile/bad", crate::repo::collab::COLLAB_PUBLIC_PREFIX)).unwrap(),
+               crate::refs::Ref::Tag(crate::refs::Tag { target: bid, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let (mut s, mut cl) = InProcessConn::pair();
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server, true).await });
+        let objs = collab_fetch_transient(&mut cl).await.unwrap();
+        srv.await.unwrap().unwrap();
+
+        assert!(objs.iter().all(|o| !matches!(o, CollabObject::Profile(p) if p.display_name == "tampered")),
+            "tampered object is dropped fail-closed");
+        assert!(objs.iter().any(|o| matches!(o, CollabObject::Profile(p) if p.display_name == "bob")),
+            "valid object still returned");
     }
 }
