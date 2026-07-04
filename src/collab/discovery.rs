@@ -19,7 +19,7 @@ pub trait PublicObjectSource {
 use std::collections::BTreeMap;
 
 use crate::collab::trust::{TrustGraph, TrustHop};
-use crate::collab::{fingerprint, Key, Profile, TrustEdge, TrustKind};
+use crate::collab::{fingerprint, key_hex, Key, Profile, TrustEdge, TrustKind};
 
 /// A single discovery hit: the object, the key that published it, and how far /
 /// by what route it was reached. Every hit is auditable back to a key + reason.
@@ -185,7 +185,7 @@ pub fn rank_strangers(
             let term_matches = p.display_name.contains(term)
                 || p.bio.contains(term)
                 || p.dns_aliases.iter().any(|a| a.contains(term))
-                || fingerprint(&p.key).contains(term);
+                || key_hex(&p.key).contains(term); // bole-gp0
             if !term_matches {
                 continue;
             }
@@ -377,5 +377,35 @@ mod tests {
         let hits = rank_strangers(&me.public_key(), &own_edges, &corpus, "cand", 4);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].key, vouched.public_key(), "equal-length vouch path ranks above follow");
+    }
+
+    // bole-gp0
+    #[tokio::test]
+    async fn rank_matches_raw_key_hex_not_fingerprint() {
+        use crate::collab::{key_hex, CollabSigner};
+        let me = CollabSigner::from_seed([30u8; 32]);
+        let stranger = CollabSigner::from_seed([31u8; 32]);
+        // The stranger's display_name does NOT contain the term; only its raw key
+        // hex does. Searching the full 64-char raw hex must find it — that hex can
+        // never be a substring of the equal-length, different-valued fingerprint,
+        // so a hit proves we match raw key hex (WS8d parity), not the fingerprint.
+        let raw = key_hex(&stranger.public_key());
+        assert!(
+            !crate::collab::fingerprint(&stranger.public_key()).contains(&raw),
+            "raw key hex must not appear in the fingerprint (precondition)"
+        );
+        let corpus = vec![CollabObject::Profile(stranger.sign_profile(
+            "zzz".into(),
+            String::new(),
+            vec![],
+            vec![],
+            1,
+        ))];
+        let hits = rank_strangers(&me.public_key(), &[], &corpus, &raw, 4);
+        assert_eq!(hits.len(), 1, "stranger found by its raw key hex");
+        assert_eq!(hits[0].key, stranger.public_key());
+        // The same corpus is NOT found when searching by an unrelated term.
+        let none = rank_strangers(&me.public_key(), &[], &corpus, "no-such-term", 4);
+        assert!(none.is_empty(), "unrelated term matches nothing");
     }
 }
