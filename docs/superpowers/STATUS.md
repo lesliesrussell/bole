@@ -7,11 +7,20 @@
 ## What this is
 
 **bole** — a content-addressed, distributed, access-controlled VCS with humans *and* agents as
-first-class actors. **Grove** — the collaboration hub built on top ("a better GitHub than GitHub"),
-whose headline pillars are: **secure · distributed · discoverable · + product surfaces** (PRs,
-discussions, per-dev landing pages).
+first-class actors. It is the **headless backend / API** for Grove.
 
-Scale today: ~23.7k LOC, 492 tests (green), broad CLI. Three layers exist; the product surfaces do not.
+**Grove** — the user-facing collaboration hub frontend ("a better GitHub than GitHub"). **Built later,
+in a separate repo. Out of scope here.** No UI, rendering, or web app lives in bole.
+
+**bole's job:** expose *every operation a great hub frontend needs* — profiles, repos, timelines, PRs,
+discussions, discovery, trust, access — as a clean, consumable, JSON-serializable API, and enforce the
+rules. Grove renders; bole serves the data and owns the invariants.
+
+Scale today: ~23.7k LOC, 492 tests (green), broad CLI. **"All the API endpoints" splits in two:**
+(1) **domain operations** — the backend features themselves (transport-agnostic; PR/board/profile-bundle
+still missing); (2) **transport** — how Grove calls them. Today the machine surface is the Rust library
++ CLI `--json` (~24 command groups). There is **no product-facing API server** (HTTP/JSON-RPC); the only
+network surface is the p2p `node serve` wire protocol, which is not what a web frontend calls.
 
 ## Pillar scorecard
 
@@ -21,9 +30,10 @@ Scale today: ~23.7k LOC, 492 tests (green), broad CLI. Three layers exist; the p
 | **Secure (access)** | label-lattice ACL (`acl/`, largest module), clearances, policy hooks, authority/signing | WS1-O2 approval surfacing, O4 attestation format, O5 unknown-hook fail-closed, audit logging, timeline-policy *enforcement* (verify) |
 | **Distributed** | WS5 sync (pack-delta wire), WS8b networked node, relays, cache-and-forward | node liveness (concurrent serve daemon + poll), GC-lease-on-stream |
 | **Discoverable** | WS8a–e substrate + trust-paths; WS8f-a/b/c1 relays, multi-relay, server-side search, cost bounds | WS8f-c2 rate-limit/budgets, c3 denylists, c4 querier filters, WS8f-d reputation, DNS alias verify, Profile recency timestamp, persistent search index |
-| **PR system** | — (only the reserved `Review` trust-edge kind) | **everything** — change-proposal + review-thread semantics |
-| **Message board** | — | **everything** — discussion/board objects + surface |
-| **Dev landing page** | `Profile{display_name,bio,endpoints,dns_aliases}` (data only) | render + serve the profile as a discoverable hub page |
+| **PR system** (API) | — (only the reserved `Review` trust-edge kind) | change-proposal + review-thread objects + operations (create/list/comment/resolve/merge) — no UI |
+| **Message board** (API) | — | discussion/board objects + operations (post/list/reply) — no UI |
+| **Dev landing page** (API) | `Profile{…}` object (data only) | a *profile-bundle query* — profile + a dev's public repos/timelines + trust graph — as JSON. Grove renders it |
+| **Transport / API server** | Rust library + CLI `--json` | product-facing HTTP/JSON-RPC layer Grove calls (only p2p `node serve` exists today) |
 
 ## Shipped tags (chronological)
 
@@ -66,7 +76,17 @@ Tracked in beads (`bd list`). Grouped by track; see each spec's scope-boundary s
 
 ## Suggested next decision
 
-With this map: either (a) resume discovery hardening (c2/c3/c4/d — incremental), or (b) pivot to a
-**product surface** — recommended, starting with the **dev landing page** (cheapest, Profile exists)
-or committing to the **PR system** (headline, heavier). Pick the pillar, then brainstorm → spec → plan
-→ subagent-driven build as usual.
+bole is a **backend API**; Grove (frontend) comes later in a separate repo. So the target is
+**API completeness**, in two layers:
+
+- **Domain operations** (transport-agnostic backend features): PR objects + ops, board objects + ops,
+  and a profile-bundle query. These are real substance a frontend needs and don't exist yet. Build as
+  library API + CLI `--json` (JSON-clean by construction, so any transport can wrap them).
+- **Transport / API server**: an HTTP/JSON-RPC surface Grove calls. Recommended to **defer** the concrete
+  server until Grove's stack/needs are known (avoid building an HTTP API for a client that doesn't exist
+  yet and may want a specific shape) — but keep every operation JSON-serializable so the veneer is thin
+  when it lands. Alternatively, stand up a minimal `bole serve --api` now to pin the contract early.
+
+Recommended first build: the **profile-bundle query** (cheapest — `Profile` + repos/timelines/trust all
+exist, just needs an aggregating read op + `--json`), then the **PR system** (headline, heavier). Pick,
+then brainstorm → spec → plan → subagent-driven build.
