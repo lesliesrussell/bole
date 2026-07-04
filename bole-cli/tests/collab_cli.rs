@@ -391,3 +391,65 @@ fn cli_discover_relay_set_merged_attributed() {
         "relay set query must not persist Pat into local discovery neighborhood: {dqv}"
     );
 }
+
+// bole-mbz6
+/// `discover relay --endpoint` now uses server-side search (Gate 4 swap).
+/// This E2E proves the optimization is transparent: the output shape is
+/// identical to the whole-aggregate path — reach "stranger", non-null
+/// trust_path, correct hops — even though the relay only sends back the
+/// matching objects rather than the full corpus.
+#[test]
+fn cli_discover_relay_search_transparent() {
+    use std::process::Stdio;
+    fn serve(dir: &std::path::Path, args: &[&str], seed: Option<&str>) -> std::process::Child {
+        let mut c = bin();
+        c.args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(s) = seed {
+            c.env("BOLE_COLLAB_KEY", s);
+        }
+        c.spawn().unwrap()
+    }
+
+    // Publisher P ("Pat") — serves briefly so the relay can pull.
+    let ptmp = tempfile::tempdir().unwrap(); let p = ptmp.path();
+    ok(p, &["init", "."], None);
+    let pseed = "f3".repeat(32);
+    ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
+    let paddr = "127.0.0.1:48101";
+    let mut pchild = serve(p, &["node", "serve", "--listen", paddr], None);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Relay R: follows+pulls P (P is in R's aggregate), then serves --relay.
+    let rtmp = tempfile::tempdir().unwrap(); let r = rtmp.path();
+    ok(r, &["init", "."], None);
+    let rseed = "e3".repeat(32);
+    ok(r, &["profile", "set", "--display-name", "Relay"], Some(&rseed));
+    let ppull = ok(r, &["discover", "pull", paddr, "--json"], Some(&rseed));
+    let pkey = serde_json::from_slice::<serde_json::Value>(&ppull.stdout).unwrap()["pulled"]
+        .as_str().unwrap().to_string();
+    let _ = pchild.kill(); let _ = pchild.wait();
+    let raddr = "127.0.0.1:48102";
+    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"], Some(&rseed));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Querier Q: follows P (direct edge → trust_path non-null at 1 hop),
+    // then queries the relay via --endpoint (ad-hoc, now uses collab_search).
+    let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
+    ok(q, &["init", "."], None);
+    let qseed = "d5".repeat(32);
+    ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
+    ok(q, &["trust", "follow", &pkey], Some(&qseed));
+    let out = ok(q, &["discover", "relay", "Pat", "--endpoint", raddr, "--json"], Some(&qseed));
+    let _ = rchild.kill(); let _ = rchild.wait();
+
+    // The search-transparent path must produce the same result shape as the
+    // whole-aggregate (WS8d) path: stranger reach, non-null trust_path, 1 hop.
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pat = v.as_array().unwrap().iter()
+        .find(|r| r["display_name"] == "Pat")
+        .expect("Pat found via server-side search");
+    assert_eq!(pat["reach"], "stranger", "reach must be stranger: {pat}");
+    assert!(pat["trust_path"].is_array(), "connected stranger has a trust_path: {}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(pat["hops"], 1, "direct follow = 1 hop: {pat}");
+    assert_eq!(pat["trust_path"][0]["via"], "follow", "edge type is follow: {pat}");
+}
