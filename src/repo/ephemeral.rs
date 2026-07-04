@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
+// bole-phxz
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error::{Error, Result};
 use crate::object::{EntryKind, Object, ObjectId, Snapshot, Tree, TreeEntry};
@@ -30,6 +32,11 @@ use crate::store::ObjectStore;
 /// whether it is a directory (primary worktree) or a pointer file (linked
 /// worktree). Mirrors the CLI's `context::REPO_DIR`.
 pub const REPO_DIR: &str = ".bole";
+
+// bole-phxz
+/// The workspace-root ignore file. Patterns use gitignore semantics; the file
+/// is itself a tracked, versioned file (not special-cased out of snapshots).
+pub const IGNORE_FILE: &str = ".boleignore";
 
 /// A path-level diff between two flat `path → blob id` maps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -364,11 +371,26 @@ impl<'a> DiskWorkspace<'a> {
         self.root.join(path)
     }
 
+    // bole-phxz
+    /// Builds the gitignore matcher from the root `.boleignore`. A missing file
+    /// yields an empty matcher (nothing ignored); a malformed pattern is dropped
+    /// rather than failing the walk.
+    fn ignore_matcher(&self) -> Gitignore {
+        let mut builder = GitignoreBuilder::new(&self.root);
+        // `add` returns `Some(err)` when the file is missing or a line fails to
+        // parse; in both cases we proceed with whatever parsed successfully.
+        let _ = builder.add(self.root.join(IGNORE_FILE));
+        builder.build().unwrap_or_else(|_| Gitignore::empty())
+    }
+
     /// The single disk-walk implementation: stores each non-excluded regular
     /// file as a blob and returns `path → blob id` with forward-slash paths
     /// relative to `root`. Skips `.bole` (dir or pointer file) and all symlinks.
     async fn collect(&self) -> Result<BTreeMap<String, ObjectId>> {
         let mut out = BTreeMap::new();
+        // bole-phxz: gitignore-compatible matcher from the root `.boleignore`
+        // (empty and harmless if the file is absent or unparseable).
+        let ignore = self.ignore_matcher();
         // Iterative walk to avoid async recursion.
         let mut stack = vec![self.root.clone()];
         while let Some(current) = stack.pop() {
@@ -384,10 +406,19 @@ impl<'a> DiskWorkspace<'a> {
                     if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
                         continue;
                     }
+                    // bole-phxz: prune ignored directories (e.g. `target/`) so
+                    // the whole subtree is skipped without descending.
+                    if ignore.matched(&path, true).is_ignore() {
+                        continue;
+                    }
                     stack.push(path);
                 } else if file_type.is_file() {
                     // A linked worktree's `.bole` is a pointer file, not content.
                     if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
+                        continue;
+                    }
+                    // bole-phxz: skip ignored files.
+                    if ignore.matched(&path, false).is_ignore() {
                         continue;
                     }
                     let bytes = tokio::fs::read(&path).await?;
@@ -634,6 +665,45 @@ mod tests {
         tokio::fs::write(dir2.path().join("k.txt"), b"z").await.unwrap();
         let ws2 = DiskWorkspace::new(&repo, dir2.path());
         assert_eq!(ws2.paths().await.unwrap(), vec!["k.txt".to_string()]);
+    }
+
+    // bole-phxz
+    #[tokio::test]
+    async fn disk_workspace_honors_boleignore() {
+        let repo = Repository::memory();
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        tokio::fs::write(root.join(".boleignore"), b"*.log\ntarget/\n!keep.log\n")
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("app.log"), b"x").await.unwrap(); // ignored by *.log
+        tokio::fs::write(root.join("keep.log"), b"x").await.unwrap(); // re-included by !keep.log
+        tokio::fs::write(root.join("main.rs"), b"x").await.unwrap(); // kept
+        tokio::fs::create_dir(root.join("target")).await.unwrap();
+        tokio::fs::write(root.join("target/out.bin"), b"x").await.unwrap(); // subtree pruned
+        tokio::fs::create_dir(root.join("src")).await.unwrap();
+        tokio::fs::write(root.join("src/lib.rs"), b"x").await.unwrap(); // kept
+
+        let ws = DiskWorkspace::new(&repo, root);
+        let paths = ws.paths().await.unwrap();
+
+        // The ignore file itself is a tracked file, not excluded.
+        assert!(paths.contains(&".boleignore".to_string()));
+        assert!(paths.contains(&"keep.log".to_string()));
+        assert!(paths.contains(&"main.rs".to_string()));
+        assert!(paths.contains(&"src/lib.rs".to_string()));
+        assert!(!paths.contains(&"app.log".to_string()));
+        assert!(!paths.iter().any(|p| p.starts_with("target/")));
+    }
+
+    // bole-phxz
+    #[tokio::test]
+    async fn disk_workspace_no_boleignore_ignores_nothing() {
+        let repo = Repository::memory();
+        let dir = tempfile::TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("app.log"), b"x").await.unwrap();
+        let ws = DiskWorkspace::new(&repo, dir.path());
+        assert_eq!(ws.paths().await.unwrap(), vec!["app.log".to_string()]);
     }
 
     // bole-1kz
