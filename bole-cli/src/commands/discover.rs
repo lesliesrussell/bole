@@ -8,7 +8,6 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use bole::sync::collab::{collab_pull, collab_fetch_transient};
-use bole::collab::fingerprint;
 use bole::sync::transport::TcpConn;
 use crate::collabkey::signer_from;
 use crate::context::RepoContext;
@@ -23,13 +22,21 @@ pub enum Cmd {
         /// Peer address (e.g. `127.0.0.1:47653`).
         addr: String,
     },
-    // bole-vrf
-    /// Search a relay for strangers (transient; mutates no local state).
+    // bole-0vh
+    /// Search a relay for strangers, with a verifiable trust path (transient; no state change).
     Relay {
         /// Relay network endpoint (host:port).
         endpoint: String,
         /// Substring to match against profile name/bio/aliases/key.
         term: String,
+        #[arg(long, default_value_t = 4)]
+        max_hops: u8,
+        /// Env var holding the 64-hex Ed25519 seed (used to derive own key).
+        #[arg(long, default_value = "BOLE_COLLAB_KEY")]
+        key_env: String,
+        /// File holding the 64-hex Ed25519 seed.
+        #[arg(long)]
+        key_file: Option<std::path::PathBuf>,
     },
     /// Search the local discovery index (own + tracked peers).
     Query {
@@ -61,44 +68,52 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
-        // bole-vrf
-        Cmd::Relay { endpoint, term } => {
+        // bole-0vh
+        Cmd::Relay { endpoint, term, max_hops, key_env, key_file } => {
+            let self_key = crate::collabkey::signer_from(&key_env, key_file.as_deref())?.public_key();
+            // Gather the querier's own verified edges (own published + tracked cache).
+            let mut own_edges = ctx.repo.public_edges().await?;
+            for o in ctx.repo.tracked_collab().await? {
+                if let bole::CollabObject::TrustEdge(e) = o {
+                    own_edges.push(e);
+                }
+            }
             let stream = tokio::net::TcpStream::connect(&endpoint).await?;
             let mut conn = TcpConn::new(stream);
-            let objs = collab_fetch_transient(&mut conn).await?;
-            let mut hits: Vec<&bole::Profile> = objs
-                .iter()
-                .filter_map(|o| match o {
-                    bole::CollabObject::Profile(p) => {
-                        let t = term.as_str();
-                        let matches = p.display_name.contains(t)
-                            || p.bio.contains(t)
-                            || p.dns_aliases.iter().any(|a| a.contains(t))
-                            || key::hex32(&p.key).contains(t);
-                        if matches { Some(p) } else { None }
-                    }
-                    _ => None,
-                })
-                .collect();
-            // Deterministic, honest ranking: match already applied; tiebreak name then key fp.
-            hits.sort_by(|a, b| {
-                a.display_name.cmp(&b.display_name).then_with(|| fingerprint(&a.key).cmp(&fingerprint(&b.key)))
-            });
-            let rows: Vec<_> = hits
-                .iter()
-                .map(|p| serde_json::json!({
-                    "key": key::hex32(&p.key),
-                    "display_name": p.display_name,
+            let corpus = collab_fetch_transient(&mut conn).await?;
+            let hits = bole::rank_strangers(&self_key, &own_edges, &corpus, &term, max_hops);
+            let rows: Vec<_> = hits.iter().map(|h| {
+                let trust_path = h.trust_path.as_ref().map(|path| {
+                    path.iter().map(|hop| serde_json::json!({
+                        "key": key::hex32(&hop.key),
+                        "via": match hop.via {
+                            bole::TrustKind::Vouch => "vouch",
+                            bole::TrustKind::Follow => "follow",
+                            bole::TrustKind::Review => "review",
+                        },
+                    })).collect::<Vec<_>>()
+                });
+                serde_json::json!({
+                    "key": key::hex32(&h.key),
+                    "display_name": h.display_name,
                     "reach": "stranger",
-                }))
-                .collect();
+                    "trust_path": trust_path,
+                    "hops": h.hops,
+                })
+            }).collect();
             out.emit(
                 || {
                     if rows.is_empty() {
                         "no strangers matched".to_string()
                     } else {
-                        rows.iter().map(|r| format!("{} [stranger] {}", r["key"], r["display_name"]))
-                            .collect::<Vec<_>>().join("\n")
+                        rows.iter().map(|r| {
+                            let hops = if r["hops"].is_null() {
+                                "no path".to_string()
+                            } else {
+                                format!("{} hops", r["hops"])
+                            };
+                            format!("{} [stranger, {}] {}", r["key"], hops, r["display_name"])
+                        }).collect::<Vec<_>>().join("\n")
                     }
                 },
                 || serde_json::json!(rows),
