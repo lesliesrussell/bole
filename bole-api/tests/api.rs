@@ -75,7 +75,6 @@ async fn status_returns_service_and_version() {
 
 // bole-3xj5
 #[tokio::test]
-#[ignore = "needs snapshots route (Task 7)"]
 async fn unknown_route_is_404_envelope() {
     let (_dir, state) = state_with_temp_repo().await;
     let app = build_router(state);
@@ -265,4 +264,56 @@ async fn mtls_header_ignored_from_untrusted_peer() {
     );
     let json = body_json(app.oneshot(req).await.unwrap()).await;
     assert_eq!(json["principal"], "Anonymous");
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn snapshot_metadata_exposes_visible_paths() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let snap = seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/snapshots/{snap}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["message"], "init");
+    assert!(json["visible_paths"].get("README.md").is_some());
+}
+
+#[tokio::test]
+async fn snapshot_blob_returns_bytes_for_visible_path() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let snap = seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/snapshots/{snap}/blob?path=README.md"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&bytes[..], b"hi");
+}
+
+#[tokio::test]
+async fn snapshot_blob_missing_path_is_404() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let snap = seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/snapshots/{snap}/blob?path=nope.txt"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
