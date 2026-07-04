@@ -10,6 +10,9 @@ use crate::state::AppState;
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/status", get(handlers::status::get_status))
+        // bole-3xj5
+        .route("/v1/timelines", get(handlers::timelines::list))
+        .route("/v1/timelines/{name}", get(handlers::timelines::get_one))
         .with_state(state)
 }
 

@@ -22,6 +22,42 @@ async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+// bole-3xj5
+async fn seed_snapshot_and_timeline(repo: &bole::Repository) -> bole::ObjectId {
+    // Snapshot from an empty ephemeral workspace, then a timeline pointing at it.
+    // `write`/`commit` resolve to EphemeralWorkspace's inherent methods, so the
+    // `Workspace` trait doesn't need to be in scope here.
+    let mut ws = repo.ephemeral_workspace();
+    ws.write("README.md", &b"hi"[..]);
+    let snap = ws.commit("tester", "init", 0).await.unwrap();
+    let name = bole::RefName::new("main").unwrap();
+    repo.refs
+        .create_timeline(name, snap, bole::TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+        .unwrap();
+    snap
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn timelines_lists_created_timeline() {
+    let (_dir, state) = state_with_temp_repo().await;
+    seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/timelines").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names: Vec<&str> = json["timelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"main"));
+}
+
 #[tokio::test]
 async fn status_returns_service_and_version() {
     let (_dir, state) = state_with_temp_repo().await;
