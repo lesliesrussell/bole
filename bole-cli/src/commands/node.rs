@@ -35,7 +35,8 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 // this timeout only prevents a permanent wedge.
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    serve_collab_tcp_once(&listener, &ctx.repo),
+                    // bole-jdo
+                    serve_collab_tcp_once(&listener, &ctx.repo, false),
                 )
                 .await
                 {

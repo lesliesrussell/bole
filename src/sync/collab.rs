@@ -17,27 +17,36 @@ use crate::sync::session::build_pack;
 use crate::sync::transport::Conn;
 use crate::sync::wire::{CapSet, Intent, Message, RefAdvert, PROTO_VERSION};
 
-// bole-0nk
-/// Advertises the node's own public objects (`refs/collab/public/**`) PLUS the
-/// cached objects (`refs/collab/remotes/<fp>/**`) of authors this node directly
-/// follows — and nothing else. Serve horizon: re-serve verified public state for
-/// authors you directly follow, and for no others. Never advertises `refs/collab/scoped/`.
-pub async fn collab_adverts(repo: &Repository) -> Result<Vec<RefAdvert>> {
+// bole-jdo
+/// Advertises the node's own public objects (`refs/collab/public/**`) plus cached
+/// objects (`refs/collab/remotes/<fp>/**`). When `relay` is false (ordinary node),
+/// only the cache of directly-followed authors is advertised (WS8c serve horizon).
+/// When `relay` is true, ALL cached objects are advertised (a relay aggregates and
+/// re-serves broadly). Never advertises `refs/collab/scoped/` in either mode.
+pub async fn collab_adverts(repo: &Repository, relay: bool) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
-    // Own authored public objects.
     for name in repo.refs.list(COLLAB_PUBLIC_PREFIX)? {
         if let Some(tag) = repo.refs.get_tag(&name)? {
             out.push(RefAdvert { name, target: tag.target, is_timeline: false });
         }
     }
-    // Cached objects of directly-followed authors, keyed by author fingerprint.
-    for e in repo.public_edges().await? {
-        if e.kind == TrustKind::Follow {
-            let fp = fingerprint(&e.to_key);
-            let prefix = format!("{COLLAB_REMOTES_PREFIX}{fp}/");
-            for name in repo.refs.list(&prefix)? {
-                if let Some(tag) = repo.refs.get_tag(&name)? {
-                    out.push(RefAdvert { name, target: tag.target, is_timeline: false });
+    if relay {
+        // Relay: advertise the entire cache, horizon off.
+        for name in repo.refs.list(COLLAB_REMOTES_PREFIX)? {
+            if let Some(tag) = repo.refs.get_tag(&name)? {
+                out.push(RefAdvert { name, target: tag.target, is_timeline: false });
+            }
+        }
+    } else {
+        // Ordinary node: only directly-followed authors' cache (WS8c serve horizon).
+        for e in repo.public_edges().await? {
+            if e.kind == TrustKind::Follow {
+                let fp = fingerprint(&e.to_key);
+                let prefix = format!("{COLLAB_REMOTES_PREFIX}{fp}/");
+                for name in repo.refs.list(&prefix)? {
+                    if let Some(tag) = repo.refs.get_tag(&name)? {
+                        out.push(RefAdvert { name, target: tag.target, is_timeline: false });
+                    }
                 }
             }
         }
@@ -45,11 +54,11 @@ pub async fn collab_adverts(repo: &Repository) -> Result<Vec<RefAdvert>> {
     Ok(out)
 }
 
-// bole-g7i
+// bole-jdo
 /// Read-only, anonymous responder for the collaboration endpoint. Advertises only
 /// the public collab refs, then serves the requested object closure. Never
 /// accepts pushes; never advertises anything outside `refs/collab/public/`.
-pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository) -> Result<()> {
+pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository, relay: bool) -> Result<()> {
     match conn.recv().await? {
         Message::Hello { intent: Intent::Fetch, .. } | Message::Hello { intent: Intent::Clone, .. } => {}
         Message::Hello { intent: Intent::Push, .. } => {
@@ -61,7 +70,7 @@ pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository) -> Result<()> 
             return Err(Error::Storage("collab: expected Hello".into()));
         }
     }
-    let refs = collab_adverts(repo).await?;
+    let refs = collab_adverts(repo, relay).await?;
     let authorized: HashSet<_> = refs.iter().map(|r| r.target).collect();
     conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
     let (want, have) = match conn.recv().await? {
@@ -179,15 +188,16 @@ pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> 
     Ok(peer)
 }
 
-// bole-8lm
+// bole-jdo
 /// Accepts one TCP connection and serves the collab endpoint on it.
 pub async fn serve_collab_tcp_once(
     listener: &tokio::net::TcpListener,
     repo: &Repository,
+    relay: bool,
 ) -> Result<()> {
     let (stream, _peer) = listener.accept().await.map_err(Error::Io)?;
     let mut conn = crate::sync::transport::TcpConn::new(stream);
-    serve_collab(&mut conn, repo).await
+    serve_collab(&mut conn, repo, relay).await
 }
 
 // bole-g7i
@@ -212,7 +222,7 @@ mod tests {
         tx.set(RefName::new(leaf).unwrap(), Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
-        let adverts = collab_adverts(&repo).await.unwrap();
+        let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")), "scoped refs are never advertised");
         assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")));
         assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")));
@@ -232,7 +242,7 @@ mod tests {
         tx.commit().unwrap();
 
         let (mut server, mut client) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut server, &repo).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut server, &repo, false).await });
         // Minimal client: Hello(Fetch) -> read Welcome adverts.
         client.send(&Message::Hello { proto_min: PROTO_VERSION, proto_max: PROTO_VERSION, caps: CapSet::EMPTY, intent: Intent::Fetch }).await.unwrap();
         let welcome = client.recv().await.unwrap();
@@ -263,7 +273,7 @@ mod tests {
         // Client A pulls B.
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         let peer = collab_pull(&mut cl, &client_repo).await.unwrap();
         srv.await.unwrap().unwrap();
 
@@ -298,7 +308,7 @@ mod tests {
 
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         collab_pull(&mut cl, &client_repo).await.unwrap();
         srv.await.unwrap().unwrap();
 
@@ -331,7 +341,7 @@ mod tests {
                Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
-        let adverts = collab_adverts(&repo).await.unwrap();
+        let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(adverts.iter().any(|r| r.name.as_str() == format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")),
             "followed author's cached profile is advertised");
         assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")), "own profile still advertised");
@@ -358,7 +368,7 @@ mod tests {
                Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
-        let adverts = collab_adverts(&repo).await.unwrap();
+        let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(!adverts.iter().any(|r| r.name.as_str().contains(&sfp)),
             "unfollowed author's cache must NOT be advertised");
     }
@@ -389,7 +399,7 @@ mod tests {
         // Client A pulls B.
         let client = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut s, &server).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server, false).await });
         let peer = collab_pull(&mut cl, &client).await.unwrap();
         srv.await.unwrap().unwrap();
 
@@ -430,7 +440,7 @@ mod tests {
 
         let client = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut s, &server).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server, false).await });
         collab_pull(&mut cl, &client).await.unwrap();
         srv.await.unwrap().unwrap();
 
@@ -439,6 +449,58 @@ mod tests {
             "valid server profile kept");
         assert!(client.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")).unwrap()).unwrap().is_none(),
             "tampered cached C profile dropped (no ref)");
+    }
+
+    // bole-jdo
+    #[tokio::test]
+    async fn adverts_relay_includes_unfollowed() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_REMOTES_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([90u8; 32]);
+        let stranger = CollabSigner::from_seed([91u8; 32]);
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // A stranger cached but NOT followed.
+        let sp = stranger.sign_profile("s".into(), String::new(), vec![], vec![], 1);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(sp))).await.unwrap();
+        let sfp = fingerprint(&stranger.public_key());
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{sfp}/profile")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        // relay=false → excluded (WS8c horizon); relay=true → included.
+        let non_relay = collab_adverts(&repo, false).await.unwrap();
+        assert!(!non_relay.iter().any(|r| r.name.as_str().contains(&sfp)), "non-relay excludes unfollowed");
+        let relay = collab_adverts(&repo, true).await.unwrap();
+        assert!(relay.iter().any(|r| r.name.as_str() == format!("{COLLAB_REMOTES_PREFIX}{sfp}/profile")),
+            "relay advertises unfollowed cache");
+    }
+
+    // bole-jdo
+    #[tokio::test]
+    async fn adverts_relay_excludes_scoped() {
+        use crate::collab::{CollabObject, CollabSigner};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        use crate::repo::collab::COLLAB_SCOPED_PREFIX;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([92u8; 32]);
+        repo.publish_profile(&me.sign_profile("me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        let scoped = me.sign_profile("secret".into(), String::new(), vec![], vec![], 2);
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(scoped))).await.unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_SCOPED_PREFIX}profile/x")).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        // Even in relay mode, scoped is never advertised.
+        let relay = collab_adverts(&repo, true).await.unwrap();
+        assert!(!relay.iter().any(|r| r.name.as_str().contains("/scoped/")), "relay never advertises scoped");
     }
 
     // bole-x5u
@@ -464,7 +526,7 @@ mod tests {
 
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
-        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo).await });
+        let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         let res = collab_pull(&mut cl, &client_repo).await;
         srv.await.unwrap().unwrap();
         assert!(res.is_err(), "pull must error when no valid profile is served");

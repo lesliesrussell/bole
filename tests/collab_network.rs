@@ -25,7 +25,8 @@ async fn loopback_pull_roundtrip() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo).await });
+    // bole-jdo
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false).await });
 
     let client_repo = Repository::memory();
     let mut conn = connect(addr).await;
@@ -53,7 +54,8 @@ async fn loopback_scoped_never_pulled() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo).await });
+    // bole-jdo
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false).await });
 
     let client_repo = Repository::memory();
     let mut conn = connect(addr).await;
@@ -106,7 +108,8 @@ async fn loopback_cache_forward_depth2() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode).await });
+    // bole-jdo
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false).await });
     let mut conn = connect(addr).await;
     collab_pull(&mut conn, &anode).await.unwrap();
     srv.await.unwrap().unwrap();
@@ -149,7 +152,8 @@ async fn loopback_over_depth_excluded() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode).await });
+    // bole-jdo
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false).await });
     let mut conn = connect(addr).await;
     collab_pull(&mut conn, &anode).await.unwrap();
     srv.await.unwrap().unwrap();
