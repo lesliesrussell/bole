@@ -106,6 +106,36 @@ fn check_reports_ignored_and_matching_pattern() {
     assert_eq!(by_path("src/main.rs")["ignored"], serde_json::json!(false));
 }
 
+// bole-0tou
+#[test]
+fn check_models_parent_dir_pruning() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    setup(w);
+    std::fs::create_dir_all(w.join("target/sub")).unwrap();
+    std::fs::write(w.join("target/out.bin"), b"x").unwrap();
+    std::fs::write(w.join("target/sub/deep.bin"), b"x").unwrap();
+    ok(w, &["ignore", "target/"]);
+
+    let res = json(
+        w,
+        &[
+            "ignore", "check", "target", "target/", "target/out.bin", "target/sub/deep.bin",
+            "src/main.rs",
+        ],
+    );
+    let results = res["results"].as_array().unwrap();
+    let by = |p: &str| results.iter().find(|r| r["path"] == p).unwrap().clone();
+
+    // The dir itself, a trailing-slash query, and everything beneath it are all
+    // ignored — the walk prunes `target/` whole, so `check` must agree.
+    assert_eq!(by("target")["ignored"], serde_json::json!(true));
+    assert_eq!(by("target/")["ignored"], serde_json::json!(true));
+    assert_eq!(by("target/out.bin")["ignored"], serde_json::json!(true));
+    assert_eq!(by("target/sub/deep.bin")["ignored"], serde_json::json!(true));
+    assert_eq!(by("src/main.rs")["ignored"], serde_json::json!(false));
+}
+
 #[test]
 fn check_directory_pattern_matches_dir() {
     let dir = tempfile::tempdir().unwrap();
