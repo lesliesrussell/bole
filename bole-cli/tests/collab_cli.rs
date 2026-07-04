@@ -128,9 +128,13 @@ fn cli_discover_pull_query_e2e() {
 #[test]
 fn cli_discover_relay_shows_stranger() {
     use std::process::Stdio;
-    fn serve(dir: &std::path::Path, args: &[&str]) -> std::process::Child {
+    // bole-lxkm
+    fn serve(dir: &std::path::Path, args: &[&str], seed: Option<&str>) -> std::process::Child {
         let mut cmd = bin();
         cmd.args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(s) = seed {
+            cmd.env("BOLE_COLLAB_KEY", s);
+        }
         cmd.spawn().unwrap()
     }
 
@@ -140,10 +144,10 @@ fn cli_discover_relay_shows_stranger() {
     let pseed = "f2".repeat(32);
     ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
     let paddr = "127.0.0.1:47801";
-    let mut pchild = serve(p, &["node", "serve", "--listen", paddr]);
+    let mut pchild = serve(p, &["node", "serve", "--listen", paddr], None);
     std::thread::sleep(std::time::Duration::from_millis(400));
 
-    // Relay R pulls P, then serves in --relay mode.
+    // Relay R pulls P, then serves in --relay mode (relay now requires a signer).
     let rtmp = tempfile::tempdir().unwrap(); let r = rtmp.path();
     ok(r, &["init", "."], None);
     let rseed = "e2".repeat(32);
@@ -151,15 +155,15 @@ fn cli_discover_relay_shows_stranger() {
     ok(r, &["discover", "pull", paddr], Some(&rseed));
     let _ = pchild.kill(); let _ = pchild.wait();
     let raddr = "127.0.0.1:47802";
-    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"]);
+    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"], Some(&rseed));
     std::thread::sleep(std::time::Duration::from_millis(400));
 
-    // Querier Q (follows nobody) searches the relay for "Pat".
+    // Querier Q (follows nobody) searches the relay for "Pat" via --endpoint.
     let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
     ok(q, &["init", "."], None);
     let qseed = "d3".repeat(32);
     ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
-    let out = ok(q, &["discover", "relay", raddr, "Pat", "--json"], Some(&qseed));
+    let out = ok(q, &["discover", "relay", "Pat", "--endpoint", raddr, "--json"], Some(&qseed));
     let _ = rchild.kill(); let _ = rchild.wait();
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -178,9 +182,13 @@ fn cli_discover_relay_shows_stranger() {
 #[test]
 fn cli_discover_relay_trust_path() {
     use std::process::Stdio;
-    fn serve(dir: &std::path::Path, args: &[&str]) -> std::process::Child {
+    // bole-lxkm
+    fn serve(dir: &std::path::Path, args: &[&str], seed: Option<&str>) -> std::process::Child {
         let mut c = bin();
         c.args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null());
+        if let Some(s) = seed {
+            c.env("BOLE_COLLAB_KEY", s);
+        }
         c.spawn().unwrap()
     }
     // Publisher P (a stranger to the querier) serves.
@@ -189,10 +197,10 @@ fn cli_discover_relay_trust_path() {
     let pseed = "fa".repeat(32);
     ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
     let paddr = "127.0.0.1:47901";
-    let mut pchild = serve(p, &["node", "serve", "--listen", paddr]);
+    let mut pchild = serve(p, &["node", "serve", "--listen", paddr], None);
     std::thread::sleep(std::time::Duration::from_millis(400));
 
-    // Relay R follows+pulls P (so P is in R's aggregate), then serves --relay.
+    // Relay R follows+pulls P (so P is in R's aggregate), then serves --relay (relay requires signer).
     let rtmp = tempfile::tempdir().unwrap(); let r = rtmp.path();
     ok(r, &["init", "."], None);
     let rseed = "eb".repeat(32);
@@ -201,17 +209,17 @@ fn cli_discover_relay_trust_path() {
     let pkey = serde_json::from_slice::<serde_json::Value>(&ppull.stdout).unwrap()["pulled"].as_str().unwrap().to_string();
     let _ = pchild.kill(); let _ = pchild.wait();
     let raddr = "127.0.0.1:47902";
-    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"]);
+    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"], Some(&rseed));
     std::thread::sleep(std::time::Duration::from_millis(400));
 
-    // Querier Q follows P (its own edge), then searches the relay: P should be
+    // Querier Q follows P (its own edge), then searches the relay via --endpoint: P should be
     // connected (1 hop) via a follow edge; trust_path non-null.
     let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
     ok(q, &["init", "."], None);
     let qseed = "dc".repeat(32);
     ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
     ok(q, &["trust", "follow", &pkey], Some(&qseed));
-    let out = ok(q, &["discover", "relay", raddr, "Pat", "--json"], Some(&qseed));
+    let out = ok(q, &["discover", "relay", "Pat", "--endpoint", raddr, "--json"], Some(&qseed));
     let _ = rchild.kill(); let _ = rchild.wait();
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -271,4 +279,115 @@ fn cli_three_node_transitive() {
     let carol = v.as_array().unwrap().iter().find(|r| r["display_name"] == "Carol");
     assert!(carol.is_some(), "Carol discoverable transitively: {}", String::from_utf8_lossy(&q.stdout));
     assert_eq!(carol.unwrap()["reach"], "transitive");
+}
+
+// bole-lxkm
+/// Two relay nodes each pull the same publisher; querier pins both and queries
+/// the merged set (no --endpoint). Asserts: Pat appears with reach=stranger,
+/// non-null trust_path (Q follows Pat directly), non-empty relays attribution,
+/// and that the query mutated no local discovery state.
+#[test]
+fn cli_discover_relay_set_merged_attributed() {
+    use std::process::Stdio;
+    fn serve_with_seed(dir: &std::path::Path, args: &[&str], seed: &str) -> std::process::Child {
+        let mut cmd = bin();
+        cmd.args(args).current_dir(dir)
+            .env("BOLE_COLLAB_KEY", seed)
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.spawn().unwrap()
+    }
+    fn serve_plain(dir: &std::path::Path, addr: &str) -> std::process::Child {
+        let mut cmd = bin();
+        cmd.args(["node", "serve", "--listen", addr]).current_dir(dir)
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.spawn().unwrap()
+    }
+
+    // Publisher P: "Pat" profile; served briefly so both relays can pull.
+    let ptmp = tempfile::tempdir().unwrap(); let p = ptmp.path();
+    ok(p, &["init", "."], None);
+    let pseed = "a3".repeat(32);
+    ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
+    // Derive Pat's key for Q to follow later.
+    let p_show = ok(p, &["profile", "show", "--json"], Some(&pseed));
+    let pat_key_hex = serde_json::from_slice::<serde_json::Value>(&p_show.stdout).unwrap()["key"]
+        .as_str().unwrap().to_string();
+    let paddr = "127.0.0.1:48001";
+    let mut pchild = serve_plain(p, paddr);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Relay A: pulls P, then serves --relay with its own signing key.
+    let ratmp = tempfile::tempdir().unwrap(); let ra = ratmp.path();
+    ok(ra, &["init", "."], None);
+    let raseed = "b3".repeat(32);
+    ok(ra, &["profile", "set", "--display-name", "RelayA"], Some(&raseed));
+    ok(ra, &["discover", "pull", paddr], Some(&raseed));
+    let ra_show = ok(ra, &["profile", "show", "--json"], Some(&raseed));
+    let ra_key_hex = serde_json::from_slice::<serde_json::Value>(&ra_show.stdout).unwrap()["key"]
+        .as_str().unwrap().to_string();
+    let raaddr = "127.0.0.1:48002";
+
+    // Relay B: also pulls P, then serves --relay with its own signing key.
+    let rbtmp = tempfile::tempdir().unwrap(); let rb = rbtmp.path();
+    ok(rb, &["init", "."], None);
+    let rbseed = "c3".repeat(32);
+    ok(rb, &["profile", "set", "--display-name", "RelayB"], Some(&rbseed));
+    ok(rb, &["discover", "pull", paddr], Some(&rbseed));
+    let rb_show = ok(rb, &["profile", "show", "--json"], Some(&rbseed));
+    let rb_key_hex = serde_json::from_slice::<serde_json::Value>(&rb_show.stdout).unwrap()["key"]
+        .as_str().unwrap().to_string();
+    let rbaddr = "127.0.0.1:48003";
+
+    let _ = pchild.kill(); let _ = pchild.wait();
+
+    // Start both relays.
+    let mut ra_child = serve_with_seed(ra, &["node", "serve", "--listen", raaddr, "--relay"], &raseed);
+    let mut rb_child = serve_with_seed(rb, &["node", "serve", "--listen", rbaddr, "--relay"], &rbseed);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Querier Q: follows Pat (direct edge → trust_path will be non-null),
+    // pins both relays, then queries the set with no --endpoint.
+    let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
+    ok(q, &["init", "."], None);
+    let qseed = "d4".repeat(32);
+    ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
+    ok(q, &["trust", "follow", &pat_key_hex], Some(&qseed));
+
+    // Pin both relays by key + endpoint.
+    ok(q, &["relay", "add", &ra_key_hex, raaddr], Some(&qseed));
+    ok(q, &["relay", "add", &rb_key_hex, rbaddr], Some(&qseed));
+
+    // Query the pinned relay set (no --endpoint → queries refs/collab/relays/).
+    let out = ok(q, &["discover", "relay", "Pat", "--json"], Some(&qseed));
+    let _ = ra_child.kill(); let _ = ra_child.wait();
+    let _ = rb_child.kill(); let _ = rb_child.wait();
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("JSON parse failed: {e}\nstdout: {}", String::from_utf8_lossy(&out.stdout)));
+    let arr = v.as_array().expect("output is a JSON array");
+    let pat = arr.iter().find(|r| r["display_name"] == "Pat")
+        .unwrap_or_else(|| panic!("Pat not found in merged relay-set output: {v}"));
+
+    // Reach is always "stranger" for relay results.
+    assert_eq!(pat["reach"], "stranger", "Pat reach must be stranger");
+    // Q follows Pat directly, so there must be a trust path.
+    assert!(pat["trust_path"].is_array(), "direct follow must yield a non-null trust_path: {pat}");
+    // Pat was served by at least one relay (both pulled him, so likely two).
+    assert!(
+        pat["relays"].as_array().map(|a| a.len() == 2).unwrap_or(false),
+        "Pat must be attributed to at least one relay: {pat}"
+    );
+
+    // Relay pins exist under refs/collab/relays/ (via relay list).
+    let relay_list = ok(q, &["relay", "list", "--json"], Some(&qseed));
+    let rlist: serde_json::Value = serde_json::from_slice(&relay_list.stdout).unwrap();
+    assert_eq!(rlist.as_array().unwrap().len(), 2, "both relays pinned: {rlist}");
+
+    // Query mutated no neighborhood state: local discover query still finds nothing for Pat.
+    let dq = ok(q, &["discover", "query", "Pat", "--json"], Some(&qseed));
+    let dqv: serde_json::Value = serde_json::from_slice(&dq.stdout).unwrap();
+    assert!(
+        dqv.as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "relay set query must not persist Pat into local discovery neighborhood: {dqv}"
+    );
 }
