@@ -82,8 +82,9 @@ pub async fn serve_collab(
     let refs = collab_adverts(repo, relay).await?;
     let authorized: HashSet<_> = refs.iter().map(|r| r.target).collect();
     // A relay with a signer proves possession of its key over the client nonce.
-    let relay_sig = match (relay_signer, client_nonce) {
-        (Some(signer), Some(nonce)) => Some(signer.sign_relay_challenge(&nonce)),
+    // bole-nbug
+    let relay_sig = match (relay, relay_signer, client_nonce) {
+        (true, Some(signer), Some(nonce)) => Some(signer.sign_relay_challenge(&nonce)),
         _ => None,
     };
     conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs, relay_sig }).await?;
@@ -127,6 +128,7 @@ fn author(obj: &CollabObject) -> Key {
 /// server's own objects and its forwarded cache alike. Returns the dialed server's
 /// own key (author of a verified `public/` Profile); errors if none is served.
 pub async fn collab_pull(conn: &mut dyn Conn, repo: &Repository) -> Result<Key> {
+    // bole-nbug
     conn.send(&Message::Hello {
         proto_min: PROTO_VERSION,
         proto_max: PROTO_VERSION,
@@ -759,6 +761,44 @@ mod tests {
             o => panic!("expected Welcome, got {o:?}"),
         };
         assert!(relay_sig.is_none(), "non-relay serve must not sign client nonce");
+        client.send(&Message::HaveWant { want: vec![], have: vec![] }).await.unwrap();
+        let _ = client.recv().await; // Pack
+        let _ = client.recv().await; // Done
+        srv.await.unwrap().unwrap();
+    }
+
+    // bole-nbug
+    #[tokio::test]
+    async fn serve_relay_mode_no_signer_sends_none_relay_sig() {
+        use crate::sync::transport::InProcessConn;
+        let repo = Repository::memory();
+        let node = CollabSigner::from_seed([20u8; 32]);
+        repo.publish_profile(&node.sign_profile("node".into(), String::new(), vec![], vec![], 1))
+            .await
+            .unwrap();
+        let nonce = [99u8; 32];
+
+        let (mut server, mut client) = InProcessConn::pair();
+        let srv = tokio::spawn(async move {
+            // relay=true, relay_signer=None — relay mode but no signer, so relay_sig must be None
+            serve_collab(&mut server, &repo, true, None).await
+        });
+        client
+            .send(&Message::Hello {
+                proto_min: PROTO_VERSION,
+                proto_max: PROTO_VERSION,
+                caps: CapSet::EMPTY,
+                intent: Intent::Fetch,
+                client_nonce: Some(nonce),
+            })
+            .await
+            .unwrap();
+        let welcome = client.recv().await.unwrap();
+        let relay_sig = match welcome {
+            Message::Welcome { relay_sig, .. } => relay_sig,
+            o => panic!("expected Welcome, got {o:?}"),
+        };
+        assert!(relay_sig.is_none(), "relay mode with no signer must not sign client nonce");
         client.send(&Message::HaveWant { want: vec![], have: vec![] }).await.unwrap();
         let _ = client.recv().await; // Pack
         let _ = client.recv().await; // Done
