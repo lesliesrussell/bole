@@ -216,6 +216,8 @@ async fn relay_transient_fetch_no_persist() {
         "stranger never written to remotes/",
     );
     let after: Vec<String> = anode.refs.list("refs/collab/").unwrap().iter().map(|n| n.as_str().to_string()).collect();
+    // collab_fetch_transient takes no &Repository, so it structurally cannot write;
+    // this guards against a future API change silently handing it a repo.
     assert_eq!(before, after, "discover relay causes no on-disk refs/collab/ change");
 
     // A second fetch behaves identically (no hidden cache).
@@ -226,7 +228,7 @@ async fn relay_transient_fetch_no_persist() {
     let mut conn2 = connect(addr2).await;
     let objs2 = collab_fetch_transient(&mut conn2).await.unwrap();
     srv2.await.unwrap().unwrap();
-    assert_eq!(objs.len(), objs2.len(), "repeated relay fetch is identical");
+    assert_eq!(objs, objs2, "repeated relay fetch is byte-for-byte identical (no hidden cache)");
 }
 
 // bole-7kw
