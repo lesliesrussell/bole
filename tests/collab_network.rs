@@ -835,3 +835,181 @@ async fn relay_search_returns_only_matches_and_ball() {
         "edge Pat→Zed must be absent (outgoing from match, not reverse-reachable)"
     );
 }
+
+// bole-dxlj
+// A CAP_SEARCH relay holds a chain reaching stranger "Pat". collab_search returns
+// matching objects; feeding them to rank_strangers_multi resolves Pat with a trust
+// path and correct hops.
+#[tokio::test]
+async fn client_search_computes_trust_path() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::{collab_search, serve_collab_tcp_once};
+
+    let me = CollabSigner::from_seed([110u8; 32]);
+    let x = CollabSigner::from_seed([111u8; 32]);
+    let pat = CollabSigner::from_seed([112u8; 32]);
+    let relay_signer = CollabSigner::from_seed([113u8; 32]);
+
+    let relay_repo = bole::Repository::memory();
+    relay_repo
+        .publish_profile(
+            &relay_signer.sign_profile("relay".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_repo,
+        CollabObject::TrustEdge(x.sign_edge(pat.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_repo,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay_signer2 = CollabSigner::from_seed([113u8; 32]);
+    let srv = tokio::spawn(async move {
+        serve_collab_tcp_once(&listener, &relay_repo, true, Some(&relay_signer2)).await
+    });
+
+    let mut conn = connect(addr).await;
+    let objs = collab_search(&mut conn, "Pat", 4).await.expect("collab_search ok");
+    srv.await.unwrap().unwrap();
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let hits = bole::rank_strangers_multi(
+        &me.public_key(),
+        &own_edges,
+        &[(relay_signer.public_key(), objs)],
+        "Pat",
+        4,
+    );
+
+    let hit = hits.iter().find(|h| h.key == pat.public_key()).expect("Pat found");
+    assert!(hit.trust_path.is_some(), "trust path me->x->Pat resolved");
+    assert_eq!(hit.hops, Some(2), "hops should be 2");
+}
+
+// bole-dxlj
+// A server NOT advertising CAP_SEARCH: collab_search detects missing cap, falls
+// back to the whole-aggregate HaveWant exchange, and returns the same verified
+// objects as collab_fetch_transient against an equivalent connection.
+#[tokio::test]
+async fn client_search_falls_back_when_cap_absent() {
+    use bole::collab::{CollabObject, CollabSigner};
+    use bole::sync::collab::{collab_fetch_transient, collab_search, serve_collab_tcp_once};
+
+    let node_signer = CollabSigner::from_seed([120u8; 32]);
+
+    // Two separate repos with identical content (Repository is not Clone).
+    let repo1 = bole::Repository::memory();
+    repo1
+        .publish_profile(
+            &node_signer.sign_profile("node".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    let repo2 = bole::Repository::memory();
+    repo2
+        .publish_profile(
+            &node_signer.sign_profile("node".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+
+    // Two listeners for independent connections (relay=false → no CAP_SEARCH).
+    let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = l1.local_addr().unwrap();
+    let srv1 = tokio::spawn(async move {
+        serve_collab_tcp_once(&l1, &repo1, false, None).await
+    });
+
+    let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = l2.local_addr().unwrap();
+    let srv2 = tokio::spawn(async move {
+        serve_collab_tcp_once(&l2, &repo2, false, None).await
+    });
+
+    let mut conn1 = connect(addr1).await;
+    let search_objs = collab_search(&mut conn1, "node", 4).await.expect("collab_search ok");
+    srv1.await.unwrap().unwrap();
+
+    let mut conn2 = connect(addr2).await;
+    let fetch_objs = collab_fetch_transient(&mut conn2).await.expect("collab_fetch_transient ok");
+    srv2.await.unwrap().unwrap();
+
+    // Both paths must return the same set of verified objects.
+    let mut search_keys: Vec<_> = search_objs
+        .iter()
+        .map(|o| match o {
+            CollabObject::Profile(p) => p.key,
+            CollabObject::TrustEdge(e) => e.from_key,
+        })
+        .collect();
+    let mut fetch_keys: Vec<_> = fetch_objs
+        .iter()
+        .map(|o| match o {
+            CollabObject::Profile(p) => p.key,
+            CollabObject::TrustEdge(e) => e.from_key,
+        })
+        .collect();
+    search_keys.sort();
+    fetch_keys.sort();
+    assert_eq!(search_keys, fetch_keys, "fallback returns same objects as collab_fetch_transient");
+}
+
+// bole-dxlj
+// A CAP_SEARCH relay served with a signer whose public key doesn't match the
+// pinned key. collab_search_authenticated returns Err before issuing any Search.
+#[tokio::test]
+async fn authenticated_search_rejects_bad_relay_sig() {
+    use bole::collab::CollabSigner;
+    use bole::sync::collab::{collab_search_authenticated, serve_collab_tcp_once};
+
+    let right_signer = CollabSigner::from_seed([130u8; 32]);
+    let wrong_signer = CollabSigner::from_seed([131u8; 32]); // signs the Welcome
+    // pinned_key = right_signer.public_key() but relay signs with wrong_signer
+
+    let relay_repo = bole::Repository::memory();
+    relay_repo
+        .publish_profile(
+            &wrong_signer.sign_profile("relay".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let wrong_signer2 = CollabSigner::from_seed([131u8; 32]);
+    let srv = tokio::spawn(async move {
+        // relay=true so it signs the nonce; signer is wrong_signer
+        serve_collab_tcp_once(&listener, &relay_repo, true, Some(&wrong_signer2)).await
+    });
+
+    let result = {
+        let mut conn = connect(addr).await;
+        let r = collab_search_authenticated(
+            &mut conn,
+            &right_signer.public_key(), // pinned key != signing key → sig mismatch
+            "Pat",
+            4,
+        )
+        .await;
+        // Drop conn here so the TCP close reaches the server before we await it.
+        drop(conn);
+        r
+    };
+
+    // Server completes after client disconnects (may return Err from recv, ignore).
+    let _ = srv.await;
+
+    assert!(result.is_err(), "bad relay sig must return Err");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("invalid") || msg.contains("auth"),
+        "error message should mention auth/invalid, got: {msg}"
+    );
+}
