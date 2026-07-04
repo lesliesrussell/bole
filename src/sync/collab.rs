@@ -55,9 +55,11 @@ pub async fn collab_adverts(repo: &Repository, relay: bool) -> Result<Vec<RefAdv
 }
 
 // bole-jdo
-/// Read-only, anonymous responder for the collaboration endpoint. Advertises only
-/// the public collab refs, then serves the requested object closure. Never
-/// accepts pushes; never advertises anything outside `refs/collab/public/`.
+/// Read-only, anonymous responder for the collaboration endpoint. Advertises the
+/// node's public collab refs plus cached refs per `collab_adverts` — when `relay`
+/// is true, the whole cached aggregate; otherwise only directly-followed authors'
+/// cache. Then serves the requested object closure. Never accepts pushes; never
+/// advertises `refs/collab/scoped/` in any mode.
 pub async fn serve_collab(conn: &mut dyn Conn, repo: &Repository, relay: bool) -> Result<()> {
     match conn.recv().await? {
         Message::Hello { intent: Intent::Fetch, .. } | Message::Hello { intent: Intent::Clone, .. } => {}
@@ -222,6 +224,7 @@ mod tests {
         tx.set(RefName::new(leaf).unwrap(), Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
+        // bole-jdo
         let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(!adverts.iter().any(|r| r.name.as_str().contains("/scoped/")), "scoped refs are never advertised");
         assert!(adverts.iter().any(|r| r.name.as_str().contains("/public/profile/")));
@@ -242,6 +245,7 @@ mod tests {
         tx.commit().unwrap();
 
         let (mut server, mut client) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut server, &repo, false).await });
         // Minimal client: Hello(Fetch) -> read Welcome adverts.
         client.send(&Message::Hello { proto_min: PROTO_VERSION, proto_max: PROTO_VERSION, caps: CapSet::EMPTY, intent: Intent::Fetch }).await.unwrap();
@@ -273,6 +277,7 @@ mod tests {
         // Client A pulls B.
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         let peer = collab_pull(&mut cl, &client_repo).await.unwrap();
         srv.await.unwrap().unwrap();
@@ -308,6 +313,7 @@ mod tests {
 
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         collab_pull(&mut cl, &client_repo).await.unwrap();
         srv.await.unwrap().unwrap();
@@ -341,6 +347,7 @@ mod tests {
                Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
+        // bole-jdo
         let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(adverts.iter().any(|r| r.name.as_str() == format!("{COLLAB_REMOTES_PREFIX}{cfp}/profile")),
             "followed author's cached profile is advertised");
@@ -368,6 +375,7 @@ mod tests {
                Ref::Tag(Tag { target: id, created_at: 0, message: None }));
         tx.commit().unwrap();
 
+        // bole-jdo
         let adverts = collab_adverts(&repo, false).await.unwrap();
         assert!(!adverts.iter().any(|r| r.name.as_str().contains(&sfp)),
             "unfollowed author's cache must NOT be advertised");
@@ -399,6 +407,7 @@ mod tests {
         // Client A pulls B.
         let client = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut s, &server, false).await });
         let peer = collab_pull(&mut cl, &client).await.unwrap();
         srv.await.unwrap().unwrap();
@@ -440,6 +449,7 @@ mod tests {
 
         let client = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut s, &server, false).await });
         collab_pull(&mut cl, &client).await.unwrap();
         srv.await.unwrap().unwrap();
@@ -526,6 +536,7 @@ mod tests {
 
         let client_repo = Repository::memory();
         let (mut s, mut cl) = InProcessConn::pair();
+        // bole-jdo
         let srv = tokio::spawn(async move { serve_collab(&mut s, &server_repo, false).await });
         let res = collab_pull(&mut cl, &client_repo).await;
         srv.await.unwrap().unwrap();
