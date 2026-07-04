@@ -93,7 +93,7 @@ async fn unknown_route_is_404_envelope() {
 // bole-3xj5
 #[tokio::test]
 async fn token_maps_to_actor_principal() {
-    use bole::sync::authn::Principal;
+    // bole-3xj5
     let (_dir, state) = state_with_temp_repo().await;
 
     // Build config mapping a token to actor "alice".
@@ -117,7 +117,6 @@ async fn token_maps_to_actor_principal() {
     let json = body_json(resp).await;
     assert_eq!(json["principal"], "Token");
     assert_eq!(json["actor"], "alice");
-    let _ = Principal::Anonymous; // keep the import used
 }
 
 // bole-3xj5
