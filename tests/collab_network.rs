@@ -463,8 +463,8 @@ async fn multi_relay_merged_trust_path_and_attribution() {
     // Attributed to at least one relay (both served the profile).
     assert!(
         hit.relays.contains(&a_signer.public_key())
-            || hit.relays.contains(&b_signer.public_key()),
-        "attributed to relay(s) that served the profile"
+            && hit.relays.contains(&b_signer.public_key()),
+        "attributed to BOTH relays that served the profile"
     );
 }
 
