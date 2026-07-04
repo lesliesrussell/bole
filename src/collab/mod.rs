@@ -19,6 +19,8 @@ pub mod alias;
 // bole-n9fx
 mod search;
 pub use search::search_ball;
+// bole-3q5g
+pub use search::{MAX_SEARCH_HOPS, MIN_SEARCH_TERM_LEN};
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
