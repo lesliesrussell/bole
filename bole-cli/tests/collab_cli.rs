@@ -392,6 +392,24 @@ fn cli_discover_relay_set_merged_attributed() {
     );
 }
 
+// bole-9vhh
+#[test]
+fn cli_discover_relay_rejects_short_term() {
+    // No relay needed — the check is local and must fire BEFORE any connection.
+    // A 2-char term is below MIN_SEARCH_TERM_LEN (3) and must be rejected locally.
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "a9".repeat(32);
+    let out = run(w, &["discover", "relay", "ab", "--json"], Some(&seed));
+    assert!(!out.status.success(), "short term must be rejected with non-zero exit");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("at least 3 characters"),
+        "stderr must mention 'at least 3 characters': {stderr}"
+    );
+}
+
 // bole-mbz6
 /// `discover relay --endpoint` now uses server-side search (Gate 4 swap).
 /// This E2E proves the optimization is transparent: the output shape is

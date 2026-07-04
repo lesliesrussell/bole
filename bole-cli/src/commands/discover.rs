@@ -71,6 +71,10 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
         }
         // bole-lxkm
         Cmd::Relay { term, endpoint, max_hops, key_env, key_file } => {
+            // bole-9vhh
+            if term.len() < bole::MIN_SEARCH_TERM_LEN {
+                anyhow::bail!("search term must be at least {} characters", bole::MIN_SEARCH_TERM_LEN);
+            }
             let self_key = signer_from(&key_env, key_file.as_deref())?.public_key();
             // Gather the querier's own verified edges (own published + tracked cache).
             let mut own_edges = ctx.repo.public_edges().await?;
