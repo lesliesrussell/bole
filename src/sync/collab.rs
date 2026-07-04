@@ -643,4 +643,25 @@ mod tests {
         assert!(objs.iter().any(|o| matches!(o, CollabObject::Profile(p) if p.display_name == "bob")),
             "valid object still returned");
     }
+
+    // bole-su8
+    #[tokio::test]
+    async fn collab_adverts_exclude_relays() {
+        use crate::collab::RelayPin;
+        use crate::repo::collab::COLLAB_RELAYS_PREFIX;
+        let repo = Repository::memory();
+        // Pin a relay AND publish a public profile so adverts are non-empty.
+        repo.add_relay(RelayPin { key: [5u8; 32], endpoint: "x:1".into() }).await.unwrap();
+        let a = CollabSigner::from_seed([5u8; 32]);
+        repo.publish_profile(&a.sign_profile("A".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        for relay in [false, true] {
+            let adverts = collab_adverts(&repo, relay).await.unwrap();
+            for a in &adverts {
+                assert!(
+                    !a.name.as_str().starts_with(COLLAB_RELAYS_PREFIX),
+                    "relays/ must never be advertised (relay={relay})"
+                );
+            }
+        }
+    }
 }

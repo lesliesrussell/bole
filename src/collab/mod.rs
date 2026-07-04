@@ -7,6 +7,9 @@
 pub mod object;
 // bole-18p
 pub mod discovery;
+// bole-su8
+mod relay;
+pub use relay::RelayPin;
 // bole-p6j
 pub mod trust;
 // bole-t7c

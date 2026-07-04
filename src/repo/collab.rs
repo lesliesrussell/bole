@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use crate::collab::discovery::{Index, PublicObjectSource};
 use crate::collab::trust::TrustGraph;
 use crate::collab::{fingerprint, verify_edge, verify_profile, CollabObject, Key, Profile, TrustEdge, TrustKind};
+// bole-su8
+use crate::collab::RelayPin;
 use crate::error::{Error, Result};
 use crate::object::{Object, ObjectId};
 use crate::refs::{Ref, RefName, Tag};
@@ -26,6 +28,10 @@ pub const COLLAB_SCOPED_PREFIX: &str = "refs/collab/scoped/";
 /// keyed by the peer's key fingerprint. Never merged into the node's own
 /// published set (`refs/collab/public/`).
 pub const COLLAB_REMOTES_PREFIX: &str = "refs/collab/remotes/";
+// bole-su8
+/// Local-only namespace for trusted-relay pins. NEVER advertised or served
+/// (see `collab_adverts`, which is an allowlist of public + remotes only).
+pub const COLLAB_RELAYS_PREFIX: &str = "refs/collab/relays/";
 
 pub(crate) fn kind_seg(kind: TrustKind) -> &'static str {
     match kind {
@@ -274,6 +280,54 @@ impl Repository {
             });
         }
         Ok(hits)
+    }
+
+    // bole-su8
+    /// Upserts a trusted-relay pin, keyed by `fingerprint(&pin.key)` so a key maps
+    /// to exactly one endpoint. Stored as an `Object::Blob` under
+    /// `refs/collab/relays/<relay-fp>`. Local config; not a signed collab object.
+    pub async fn add_relay(&self, pin: RelayPin) -> Result<()> {
+        use crate::object::{Blob, Object};
+        let id = self
+            .objects
+            .put(&Object::Blob(Blob { data: bytes::Bytes::from(pin.to_bytes()) }))
+            .await?;
+        let leaf = format!("{COLLAB_RELAYS_PREFIX}{}", crate::collab::fingerprint(&pin.key));
+        let mut tx = self.refs.transaction();
+        tx.set(RefName::new(leaf)?, Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(())
+    }
+
+    // bole-su8
+    /// Removes a relay pin by key. Returns whether a pin existed.
+    pub async fn remove_relay(&self, key: &Key) -> Result<bool> {
+        let leaf = format!("{COLLAB_RELAYS_PREFIX}{}", crate::collab::fingerprint(key));
+        let name = RefName::new(leaf)?;
+        if self.refs.get_tag(&name)?.is_none() {
+            return Ok(false);
+        }
+        let mut tx = self.refs.transaction();
+        tx.delete_ref(name);
+        tx.commit()?;
+        Ok(true)
+    }
+
+    // bole-su8
+    /// All trusted-relay pins, ordered by ref name (relay fingerprint).
+    pub async fn relays(&self) -> Result<Vec<RelayPin>> {
+        use crate::object::Object;
+        let mut out = Vec::new();
+        for name in self.refs.list(COLLAB_RELAYS_PREFIX)? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                if let Some(Object::Blob(b)) = self.objects.get(&tag.target).await? {
+                    if let Some(pin) = RelayPin::from_bytes(&b.data) {
+                        out.push(pin);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -542,5 +596,25 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].reach, 0, "own profile is self");
         assert_eq!(hits[0].petname, None, "no vouch for self -> fingerprint fallback -> None");
+    }
+
+    // bole-su8
+    #[tokio::test]
+    async fn relay_pin_crud_and_upsert() {
+        use crate::collab::RelayPin;
+        let repo = Repository::memory();
+        let key = [9u8; 32];
+        assert!(repo.relays().await.unwrap().is_empty());
+
+        repo.add_relay(RelayPin { key, endpoint: "a:1".into() }).await.unwrap();
+        assert_eq!(repo.relays().await.unwrap(), vec![RelayPin { key, endpoint: "a:1".into() }]);
+
+        // Upsert: same key, new endpoint -> still one entry, endpoint replaced.
+        repo.add_relay(RelayPin { key, endpoint: "b:2".into() }).await.unwrap();
+        assert_eq!(repo.relays().await.unwrap(), vec![RelayPin { key, endpoint: "b:2".into() }]);
+
+        assert!(repo.remove_relay(&key).await.unwrap(), "removed an existing pin");
+        assert!(!repo.remove_relay(&key).await.unwrap(), "removing absent pin returns false");
+        assert!(repo.relays().await.unwrap().is_empty());
     }
 }
