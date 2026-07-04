@@ -37,3 +37,15 @@ pub type Key = [u8; 32];
 pub fn fingerprint(key: &Key) -> String {
     blake3::hash(key).to_hex().to_string()
 }
+
+// bole-gp0
+/// The raw 64-char lowercase hex of a key's bytes — the same canonical form the
+/// CLI displays. This is what a user copies and searches for, so discovery
+/// matches against it (never the BLAKE3 `fingerprint`, which is never shown).
+pub fn key_hex(key: &Key) -> String {
+    let mut s = String::with_capacity(64);
+    for b in key {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
