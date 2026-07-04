@@ -339,6 +339,101 @@ pub async fn collab_fetch_authenticated(
     Ok(out)
 }
 
+// bole-dxlj
+/// Shared tail: given the negotiated caps and the advertised refs, either issue a
+/// Search (when CAP_SEARCH negotiated) or complete the whole-aggregate HaveWant
+/// fallback, then decode + verify the pack fail-closed. Writes nothing.
+async fn search_or_fallback(
+    conn: &mut dyn Conn,
+    negotiated: CapSet,
+    refs: &[RefAdvert],
+    term: &str,
+    max_hops: u8,
+) -> Result<Vec<CollabObject>> {
+    if negotiated.contains(CAP_SEARCH) {
+        conn.send(&Message::Search { term: term.to_string(), max_hops }).await?;
+    } else {
+        // Fallback: request the whole advertised aggregate (WS8f-a behavior).
+        let want: Vec<_> = refs.iter().map(|r| r.target).collect();
+        conn.send(&Message::HaveWant { want, have: vec![] }).await?;
+    }
+    let pack = match conn.recv().await? {
+        Message::Pack(p) => p,
+        _ => return Err(Error::Storage("collab: expected Pack".into())),
+    };
+    match conn.recv().await? {
+        Message::Done => {}
+        other => return Err(Error::Storage(format!("collab: expected Done, got {other:?}"))),
+    }
+    let mut out = Vec::new();
+    for (_id, canonical) in decode_pack(&pack)? {
+        if let Ok(Object::Collab(obj)) = crate::codec::deserialize(&canonical) {
+            if verified(&obj) {
+                out.push(obj);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// bole-dxlj
+/// Transient server-side search against an unpinned relay. Requests CAP_SEARCH;
+/// falls back to the whole-aggregate exchange if the relay does not advertise it.
+/// Verifies every object fail-closed. Writes nothing.
+pub async fn collab_search(conn: &mut dyn Conn, term: &str, max_hops: u8) -> Result<Vec<CollabObject>> {
+    let client_caps = CAP_SEARCH;
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: client_caps,
+        intent: Intent::Fetch,
+        client_nonce: None,
+    })
+    .await?;
+    let (refs, welcome_caps) = match conn.recv().await? {
+        Message::Welcome { refs, caps, .. } => (refs, caps),
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("collab: expected Welcome".into())),
+    };
+    let negotiated = client_caps.intersect(welcome_caps);
+    search_or_fallback(conn, negotiated, &refs, term, max_hops).await
+}
+
+// bole-dxlj
+/// Authenticated server-side search against a pinned relay: verifies the relay-auth
+/// signature (WS8f-a) before any Search, then searches (or falls back). Verifies
+/// every object fail-closed. Writes nothing.
+pub async fn collab_search_authenticated(
+    conn: &mut dyn Conn,
+    pinned_key: &Key,
+    term: &str,
+    max_hops: u8,
+) -> Result<Vec<CollabObject>> {
+    use rand::RngCore;
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let client_caps = CAP_SEARCH;
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: client_caps,
+        intent: Intent::Fetch,
+        client_nonce: Some(nonce),
+    })
+    .await?;
+    let (refs, welcome_caps, relay_sig) = match conn.recv().await? {
+        Message::Welcome { refs, caps, relay_sig, .. } => (refs, caps, relay_sig),
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("collab: expected Welcome".into())),
+    };
+    let sig = relay_sig.ok_or_else(|| Error::Storage("relay did not authenticate".into()))?;
+    if !crate::collab::verify_relay_challenge(pinned_key, &nonce, &sig) {
+        return Err(Error::Storage("relay auth signature invalid".into()));
+    }
+    let negotiated = client_caps.intersect(welcome_caps);
+    search_or_fallback(conn, negotiated, &refs, term, max_hops).await
+}
+
 // bole-yc9x
 /// Queries every pinned relay: authenticate (possession proof against the pinned
 /// key), fetch transiently, verify fail-closed. Unreachable or auth-failing relays
@@ -358,7 +453,8 @@ pub async fn query_relay_set(
             Err(_) => continue, // unreachable: skip
         };
         let mut conn = crate::sync::transport::TcpConn::new(stream);
-        match collab_fetch_authenticated(&mut conn, &pin.key).await {
+        // bole-dxlj
+        match collab_search_authenticated(&mut conn, &pin.key, term, max_hops).await {
             Ok(objs) => per_relay.push((pin.key, objs)),
             Err(_) => continue, // auth-fail / transport error: skip
         }

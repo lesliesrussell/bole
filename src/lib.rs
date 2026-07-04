@@ -135,3 +135,5 @@ pub use sync::collab::collab_fetch_transient;
 pub use sync::collab::serve_collab_tcp_once;
 // bole-yc9x
 pub use sync::collab::{collab_fetch_authenticated, query_relay_set};
+// bole-dxlj
+pub use sync::collab::{collab_search, collab_search_authenticated};
