@@ -124,6 +124,56 @@ fn cli_discover_pull_query_e2e() {
     assert!(String::from_utf8_lossy(&q.stdout).contains("Server"), "peer discoverable: {}", String::from_utf8_lossy(&q.stdout));
 }
 
+// bole-vrf
+#[test]
+fn cli_discover_relay_shows_stranger() {
+    use std::process::Stdio;
+    fn serve(dir: &std::path::Path, args: &[&str]) -> std::process::Child {
+        let mut cmd = bin();
+        cmd.args(args).current_dir(dir).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.spawn().unwrap()
+    }
+
+    // Publisher P serves.
+    let ptmp = tempfile::tempdir().unwrap(); let p = ptmp.path();
+    ok(p, &["init", "."], None);
+    let pseed = "f2".repeat(32);
+    ok(p, &["profile", "set", "--display-name", "Pat"], Some(&pseed));
+    let paddr = "127.0.0.1:47801";
+    let mut pchild = serve(p, &["node", "serve", "--listen", paddr]);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Relay R pulls P, then serves in --relay mode.
+    let rtmp = tempfile::tempdir().unwrap(); let r = rtmp.path();
+    ok(r, &["init", "."], None);
+    let rseed = "e2".repeat(32);
+    ok(r, &["profile", "set", "--display-name", "Relay"], Some(&rseed));
+    ok(r, &["discover", "pull", paddr], Some(&rseed));
+    let _ = pchild.kill(); let _ = pchild.wait();
+    let raddr = "127.0.0.1:47802";
+    let mut rchild = serve(r, &["node", "serve", "--listen", raddr, "--relay"]);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+
+    // Querier Q (follows nobody) searches the relay for "Pat".
+    let qtmp = tempfile::tempdir().unwrap(); let q = qtmp.path();
+    ok(q, &["init", "."], None);
+    let qseed = "d3".repeat(32);
+    ok(q, &["profile", "set", "--display-name", "Q"], Some(&qseed));
+    let out = ok(q, &["discover", "relay", raddr, "Pat", "--json"], Some(&qseed));
+    let _ = rchild.kill(); let _ = rchild.wait();
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pat = v.as_array().unwrap().iter().find(|r| r["display_name"] == "Pat");
+    assert!(pat.is_some(), "Pat discoverable via relay: {}", String::from_utf8_lossy(&out.stdout));
+    assert_eq!(pat.unwrap()["reach"], "stranger");
+    // Q persisted nothing.
+    let refs = std::fs::read_dir(q.join(".bole")).map(|_| ()).ok();
+    assert!(refs.is_some());
+    let listing = ok(q, &["trust", "list", "--json"], Some(&qseed));
+    let tl: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert!(tl.as_array().map(|a| a.is_empty()).unwrap_or(true), "querier followed nobody via relay search");
+}
+
 // bole-95v
 #[test]
 fn cli_three_node_transitive() {

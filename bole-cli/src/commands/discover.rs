@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Subcommand;
 
-use bole::sync::collab::collab_pull;
+use bole::sync::collab::{collab_pull, collab_fetch_transient};
+use bole::collab::fingerprint;
 use bole::sync::transport::TcpConn;
 use crate::collabkey::signer_from;
 use crate::context::RepoContext;
@@ -21,6 +22,14 @@ pub enum Cmd {
     Pull {
         /// Peer address (e.g. `127.0.0.1:47653`).
         addr: String,
+    },
+    // bole-vrf
+    /// Search a relay for strangers (transient; mutates no local state).
+    Relay {
+        /// Relay network endpoint (host:port).
+        endpoint: String,
+        /// Substring to match against profile name/bio/aliases/key.
+        term: String,
     },
     /// Search the local discovery index (own + tracked peers).
     Query {
@@ -49,6 +58,50 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             out.emit(
                 || format!("pulled {fp}"),
                 || serde_json::json!({ "pulled": fp }),
+            );
+            Ok(())
+        }
+        // bole-vrf
+        Cmd::Relay { endpoint, term } => {
+            let stream = tokio::net::TcpStream::connect(&endpoint).await?;
+            let mut conn = TcpConn::new(stream);
+            let objs = collab_fetch_transient(&mut conn).await?;
+            let mut hits: Vec<&bole::Profile> = objs
+                .iter()
+                .filter_map(|o| match o {
+                    bole::CollabObject::Profile(p) => {
+                        let t = term.as_str();
+                        let matches = p.display_name.contains(t)
+                            || p.bio.contains(t)
+                            || p.dns_aliases.iter().any(|a| a.contains(t))
+                            || key::hex32(&p.key).contains(t);
+                        if matches { Some(p) } else { None }
+                    }
+                    _ => None,
+                })
+                .collect();
+            // Deterministic, honest ranking: match already applied; tiebreak name then key fp.
+            hits.sort_by(|a, b| {
+                a.display_name.cmp(&b.display_name).then_with(|| fingerprint(&a.key).cmp(&fingerprint(&b.key)))
+            });
+            let rows: Vec<_> = hits
+                .iter()
+                .map(|p| serde_json::json!({
+                    "key": key::hex32(&p.key),
+                    "display_name": p.display_name,
+                    "reach": "stranger",
+                }))
+                .collect();
+            out.emit(
+                || {
+                    if rows.is_empty() {
+                        "no strangers matched".to_string()
+                    } else {
+                        rows.iter().map(|r| format!("{} [stranger] {}", r["key"], r["display_name"]))
+                            .collect::<Vec<_>>().join("\n")
+                    }
+                },
+                || serde_json::json!(rows),
             );
             Ok(())
         }

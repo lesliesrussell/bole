@@ -12,17 +12,23 @@ use crate::output::Output;
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Run the read-only collaboration-serve daemon until killed.
+    // bole-vrf
     Serve {
         /// Address to bind (e.g. `127.0.0.1:47653`).
         #[arg(long)]
         listen: String,
+        /// Run as a relay: serve the whole aggregate (all cached authors), not
+        /// just directly-followed ones. See WS8d.
+        #[arg(long)]
+        relay: bool,
     },
 }
 
 /// Dispatches a `node` subcommand.
 pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Serve { listen } => {
+        // bole-vrf
+        Cmd::Serve { listen, relay } => {
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             out.emit(
                 || format!("serving collab on {listen}"),
@@ -35,8 +41,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 // this timeout only prevents a permanent wedge.
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    // bole-jdo
-                    serve_collab_tcp_once(&listener, &ctx.repo, false),
+                    serve_collab_tcp_once(&listener, &ctx.repo, relay),
                 )
                 .await
                 {
