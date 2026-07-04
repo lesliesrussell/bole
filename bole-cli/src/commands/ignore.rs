@@ -213,10 +213,16 @@ fn check(ctx: &RepoContext, out: &Output, paths: Vec<String>) -> Result<()> {
 
     let mut results = Vec::new();
     for rel in paths {
-        let abs = root.join(&rel);
-        // A path that is not on disk is treated as a file for matching.
-        let is_dir = abs.is_dir();
-        let m = matcher.matched(&abs, is_dir);
+        // bole-0tou: a trailing slash denotes a directory query but breaks path
+        // joining/matching — normalize it away and force directory semantics.
+        let trimmed = rel.trim_end_matches('/');
+        let abs = root.join(trimmed);
+        let is_dir = rel.ends_with('/') || abs.is_dir();
+        // bole-0tou: model the walk's parent-directory pruning — a path is
+        // ignored if it *or any ancestor directory* matches. Plain `matched`
+        // only tests the exact path, so files under an ignored dir (whose
+        // subtree the walk never descends into) looked "not ignored".
+        let m = matcher.matched_path_or_any_parents(&abs, is_dir);
         let (ignored, pattern) = if m.is_ignore() {
             (true, m.inner().map(|g| g.original().to_string()))
         } else {
