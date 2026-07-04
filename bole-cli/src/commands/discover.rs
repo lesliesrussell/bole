@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Subcommand;
 
-use bole::sync::collab::{collab_pull, collab_fetch_transient};
+use bole::sync::collab::collab_pull;
 use bole::sync::transport::TcpConn;
 use crate::collabkey::signer_from;
 use crate::context::RepoContext;
@@ -80,11 +80,13 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 }
             }
             let hits = match endpoint {
-                // Ad-hoc one-off: WS8d behaviour, no pin handshake (still fail-closed verify).
+                // bole-mbz6
+                // Ad-hoc one-off: use server-side search (transparent optimization; fallback
+                // to whole-aggregate is handled inside collab_search itself).
                 Some(addr) => {
                     let stream = tokio::net::TcpStream::connect(&addr).await?;
                     let mut conn = TcpConn::new(stream);
-                    let corpus = collab_fetch_transient(&mut conn).await?;
+                    let corpus = bole::collab_search(&mut conn, &term, max_hops).await?;
                     bole::rank_strangers(&self_key, &own_edges, &corpus, &term, max_hops)
                 }
                 // Query the pinned set: authenticate each, merge, attribute.
