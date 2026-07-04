@@ -317,3 +317,54 @@ async fn snapshot_blob_missing_path_is_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// bole-3xj5
+#[tokio::test]
+async fn profile_unknown_key_is_404() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let app = build_router(state);
+    let key = "1".repeat(64);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/profiles/{key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn profile_bad_key_is_400() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/profiles/not-hex")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn repos_lists_this_store() {
+    let (_dir, state) = state_with_temp_repo().await;
+    seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+    let json = body_json(
+        app.oneshot(Request::builder().uri("/v1/repos").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["repos"].as_array().unwrap().len(), 1);
+    assert_eq!(json["repos"][0]["ref_count"], 1);
+}

@@ -16,6 +16,9 @@ pub fn build_router(state: AppState) -> Router {
         // bole-3xj5
         .route("/v1/snapshots/{id}", get(handlers::snapshots::get_metadata))
         .route("/v1/snapshots/{id}/blob", get(handlers::snapshots::get_blob))
+        // bole-3xj5
+        .route("/v1/repos", get(handlers::repos::list))
+        .route("/v1/profiles/{key}", get(handlers::profiles::get_profile))
         .with_state(state)
 }
 
