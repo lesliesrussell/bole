@@ -6,7 +6,7 @@ use bole::collab::{fingerprint, CollabObject, CollabSigner, TrustKind};
 use bole::object::Object;
 use bole::refs::{Ref, RefName, Tag};
 use bole::repo::collab::{COLLAB_REMOTES_PREFIX, COLLAB_SCOPED_PREFIX};
-use bole::sync::collab::{collab_pull, serve_collab_tcp_once};
+use bole::sync::collab::{collab_fetch_transient, collab_pull, serve_collab_tcp_once};
 use bole::Repository;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -167,4 +167,93 @@ async fn loopback_over_depth_excluded() {
     let idx = anode.local_discovery_index(&a.public_key(), 2).await.unwrap();
     assert!(idx.query("dee").is_empty(), "D never surfaces in discovery");
     assert!(!idx.query("cee").is_empty(), "C still reachable at depth 2");
+}
+
+// bole-7kw
+#[tokio::test]
+async fn relay_transient_fetch_no_persist() {
+    use std::sync::Arc;
+
+    // Relay R has B and C cached (strangers to the querier A).
+    let relay = Arc::new(Repository::memory());
+    let rsigner = CollabSigner::from_seed([40u8; 32]);
+    relay.publish_profile(&rsigner.sign_profile("relay".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    let b = CollabSigner::from_seed([41u8; 32]);
+    let c = CollabSigner::from_seed([42u8; 32]);
+    for (signer, name) in [(&b, "bob"), (&c, "carol")] {
+        let fp = fingerprint(&signer.public_key());
+        let id = relay.objects.put(&Object::Collab(CollabObject::Profile(
+            signer.sign_profile(name.into(), String::new(), vec![], vec![], 1),
+        ))).await.unwrap();
+        let mut tx = relay.refs.transaction();
+        tx.set(
+            RefName::new(format!("{COLLAB_REMOTES_PREFIX}{fp}/profile")).unwrap(),
+            Ref::Tag(Tag { target: id, created_at: 0, message: None }),
+        );
+        tx.commit().unwrap();
+    }
+
+    // Querier A follows nobody.
+    let anode = Repository::memory();
+    let a = CollabSigner::from_seed([43u8; 32]);
+    anode.publish_profile(&a.sign_profile("alice".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    let before: Vec<String> = anode.refs.list("refs/collab/").unwrap().iter().map(|n| n.as_str().to_string()).collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay1 = relay.clone();
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay1, true).await });
+    let mut conn = connect(addr).await;
+    let objs = collab_fetch_transient(&mut conn).await.unwrap();
+    srv.await.unwrap().unwrap();
+
+    // Stranger found in the transient corpus...
+    assert!(objs.iter().any(|o| matches!(o, CollabObject::Profile(p) if p.display_name == "bob")));
+    // ...but NOT persisted: no remotes/ entry, and refs/collab/ layout unchanged.
+    let bfp = fingerprint(&b.public_key());
+    assert!(
+        anode.refs.get_tag(&RefName::new(format!("{COLLAB_REMOTES_PREFIX}{bfp}/profile")).unwrap()).unwrap().is_none(),
+        "stranger never written to remotes/",
+    );
+    let after: Vec<String> = anode.refs.list("refs/collab/").unwrap().iter().map(|n| n.as_str().to_string()).collect();
+    assert_eq!(before, after, "discover relay causes no on-disk refs/collab/ change");
+
+    // A second fetch behaves identically (no hidden cache).
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let relay2 = relay.clone();
+    let srv2 = tokio::spawn(async move { serve_collab_tcp_once(&listener2, &relay2, true).await });
+    let mut conn2 = connect(addr2).await;
+    let objs2 = collab_fetch_transient(&mut conn2).await.unwrap();
+    srv2.await.unwrap().unwrap();
+    assert_eq!(objs.len(), objs2.len(), "repeated relay fetch is identical");
+}
+
+// bole-7kw
+#[tokio::test]
+async fn stranger_absent_from_query_until_followed() {
+    // A does not follow B; even with B's profile cached, B is outside the neighborhood.
+    let anode = Repository::memory();
+    let a = CollabSigner::from_seed([44u8; 32]);
+    let b = CollabSigner::from_seed([45u8; 32]);
+    anode.publish_profile(&a.sign_profile("alice".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    // Simulate a stranger's profile sitting in the store (as if adopted) but no follow edge yet.
+    let bp = b.sign_profile("bob".into(), String::new(), vec![], vec![], 1);
+    let bid = anode.objects.put(&Object::Collab(CollabObject::Profile(bp))).await.unwrap();
+    let bfp = fingerprint(&b.public_key());
+    let mut tx = anode.refs.transaction();
+    tx.set(
+        RefName::new(format!("{COLLAB_REMOTES_PREFIX}{bfp}/profile")).unwrap(),
+        Ref::Tag(Tag { target: bid, created_at: 0, message: None }),
+    );
+    tx.commit().unwrap();
+
+    // Before following: B not in discovery.
+    let idx = anode.local_discovery_index(&a.public_key(), 2).await.unwrap();
+    assert!(idx.query("bob").is_empty(), "unfollowed stranger not in discover query");
+
+    // After trust follow: B is in the neighborhood.
+    anode.publish_edge(&a.sign_edge(b.public_key(), TrustKind::Follow, None, 1)).await.unwrap();
+    let idx2 = anode.local_discovery_index(&a.public_key(), 2).await.unwrap();
+    assert!(!idx2.query("bob").is_empty(), "after follow, stranger appears in discover query");
 }
