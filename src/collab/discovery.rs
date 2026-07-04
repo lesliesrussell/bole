@@ -18,8 +18,8 @@ pub trait PublicObjectSource {
 // bole-3nk
 use std::collections::BTreeMap;
 
-use crate::collab::trust::TrustGraph;
-use crate::collab::{Key, Profile, TrustEdge};
+use crate::collab::trust::{TrustGraph, TrustHop};
+use crate::collab::{fingerprint, Key, Profile, TrustEdge, TrustKind};
 
 /// A single discovery hit: the object, the key that published it, and how far /
 /// by what route it was reached. Every hit is auditable back to a key + reason.
@@ -146,6 +146,82 @@ pub async fn gather<S: PublicObjectSource>(
     Ok(Index::build(root, own_objs, pulled))
 }
 
+// bole-jom
+/// A ranked stranger discovery hit: the publisher key, self-asserted display
+/// name, and the verifiable trust path connecting the querier to this stranger
+/// (`None` when unreachable within the hop bound).
+#[derive(Debug, Clone)]
+pub struct StrangerHit {
+    pub key: Key,
+    pub display_name: String,
+    pub trust_path: Option<Vec<TrustHop>>,
+    pub hops: Option<usize>,
+}
+
+// bole-jom
+/// Builds the combined trust graph (`own_edges` + all `TrustEdge`s in the
+/// relay corpus), finds a bounded trust path from `self_key` to each
+/// term-matched stranger `Profile`, and ranks: has-path > shorter >
+/// vouch-containing > display_name > key fingerprint.
+/// Pure and repo-free; the relay corpus is already signature-verified by the fetch.
+pub fn rank_strangers(
+    self_key: &Key,
+    own_edges: &[TrustEdge],
+    relay_corpus: &[CollabObject],
+    term: &str,
+    max_hops: u8,
+) -> Vec<StrangerHit> {
+    let mut edges: Vec<TrustEdge> = own_edges.to_vec();
+    for o in relay_corpus {
+        if let CollabObject::TrustEdge(e) = o {
+            edges.push(e.clone());
+        }
+    }
+    let graph = TrustGraph::from_edges(edges);
+
+    let mut hits: Vec<StrangerHit> = Vec::new();
+    for o in relay_corpus {
+        if let CollabObject::Profile(p) = o {
+            let term_matches = p.display_name.contains(term)
+                || p.bio.contains(term)
+                || p.dns_aliases.iter().any(|a| a.contains(term))
+                || fingerprint(&p.key).contains(term);
+            if !term_matches {
+                continue;
+            }
+            let path = graph.trust_path(self_key, &p.key, max_hops);
+            let hops = path.as_ref().map(|v| v.len());
+            hits.push(StrangerHit {
+                key: p.key,
+                display_name: p.display_name.clone(),
+                trust_path: path,
+                hops,
+            });
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        let a_conn = a.trust_path.is_some();
+        let b_conn = b.trust_path.is_some();
+        b_conn
+            .cmp(&a_conn)
+            .then_with(|| a.hops.unwrap_or(usize::MAX).cmp(&b.hops.unwrap_or(usize::MAX)))
+            .then_with(|| {
+                let av = has_vouch(&a.trust_path);
+                let bv = has_vouch(&b.trust_path);
+                bv.cmp(&av)
+            })
+            .then_with(|| a.display_name.cmp(&b.display_name))
+            .then_with(|| fingerprint(&a.key).cmp(&fingerprint(&b.key)))
+    });
+    hits
+}
+
+// bole-jom
+fn has_vouch(path: &Option<Vec<TrustHop>>) -> bool {
+    path.as_ref().map(|p| p.iter().any(|h| h.via == TrustKind::Vouch)).unwrap_or(false)
+}
+
 // bole-3nk
 #[cfg(test)]
 mod tests {
@@ -256,5 +332,50 @@ mod tests {
         let idx = gather(rk, &own, &graph, 2, &sources).await.unwrap();
         assert!(!idx.query("goodname").is_empty(), "verified object is indexed");
         assert!(idx.query("tamperedname").is_empty(), "unverified (tampered) object must be excluded");
+    }
+
+    // bole-jom
+    #[tokio::test]
+    async fn rank_connected_before_unconnected() {
+        use crate::collab::{CollabSigner, TrustKind};
+        let me = CollabSigner::from_seed([20u8; 32]);
+        let x = CollabSigner::from_seed([21u8; 32]);
+        let connected = CollabSigner::from_seed([22u8; 32]);
+        let lonely = CollabSigner::from_seed([23u8; 32]);
+        // me -follow-> x -follow-> connected. `lonely` is in the corpus but unreachable.
+        let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+        let corpus = vec![
+            CollabObject::TrustEdge(x.sign_edge(connected.public_key(), TrustKind::Follow, None, 1)),
+            CollabObject::Profile(connected.sign_profile("targetname".into(), String::new(), vec![], vec![], 1)),
+            CollabObject::Profile(lonely.sign_profile("targetname".into(), String::new(), vec![], vec![], 1)),
+        ];
+        let hits = rank_strangers(&me.public_key(), &own_edges, &corpus, "targetname", 4);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].key, connected.public_key(), "connected stranger ranks first");
+        assert_eq!(hits[0].hops, Some(2));
+        assert!(hits[0].trust_path.is_some());
+        assert_eq!(hits[1].key, lonely.public_key());
+        assert_eq!(hits[1].trust_path, None, "unconnected stranger has no path, ranked last");
+    }
+
+    // bole-jom
+    #[tokio::test]
+    async fn rank_shorter_then_vouch_preference() {
+        use crate::collab::{CollabSigner, TrustKind};
+        let me = CollabSigner::from_seed([24u8; 32]);
+        // Two 1-hop strangers: one reached by Vouch, one by Follow. Vouch ranks first.
+        let vouched = CollabSigner::from_seed([25u8; 32]);
+        let followed = CollabSigner::from_seed([26u8; 32]);
+        let own_edges = vec![
+            me.sign_edge(vouched.public_key(), TrustKind::Vouch, Some("v".into()), 1),
+            me.sign_edge(followed.public_key(), TrustKind::Follow, None, 1),
+        ];
+        let corpus = vec![
+            CollabObject::Profile(vouched.sign_profile("cand".into(), String::new(), vec![], vec![], 1)),
+            CollabObject::Profile(followed.sign_profile("cand".into(), String::new(), vec![], vec![], 1)),
+        ];
+        let hits = rank_strangers(&me.public_key(), &own_edges, &corpus, "cand", 4);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].key, vouched.public_key(), "equal-length vouch path ranks above follow");
     }
 }

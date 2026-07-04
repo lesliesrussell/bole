@@ -74,6 +74,8 @@ pub use collab::{fingerprint, verify_profile, CollabObject, CollabSigner, Key, P
 };
 // bole-obb
 pub use collab::trust::TrustHop;
+// bole-jom
+pub use collab::discovery::{rank_strangers, StrangerHit};
 
 pub(crate) mod codec;
 
