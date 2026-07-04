@@ -71,6 +71,8 @@ pub use acl::policy_object::HookSpec;
 pub use collab::{fingerprint, key_hex, verify_profile, CollabObject, CollabSigner, Key, Profile,
     // bole-2zq
     verify_edge, TrustEdge, TrustKind,
+    // bole-jtf
+    verify_relay_challenge,
     // bole-su8
     RelayPin,
 };

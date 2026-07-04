@@ -21,6 +21,8 @@ pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
     // bole-2zq
     verify_edge, TrustEdge, TrustKind,
+    // bole-jtf
+    verify_relay_challenge,
 };
 // bole-p6j
 // bole-obb

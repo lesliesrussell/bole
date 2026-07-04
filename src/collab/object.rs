@@ -10,6 +10,12 @@ const COLLAB_PROFILE_DOMAIN: &[u8] = b"bole-collab-profile-v1\0";
 // bole-2zq
 const COLLAB_EDGE_DOMAIN: &[u8] = b"bole-collab-edge-v1\0";
 
+// bole-jtf
+/// Domain separator for the relay-auth possession handshake. Prepended to the
+/// client nonce before signing so a relay-auth signature can never be confused
+/// with a signature over an arbitrary 32-byte challenge from any other feature.
+pub const COLLAB_RELAY_AUTH_DOMAIN: &[u8] = b"bole-relay-auth-v1";
+
 /// A self-signed, per-key, monotonic self-description. Metadata only — it grants
 /// nothing and never overrides the lattice/ACLs. Canonical identity is `key`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +112,15 @@ fn edge_message(e: &TrustEdge) -> Vec<u8> {
     m
 }
 
+// bole-jtf
+/// The exact bytes a relay signs to prove possession of its key: the domain
+/// separator followed by the client's nonce.
+fn relay_challenge_message(nonce: &[u8; 32]) -> Vec<u8> {
+    let mut m = COLLAB_RELAY_AUTH_DOMAIN.to_vec();
+    m.extend_from_slice(nonce);
+    m
+}
+
 /// Holds a signing key and issues signed collaboration objects.
 pub struct CollabSigner {
     signing: SigningKey,
@@ -160,6 +175,19 @@ impl CollabSigner {
         e.sig = self.signing.sign(&edge_message(&e)).to_bytes().to_vec();
         e
     }
+
+    // bole-jtf
+    /// Signs the domain-separated relay-auth challenge for `nonce`, proving
+    /// possession of this signer's key to a client that pinned its public key.
+    pub fn sign_relay_challenge(&self, nonce: &[u8; 32]) -> [u8; 64] {
+        self.signing.sign(&relay_challenge_message(nonce)).to_bytes()
+    }
+
+    // bole-jtf
+    #[cfg(test)]
+    pub fn sign_relay_challenge_raw_for_test(&self, nonce: &[u8; 32]) -> [u8; 64] {
+        self.signing.sign(nonce).to_bytes()
+    }
 }
 
 /// True iff `p.sig` verifies against `p.key` over the domain-separated fields.
@@ -187,6 +215,16 @@ pub fn verify_edge(e: &TrustEdge) -> bool {
         Err(_) => return false,
     };
     vk.verify(&edge_message(e), &ed25519_dalek::Signature::from_bytes(&bytes)).is_ok()
+}
+
+// bole-jtf
+/// True iff `sig` is `key`'s Ed25519 signature over `COLLAB_RELAY_AUTH_DOMAIN || nonce`.
+pub fn verify_relay_challenge(key: &Key, nonce: &[u8; 32], sig: &[u8; 64]) -> bool {
+    let vk = match VerifyingKey::from_bytes(key) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    vk.verify(&relay_challenge_message(nonce), &ed25519_dalek::Signature::from_bytes(sig)).is_ok()
 }
 
 #[cfg(test)]
@@ -251,5 +289,35 @@ mod tests {
         let wrapped = Object::Collab(CollabObject::TrustEdge(e));
         let id = store.put(&wrapped).await.unwrap();
         assert_eq!(store.get(&id).await.unwrap().unwrap(), wrapped);
+    }
+
+    // bole-jtf
+    #[test]
+    fn relay_challenge_accepts_valid_and_rejects_tampering() {
+        let signer = CollabSigner::from_seed([1u8; 32]);
+        let nonce = [42u8; 32];
+        let sig = signer.sign_relay_challenge(&nonce);
+
+        // Accept: right key, right nonce, domain-separated.
+        assert!(verify_relay_challenge(&signer.public_key(), &nonce, &sig));
+
+        // Reject: wrong key.
+        let other = CollabSigner::from_seed([2u8; 32]);
+        assert!(!verify_relay_challenge(&other.public_key(), &nonce, &sig));
+
+        // Reject: different nonce (replay of a signature for another challenge).
+        let nonce2 = [43u8; 32];
+        assert!(!verify_relay_challenge(&signer.public_key(), &nonce2, &sig));
+
+        // Reject: a signature over the BARE nonce (no domain separator).
+        let bare = signer_sign_raw(&signer, &nonce); // helper below
+        assert!(!verify_relay_challenge(&signer.public_key(), &nonce, &bare));
+    }
+
+    // bole-jtf
+    // Test-only: sign the raw nonce with no domain separator, to prove the domain
+    // separator is load-bearing.
+    fn signer_sign_raw(signer: &CollabSigner, nonce: &[u8; 32]) -> [u8; 64] {
+        signer.sign_relay_challenge_raw_for_test(nonce)
     }
 }
