@@ -27,7 +27,17 @@ impl CapSet {
     pub fn intersect(self, other: CapSet) -> CapSet {
         CapSet(self.0 & other.0)
     }
+    // bole-iz5c
+    /// True iff `self` contains every bit of the non-empty `other`.
+    pub fn contains(self, other: CapSet) -> bool {
+        other.0 != 0 && (self.0 & other.0) == other.0
+    }
 }
+
+// bole-iz5c
+/// Server-side term search (WS8f-b). A relay advertises this in `Welcome.caps`;
+/// a client requests it in `Hello.caps`.
+pub const CAP_SEARCH: CapSet = CapSet(1 << 0);
 
 // bole-6qy
 /// What a client wants to do.
@@ -157,6 +167,11 @@ pub enum Message {
     RefUpdate(Vec<RefUpdateOp>),
     /// push result / fetch completion status.
     RefStatus(Vec<RefStatusEntry>),
+    // bole-iz5c
+    /// client → relay (after Welcome, in place of HaveWant): server-side term
+    /// search bounded by `max_hops`. Answered with a `Pack` of matching profiles
+    /// + the directed reverse-reachability edge ball, then `Done`.
+    Search { term: String, max_hops: u8 },
     /// end of a phase / session.
     Done,
     /// a typed failure (version, auth, policy, corrupt frame, …).
@@ -274,6 +289,10 @@ mod tests {
             proto: 1, caps: CapSet::EMPTY, refs: vec![], relay_sig: Some([9u8; 64]),
         };
         assert_eq!(decode_message(&encode_message(&w).unwrap()).unwrap(), w);
+
+        // bole-iz5c
+        let s = Message::Search { term: "pat".into(), max_hops: 4 };
+        assert_eq!(decode_message(&encode_message(&s).unwrap()).unwrap(), s);
     }
 
     #[test]

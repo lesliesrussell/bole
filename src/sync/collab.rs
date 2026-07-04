@@ -15,7 +15,7 @@ use crate::store::pack::decode_pack;
 use crate::sync::negotiate;
 use crate::sync::session::build_pack;
 use crate::sync::transport::Conn;
-use crate::sync::wire::{CapSet, Intent, Message, RefAdvert, PROTO_VERSION};
+use crate::sync::wire::{CapSet, Intent, Message, RefAdvert, PROTO_VERSION, CAP_SEARCH};
 
 // bole-jdo
 /// Advertises the node's own public objects (`refs/collab/public/**`) plus cached
@@ -87,18 +87,47 @@ pub async fn serve_collab(
         (true, Some(signer), Some(nonce)) => Some(signer.sign_relay_challenge(&nonce)),
         _ => None,
     };
-    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs, relay_sig }).await?;
-    let (want, have) = match conn.recv().await? {
-        Message::HaveWant { want, have } => (want, have),
-        _ => return Err(Error::Storage("collab: expected HaveWant".into())),
-    };
-    // Never trust client-named roots: only advertised (public) targets are servable.
-    let want: Vec<_> = want.into_iter().filter(|w| authorized.contains(w)).collect();
-    let have: HashSet<_> = have.into_iter().collect();
-    let missing = negotiate::missing_closure(repo, &want, &have).await?;
-    let pack = build_pack(repo, &missing).await?;
-    conn.send(&Message::Pack(pack)).await?;
-    conn.send(&Message::Done).await?;
+    // bole-iz5c
+    let caps = if relay { CAP_SEARCH } else { CapSet::EMPTY };
+    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps, refs: refs.clone(), relay_sig }).await?;
+    // bole-iz5c
+    match conn.recv().await? {
+        Message::HaveWant { want, have } => {
+            // Existing whole-aggregate path (unchanged).
+            // Never trust client-named roots: only advertised (public) targets are servable.
+            let want: Vec<_> = want.into_iter().filter(|w| authorized.contains(w)).collect();
+            let have: HashSet<_> = have.into_iter().collect();
+            let missing = negotiate::missing_closure(repo, &want, &have).await?;
+            let pack = build_pack(repo, &missing).await?;
+            conn.send(&Message::Pack(pack)).await?;
+            conn.send(&Message::Done).await?;
+        }
+        // bole-iz5c
+        Message::Search { term, max_hops } => {
+            // Load the served corpus (exactly what collab_adverts covers: public +,
+            // for a relay, all remotes; never scoped/relays), run the pure ball
+            // algorithm, and pack the selected objects by their content ids.
+            let mut corpus = Vec::new();
+            for a in &refs {
+                if let Some(Object::Collab(o)) = repo.objects.get(&a.target).await? {
+                    corpus.push(o);
+                }
+            }
+            let selected = crate::collab::search_ball(&corpus, &term, max_hops);
+            let ids: Vec<_> = selected
+                .iter()
+                .map(|o| {
+                    let bytes = crate::codec::serialize(&Object::Collab(o.clone()))
+                        .expect("postcard serialization is infallible for owned data");
+                    crate::codec::object_id(&bytes)
+                })
+                .collect();
+            let pack = build_pack(repo, &ids).await?;
+            conn.send(&Message::Pack(pack)).await?;
+            conn.send(&Message::Done).await?;
+        }
+        _ => return Err(Error::Storage("collab: expected HaveWant or Search".into())),
+    }
     Ok(())
 }
 
