@@ -27,6 +27,8 @@ pub mod trust;
 // bole-1n7
 pub mod discover;
 pub mod node;
+// bole-lxkm
+pub mod relay;
 // bole-9mz
 pub mod run;
 // bole-0hg

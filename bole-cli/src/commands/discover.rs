@@ -22,13 +22,14 @@ pub enum Cmd {
         /// Peer address (e.g. `127.0.0.1:47653`).
         addr: String,
     },
-    // bole-0vh
-    /// Search a relay for strangers, with a verifiable trust path (transient; no state change).
+    // bole-lxkm
+    /// Search trusted relays for strangers with a verifiable trust path (transient).
     Relay {
-        /// Relay network endpoint (host:port).
-        endpoint: String,
         /// Substring to match against profile name/bio/aliases/key.
         term: String,
+        /// Ad-hoc: query a single unpinned endpoint (host:port) instead of the pinned set.
+        #[arg(long)]
+        endpoint: Option<String>,
         #[arg(long, default_value_t = 4)]
         max_hops: u8,
         /// Env var holding the 64-hex Ed25519 seed (used to derive own key).
@@ -68,8 +69,8 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
-        // bole-0vh
-        Cmd::Relay { endpoint, term, max_hops, key_env, key_file } => {
+        // bole-lxkm
+        Cmd::Relay { term, endpoint, max_hops, key_env, key_file } => {
             let self_key = signer_from(&key_env, key_file.as_deref())?.public_key();
             // Gather the querier's own verified edges (own published + tracked cache).
             let mut own_edges = ctx.repo.public_edges().await?;
@@ -78,10 +79,20 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     own_edges.push(e);
                 }
             }
-            let stream = tokio::net::TcpStream::connect(&endpoint).await?;
-            let mut conn = TcpConn::new(stream);
-            let corpus = collab_fetch_transient(&mut conn).await?;
-            let hits = bole::rank_strangers(&self_key, &own_edges, &corpus, &term, max_hops);
+            let hits = match endpoint {
+                // Ad-hoc one-off: WS8d behaviour, no pin handshake (still fail-closed verify).
+                Some(addr) => {
+                    let stream = tokio::net::TcpStream::connect(&addr).await?;
+                    let mut conn = TcpConn::new(stream);
+                    let corpus = collab_fetch_transient(&mut conn).await?;
+                    bole::rank_strangers(&self_key, &own_edges, &corpus, &term, max_hops)
+                }
+                // Query the pinned set: authenticate each, merge, attribute.
+                None => {
+                    let relays = ctx.repo.relays().await?;
+                    bole::query_relay_set(&self_key, &own_edges, &relays, &term, max_hops).await
+                }
+            };
             let rows: Vec<_> = hits.iter().map(|h| {
                 let trust_path = h.trust_path.as_ref().map(|path| {
                     path.iter().map(|hop| serde_json::json!({
@@ -99,6 +110,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     "reach": "stranger",
                     "trust_path": trust_path,
                     "hops": h.hops,
+                    "relays": h.relays.iter().map(key::hex32).collect::<Vec<_>>(),
                 })
             }).collect();
             out.emit(
@@ -112,7 +124,8 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                             } else {
                                 format!("{} hops", r["hops"])
                             };
-                            format!("{} [stranger, {}] {}", r["key"], hops, r["display_name"])
+                            let nrelays = r["relays"].as_array().map(|a| a.len()).unwrap_or(0);
+                            format!("{} [stranger, {}, via {} relays] {}", r["key"], hops, nrelays, r["display_name"])
                         }).collect::<Vec<_>>().join("\n")
                     }
                 },

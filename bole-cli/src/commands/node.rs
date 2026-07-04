@@ -1,10 +1,13 @@
 // bole-1n7
 //! `bole node` — run the read-only collaboration-serve daemon.
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Subcommand;
 
 use bole::sync::collab::serve_collab_tcp_once;
+use crate::collabkey::signer_from;
 use crate::context::RepoContext;
 use crate::output::Output;
 
@@ -21,6 +24,13 @@ pub enum Cmd {
         /// just directly-followed ones. See WS8d.
         #[arg(long)]
         relay: bool,
+        // bole-lxkm
+        /// Env var holding the 64-hex Ed25519 seed (required when --relay).
+        #[arg(long, default_value = "BOLE_COLLAB_KEY")]
+        key_env: String,
+        /// File holding the 64-hex Ed25519 seed (required when --relay).
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -28,7 +38,14 @@ pub enum Cmd {
 pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
     match cmd {
         // bole-vrf
-        Cmd::Serve { listen, relay } => {
+        // bole-lxkm
+        Cmd::Serve { listen, relay, key_env, key_file } => {
+            // bole-lxkm
+            let relay_signer = if relay {
+                Some(signer_from(&key_env, key_file.as_deref())?)
+            } else {
+                None
+            };
             let listener = tokio::net::TcpListener::bind(&listen).await?;
             out.emit(
                 || format!("serving collab on {listen}"),
@@ -42,7 +59,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 // bole-nbug
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    serve_collab_tcp_once(&listener, &ctx.repo, relay, None),
+                    serve_collab_tcp_once(&listener, &ctx.repo, relay, relay_signer.as_ref()),
                 )
                 .await
                 {

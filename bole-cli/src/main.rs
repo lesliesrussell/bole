@@ -169,6 +169,12 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::discover::Cmd,
     },
+    // bole-lxkm
+    /// Manage the trusted-relay set (pin/unpin/list relays by key).
+    Relay {
+        #[command(subcommand)]
+        cmd: commands::relay::Cmd,
+    },
     // bole-9mz
     /// Resolve an overlay and run a command with its variables injected.
     Run(commands::run::RunArgs),
@@ -292,6 +298,11 @@ async fn run() -> Result<()> {
         Command::Discover { cmd } => {
             let ctx = open().await?;
             commands::discover::run(&ctx, &out, cmd).await
+        }
+        // bole-lxkm
+        Command::Relay { cmd } => {
+            let ctx = open().await?;
+            commands::relay::run(&ctx, &out, cmd).await
         }
         // bole-9mz
         Command::Run(args) => {
