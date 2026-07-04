@@ -374,7 +374,7 @@ fn cli_discover_relay_set_merged_attributed() {
     assert!(pat["trust_path"].is_array(), "direct follow must yield a non-null trust_path: {pat}");
     // Pat was served by at least one relay (both pulled him, so likely two).
     assert!(
-        pat["relays"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        pat["relays"].as_array().map(|a| a.len() == 2).unwrap_or(false),
         "Pat must be attributed to at least one relay: {pat}"
     );
 

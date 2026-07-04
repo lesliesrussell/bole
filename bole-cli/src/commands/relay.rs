@@ -41,6 +41,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
+        // bole-lxkm
         Cmd::Remove { key_hex } => {
             let key = key::parse_hex_32(&key_hex)?;
             let removed = ctx.repo.remove_relay(&key).await?;
@@ -50,6 +51,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
+        // bole-lxkm
         Cmd::List => {
             let pins = ctx.repo.relays().await?;
             let rows: Vec<_> = pins
