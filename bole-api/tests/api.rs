@@ -36,3 +36,21 @@ async fn status_returns_service_and_version() {
     assert!(json["version"].is_string());
     assert_eq!(json["ref_count"], 0);
 }
+
+// bole-3xj5
+#[tokio::test]
+#[ignore = "needs snapshots route (Task 7)"]
+async fn unknown_route_is_404_envelope() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let app = build_router(state);
+    // A well-formed but non-existent snapshot id (64 hex zeros).
+    let id = "0".repeat(64);
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/snapshots/{id}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "not_found");
+    assert!(json["error"]["message"].is_string());
+}
