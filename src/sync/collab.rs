@@ -104,6 +104,14 @@ pub async fn serve_collab(
         }
         // bole-iz5c
         Message::Search { term, max_hops } => {
+            // bole-3q5g
+            // Fail-fast: reject terms that are too short before loading any corpus.
+            if term.len() < crate::collab::MIN_SEARCH_TERM_LEN {
+                conn.send(&Message::Error("search term too short".into())).await?;
+                return Ok(());
+            }
+            // Clamp max_hops to the relay-side bound; never mutates the client request.
+            let max_hops = max_hops.min(crate::collab::MAX_SEARCH_HOPS);
             // Load the served corpus (exactly what collab_adverts covers: public +,
             // for a relay, all remotes; never scoped/relays), run the pure ball
             // algorithm, and pack the selected objects by their content ids.
@@ -359,6 +367,8 @@ async fn search_or_fallback(
     }
     let pack = match conn.recv().await? {
         Message::Pack(p) => p,
+        // bole-3q5g
+        Message::Error(e) => return Err(Error::Storage(e)),
         _ => return Err(Error::Storage("collab: expected Pack".into())),
     };
     match conn.recv().await? {

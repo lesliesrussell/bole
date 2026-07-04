@@ -1013,3 +1013,331 @@ async fn authenticated_search_rejects_bad_relay_sig() {
         "error message should mention auth/invalid, got: {msg}"
     );
 }
+
+// bole-3q5g
+/// The relay rejects a Search whose term is shorter than MIN_SEARCH_TERM_LEN bytes.
+/// The serve arm must respond with Message::Error before loading the corpus (fail-fast).
+#[tokio::test]
+async fn serve_rejects_short_term() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::sync::transport::Conn;
+    use bole::sync::wire::{Intent, Message, PROTO_VERSION, CAP_SEARCH};
+
+    // Relay holds "Pat" profile — but the Search term is too short to reach it.
+    let relay_signer = CollabSigner::from_seed([200u8; 32]);
+    let pat = CollabSigner::from_seed([201u8; 32]);
+
+    let relay_repo = bole::Repository::memory();
+    relay_repo
+        .publish_profile(
+            &relay_signer.sign_profile("relay".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_repo,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_repo,
+        CollabObject::TrustEdge(
+            CollabSigner::from_seed([202u8; 32])
+                .sign_edge(pat.public_key(), TrustKind::Follow, None, 1),
+        ),
+    )
+    .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay_signer2 = CollabSigner::from_seed([200u8; 32]);
+    let srv = tokio::spawn(async move {
+        serve_collab_tcp_once(&listener, &relay_repo, true, Some(&relay_signer2)).await
+    });
+
+    let mut conn = connect(addr).await;
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CAP_SEARCH,
+        intent: Intent::Fetch,
+        client_nonce: None,
+    })
+    .await
+    .unwrap();
+
+    // Consume Welcome.
+    match conn.recv().await.unwrap() {
+        Message::Welcome { .. } => {}
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+
+    // Send a too-short term ("ab" is 2 bytes, MIN_SEARCH_TERM_LEN is 3).
+    conn.send(&Message::Search { term: "ab".into(), max_hops: 4 })
+        .await
+        .unwrap();
+
+    // Server must respond with Error, not Pack.
+    let response = conn.recv().await.unwrap();
+    match &response {
+        Message::Error(msg) => {
+            assert!(
+                msg.contains("too short"),
+                "error must mention 'too short', got: {msg}"
+            );
+        }
+        other => panic!("expected Message::Error for short term, got {other:?}"),
+    }
+
+    // Server must have returned Ok (no panic, no crash).
+    srv.await.unwrap().unwrap();
+}
+
+// bole-3q5g
+/// The relay silently clamps max_hops=255 to MAX_SEARCH_HOPS=6.
+/// A 7-edge chain (n0→n1→…→n7, n7 matches "target") differs at the boundary:
+/// with 255 the deepest edge n0→n1 (reverse-depth 7) would be included, but
+/// with the clamp it is excluded. Asserts the served pack equals search_ball at MAX_SEARCH_HOPS.
+#[tokio::test]
+async fn serve_clamps_max_hops() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::store::pack::decode_pack;
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::sync::transport::Conn;
+    use bole::sync::wire::{Intent, Message, PROTO_VERSION, CAP_SEARCH};
+    use bole::object::Object;
+
+    // Build 8 nodes n0..n7 (7 edges: n0→n1→…→n6→n7). n7 has profile "target".
+    let nodes: Vec<CollabSigner> = (0u8..8).map(|i| CollabSigner::from_seed([210 + i; 32])).collect();
+    let target_profile = nodes[7].sign_profile("target".into(), String::new(), vec![], vec![], 1);
+
+    let relay_signer = CollabSigner::from_seed([220u8; 32]);
+    let relay_repo = bole::Repository::memory();
+    relay_repo
+        .publish_profile(
+            &relay_signer.sign_profile("relay".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+
+    // Cache the target profile and all 7 edges.
+    cache_relay(&relay_repo, CollabObject::Profile(target_profile.clone())).await;
+    let mut corpus: Vec<CollabObject> = vec![CollabObject::Profile(target_profile)];
+    for i in 0..7usize {
+        let edge = nodes[i].sign_edge(nodes[i + 1].public_key(), TrustKind::Follow, None, 1);
+        cache_relay(&relay_repo, CollabObject::TrustEdge(edge.clone())).await;
+        corpus.push(CollabObject::TrustEdge(edge));
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let relay_signer2 = CollabSigner::from_seed([220u8; 32]);
+    let srv = tokio::spawn(async move {
+        serve_collab_tcp_once(&listener, &relay_repo, true, Some(&relay_signer2)).await
+    });
+
+    let mut conn = connect(addr).await;
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CAP_SEARCH,
+        intent: Intent::Fetch,
+        client_nonce: None,
+    })
+    .await
+    .unwrap();
+    match conn.recv().await.unwrap() {
+        Message::Welcome { .. } => {}
+        other => panic!("expected Welcome, got {other:?}"),
+    }
+
+    // Request with max_hops=255; expect the relay to clamp to MAX_SEARCH_HOPS=6.
+    conn.send(&Message::Search { term: "target".into(), max_hops: 255 })
+        .await
+        .unwrap();
+
+    let pack = match conn.recv().await.unwrap() {
+        Message::Pack(p) => p,
+        other => panic!("expected Pack, got {other:?}"),
+    };
+    match conn.recv().await.unwrap() {
+        Message::Done => {}
+        other => panic!("expected Done, got {other:?}"),
+    }
+    srv.await.unwrap().unwrap();
+
+    // Decode served pack into CollabObjects.
+    let decoded = decode_pack(&pack).unwrap();
+    let tmp = bole::Repository::memory();
+    for (_id, canonical) in &decoded {
+        tmp.objects.put_raw(canonical).await.unwrap();
+    }
+    let mut served: Vec<CollabObject> = Vec::new();
+    for (id, _) in &decoded {
+        if let Some(Object::Collab(obj)) = tmp.objects.get(id).await.unwrap() {
+            served.push(obj);
+        }
+    }
+
+    // Build the expected result locally using the clamped hop count.
+    let expected = bole::search_ball(&corpus, "target", bole::MAX_SEARCH_HOPS);
+
+    // The served edge count must equal the expected (6 edges, not 7).
+    let served_edges: usize = served.iter().filter(|o| matches!(o, CollabObject::TrustEdge(_))).count();
+    let expected_edges: usize = expected.iter().filter(|o| matches!(o, CollabObject::TrustEdge(_))).count();
+    assert_eq!(
+        served_edges, expected_edges,
+        "clamped serve returns same edge count as search_ball at MAX_SEARCH_HOPS"
+    );
+    assert_eq!(
+        expected_edges,
+        bole::MAX_SEARCH_HOPS as usize,
+        "exactly MAX_SEARCH_HOPS={} edges returned (n0→n1 at depth 7 excluded)",
+        bole::MAX_SEARCH_HOPS
+    );
+    // The deepest edge n0→n1 must NOT be in the served pack.
+    assert!(
+        !served.iter().any(|o| matches!(
+            o,
+            CollabObject::TrustEdge(e) if e.from_key == nodes[0].public_key() && e.to_key == nodes[1].public_key()
+        )),
+        "edge n0→n1 at reverse-depth 7 must be absent when clamped to MAX_SEARCH_HOPS=6"
+    );
+}
+
+// bole-3q5g
+/// query_relay_set skip-and-continue behaviour for the min-term bound:
+/// (1) a valid term returns merged hits; (2) a too-short term causes every relay to
+/// reject with Error, query_relay_set skips all of them and returns an empty Vec.
+#[tokio::test]
+async fn query_relay_set_handles_short_term_via_skip() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::{query_relay_set, RelayPin};
+
+    let me = CollabSigner::from_seed([230u8; 32]);
+    let x = CollabSigner::from_seed([231u8; 32]);
+    let pat = CollabSigner::from_seed([232u8; 32]);
+
+    // ── valid-term sub-case ──────────────────────────────────────────────────
+    // Two relays, each holding "Pat" profile. Valid term "Pat" must return a hit.
+    let a_signer = CollabSigner::from_seed([233u8; 32]);
+    let relay_a = bole::Repository::memory();
+    relay_a
+        .publish_profile(
+            &a_signer.sign_profile("relay-a".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_a,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_a,
+        CollabObject::TrustEdge(x.sign_edge(pat.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+
+    let b_signer = CollabSigner::from_seed([234u8; 32]);
+    let relay_b = bole::Repository::memory();
+    relay_b
+        .publish_profile(
+            &b_signer.sign_profile("relay-b".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_b,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+
+    let la = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = la.local_addr().unwrap();
+    let a_signer2 = CollabSigner::from_seed([233u8; 32]);
+    let srv_a =
+        tokio::spawn(async move { serve_collab_tcp_once(&la, &relay_a, true, Some(&a_signer2)).await });
+
+    let lb = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = lb.local_addr().unwrap();
+    let b_signer2 = CollabSigner::from_seed([234u8; 32]);
+    let srv_b =
+        tokio::spawn(async move { serve_collab_tcp_once(&lb, &relay_b, true, Some(&b_signer2)).await });
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let relays_valid = vec![
+        RelayPin { key: a_signer.public_key(), endpoint: addr_a.to_string() },
+        RelayPin { key: b_signer.public_key(), endpoint: addr_b.to_string() },
+    ];
+    let hits_valid = query_relay_set(&me.public_key(), &own_edges, &relays_valid, "Pat", 4).await;
+
+    srv_a.await.unwrap().unwrap();
+    srv_b.await.unwrap().unwrap();
+
+    assert!(
+        hits_valid.iter().any(|h| h.key == pat.public_key()),
+        "valid term 'Pat' must return Pat in merged hits"
+    );
+
+    // ── short-term sub-case ──────────────────────────────────────────────────
+    // Fresh relays with same corpus; too-short term "ab" must produce empty result.
+    let c_signer = CollabSigner::from_seed([235u8; 32]);
+    let relay_c = bole::Repository::memory();
+    relay_c
+        .publish_profile(
+            &c_signer.sign_profile("relay-c".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_c,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+
+    let d_signer = CollabSigner::from_seed([236u8; 32]);
+    let relay_d = bole::Repository::memory();
+    relay_d
+        .publish_profile(
+            &d_signer.sign_profile("relay-d".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_d,
+        CollabObject::Profile(pat.sign_profile("Pat".into(), String::new(), vec![], vec![], 1)),
+    )
+    .await;
+
+    let lc = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_c = lc.local_addr().unwrap();
+    let c_signer2 = CollabSigner::from_seed([235u8; 32]);
+    let srv_c =
+        tokio::spawn(async move { serve_collab_tcp_once(&lc, &relay_c, true, Some(&c_signer2)).await });
+
+    let ld = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_d = ld.local_addr().unwrap();
+    let d_signer2 = CollabSigner::from_seed([236u8; 32]);
+    let srv_d =
+        tokio::spawn(async move { serve_collab_tcp_once(&ld, &relay_d, true, Some(&d_signer2)).await });
+
+    let relays_short = vec![
+        RelayPin { key: c_signer.public_key(), endpoint: addr_c.to_string() },
+        RelayPin { key: d_signer.public_key(), endpoint: addr_d.to_string() },
+    ];
+    // "ab" is 2 bytes < MIN_SEARCH_TERM_LEN=3: both relays reject → skip → empty.
+    let hits_short =
+        query_relay_set(&me.public_key(), &own_edges, &relays_short, "ab", 4).await;
+
+    // Servers may have returned Ok or Err (client dropped after Error); either is fine.
+    let _ = srv_c.await;
+    let _ = srv_d.await;
+
+    assert!(
+        hits_short.is_empty(),
+        "too-short term must yield empty hits (all relays rejected, skip-and-continue)"
+    );
+}

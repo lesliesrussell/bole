@@ -9,6 +9,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::collab::{key_hex, CollabObject, Key, Profile, TrustEdge};
 use crate::object::{Object, ObjectId};
 
+// bole-3q5g
+/// Maximum `max_hops` value the relay will honour for a Search request.
+/// A client may request more, but the relay silently clamps to this.
+pub const MAX_SEARCH_HOPS: u8 = 6;
+
+/// Minimum byte-length of a Search `term` the relay will accept.
+/// Shorter terms match too broadly (O(corpus) profiles) and are rejected.
+pub const MIN_SEARCH_TERM_LEN: usize = 3;
+
 // bole-n9fx
 /// True iff `p` matches `term` on the SAME fields as `rank_strangers`:
 /// display_name, bio, any dns_alias, or the raw key hex.

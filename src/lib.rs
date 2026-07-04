@@ -77,6 +77,8 @@ pub use collab::{fingerprint, key_hex, verify_profile, CollabObject, CollabSigne
     RelayPin,
     // bole-n9fx
     search_ball,
+    // bole-3q5g
+    MAX_SEARCH_HOPS, MIN_SEARCH_TERM_LEN,
 };
 // bole-su8
 pub use repo::collab::COLLAB_RELAYS_PREFIX;
