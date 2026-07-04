@@ -12,7 +12,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/status", get(handlers::status::get_status))
         // bole-3xj5
         .route("/v1/timelines", get(handlers::timelines::list))
-        .route("/v1/timelines/{name}", get(handlers::timelines::get_one))
+        // bole-3xj5: catch-all so hierarchical timeline names (e.g. `leslie/private/exp`)
+        // resolve — bole ref names are slash-delimited, not single-segment.
+        .route("/v1/timelines/{*name}", get(handlers::timelines::get_one))
         // bole-3xj5
         .route("/v1/snapshots/{id}", get(handlers::snapshots::get_metadata))
         .route("/v1/snapshots/{id}/blob", get(handlers::snapshots::get_blob))

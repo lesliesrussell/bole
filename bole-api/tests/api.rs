@@ -353,6 +353,148 @@ async fn profile_bad_key_is_400() {
 }
 
 // bole-3xj5
+/// C1 regression: an ACL-protected timeline must be invisible to an anonymous
+/// caller in both `list` and `get_one` — and `get_one` must answer 404, never
+/// 403, so a hidden timeline is indistinguishable from a nonexistent one.
+#[tokio::test]
+async fn acl_protected_timeline_is_hidden_from_anonymous() {
+    let (_dir, state) = state_with_temp_repo().await;
+    seed_snapshot_and_timeline(&state.repo).await; // public timeline "main"
+
+    state
+        .repo
+        .acls
+        .set_timeline_acl(bole::TimelineAcl { pattern: "leslie/private/**".into() })
+        .unwrap();
+    let hidden_head = bole::ObjectId::new([9u8; 32]);
+    state
+        .repo
+        .refs
+        .create_timeline(
+            bole::RefName::new("leslie/private/exp").unwrap(),
+            hidden_head,
+            bole::TimelinePolicy::Unrestricted,
+            0,
+            "persistent".into(),
+            None,
+        )
+        .unwrap();
+
+    let app = build_router(state);
+
+    // Anonymous list: public timeline present, protected timeline absent.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/v1/timelines").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names: Vec<&str> = json["timelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"main"));
+    assert!(!names.contains(&"leslie/private/exp"));
+
+    // Anonymous get_one on the protected timeline: 404, not 403.
+    let resp2 = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/timelines/leslie/private/exp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+}
+
+// bole-3xj5
+/// I3 regression: hierarchical (slash-containing) timeline names must resolve
+/// through `GET /v1/timelines/{*name}`.
+#[tokio::test]
+async fn hierarchical_timeline_name_resolves() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let mut ws = state.repo.ephemeral_workspace();
+    ws.write("README.md", &b"hi"[..]);
+    let snap = ws.commit("tester", "init", 0).await.unwrap();
+    state
+        .repo
+        .refs
+        .create_timeline(
+            bole::RefName::new("team/foo").unwrap(),
+            snap,
+            bole::TimelinePolicy::Unrestricted,
+            0,
+            "persistent".into(),
+            None,
+        )
+        .unwrap();
+
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/timelines/team/foo").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "team/foo");
+    assert_eq!(json["kind"], "timeline");
+}
+
+// bole-3xj5
+/// I2 (signed-request arm): a tampered-but-well-formed signature over a fresh,
+/// in-window `X-Bole-Date` must be rejected with 401.
+#[tokio::test]
+async fn signed_request_tampered_signature_rejected() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let (_dir, state) = state_with_temp_repo().await;
+    let signing = SigningKey::from_bytes(&[7u8; 32]);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    let date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let method = "GET";
+    let path = "/debug/whoami";
+    let body_hash = hex::encode(Sha256::digest(b""));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"bole-http-req-v1\0");
+    msg.extend_from_slice(format!("{method}\n{path}\n{date}\n{body_hash}").as_bytes());
+    let mut sig = hex::encode(signing.sign(&msg).to_bytes());
+    // Valid hex, wrong signature: flip the last hex digit.
+    let last = sig.pop().unwrap();
+    sig.push(if last == '0' { '1' } else { '0' });
+
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header("authorization", format!("Signature keyId=\"k1\",sig=\"{sig}\""))
+                .header("x-bole-date", date)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// bole-3xj5
 #[tokio::test]
 async fn repos_lists_this_store() {
     let (_dir, state) = state_with_temp_repo().await;
