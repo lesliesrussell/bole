@@ -73,14 +73,82 @@ pub struct RefStatusEntry {
     pub status: RefApplyStatus,
 }
 
+// bole-nbug
+/// Serde helper for `Option<[u8; 64]>`: postcard/serde's blanket array impls only
+/// go to 32; this module serialises the 64-byte relay signature as a fixed-length
+/// tuple of bytes so the wire representation is compact and round-trips cleanly.
+mod opt_sig64 {
+    use serde::{Deserializer, Serializer};
+    use serde::de::{SeqAccess, Visitor};
+    use std::fmt;
+
+    struct Arr64Visitor;
+    impl<'de> Visitor<'de> for Arr64Visitor {
+        type Value = [u8; 64];
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a 64-byte sequence")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<[u8; 64], A::Error> {
+            let mut arr = [0u8; 64];
+            for (i, b) in arr.iter_mut().enumerate() {
+                *b = seq.next_element()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(i, &"64 bytes")
+                })?;
+            }
+            Ok(arr)
+        }
+    }
+
+    struct SerArr64<'a>(&'a [u8; 64]);
+    impl serde::Serialize for SerArr64<'_> {
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeTuple;
+            let mut t = s.serialize_tuple(64)?;
+            for b in self.0.iter() {
+                t.serialize_element(b)?;
+            }
+            t.end()
+        }
+    }
+
+    pub fn serialize<S: Serializer>(v: &Option<[u8; 64]>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(arr) => s.serialize_some(&SerArr64(arr)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 64]>, D::Error> {
+        struct OptVisitor;
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<[u8; 64]>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "an optional 64-byte sequence")
+            }
+            fn visit_none<E: serde::de::Error>(self) -> Result<Option<[u8; 64]>, E> {
+                Ok(None)
+            }
+            fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Option<[u8; 64]>, D2::Error> {
+                d.deserialize_tuple(64, Arr64Visitor).map(Some)
+            }
+        }
+        d.deserialize_option(OptVisitor)
+    }
+}
+
 // bole-6qy
 /// One control frame of the sync protocol.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
-    /// client → server: version range, capabilities, intent.
-    Hello { proto_min: u16, proto_max: u16, caps: CapSet, intent: Intent },
+    // bole-nbug
+    /// client → server: version range, capabilities, intent. `client_nonce` is
+    /// `Some` only on a relay-auth query; `None` (all other flows) requests no
+    /// relay-auth and is byte-compatible behaviour with pre-WS8f-a callers.
+    Hello { proto_min: u16, proto_max: u16, caps: CapSet, intent: Intent, client_nonce: Option<[u8; 32]> },
     /// server → client: chosen version + capabilities + advertised refs.
-    Welcome { proto: u16, caps: CapSet, refs: Vec<RefAdvert> },
+    /// `relay_sig` is `Some` only when a relay with a signer answers a
+    /// `client_nonce`; `None` otherwise.
+    Welcome { proto: u16, caps: CapSet, refs: Vec<RefAdvert>, #[serde(with = "opt_sig64")] relay_sig: Option<[u8; 64]> },
     /// negotiation: the sender's want (ref targets) and have (object id set).
     HaveWant { want: Vec<ObjectId>, have: Vec<ObjectId> },
     /// a WS4 pack carrying the missing object closure.
@@ -179,6 +247,7 @@ mod tests {
             proto_max: 1,
             caps: CapSet::EMPTY,
             intent: Intent::Fetch,
+            client_nonce: None,
         };
         let bytes = encode_message(&m).unwrap();
         assert_eq!(decode_message(&bytes).unwrap(), m);
@@ -191,6 +260,18 @@ mod tests {
                 target: ObjectId::from_content(b"x"),
                 is_timeline: true,
             }],
+            relay_sig: None,
+        };
+        assert_eq!(decode_message(&encode_message(&w).unwrap()).unwrap(), w);
+
+        // bole-nbug
+        let m = Message::Hello {
+            proto_min: 1, proto_max: 1, caps: CapSet::EMPTY, intent: Intent::Fetch,
+            client_nonce: Some([7u8; 32]),
+        };
+        assert_eq!(decode_message(&encode_message(&m).unwrap()).unwrap(), m);
+        let w = Message::Welcome {
+            proto: 1, caps: CapSet::EMPTY, refs: vec![], relay_sig: Some([9u8; 64]),
         };
         assert_eq!(decode_message(&encode_message(&w).unwrap()).unwrap(), w);
     }
