@@ -350,5 +350,6 @@ mod tests {
         let path = g.trust_path(&ak, &tk, 4).unwrap();
         assert_eq!(path.len(), 1, "direct 1-hop route is shortest");
         assert_eq!(path[0].key, tk);
+        assert_eq!(path[0].via, TrustKind::Follow);
     }
 }
