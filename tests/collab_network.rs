@@ -259,3 +259,94 @@ async fn stranger_absent_from_query_until_followed() {
     let idx2 = anode.local_discovery_index(&a.public_key(), 2).await.unwrap();
     assert!(!idx2.query("bob").is_empty(), "after follow, stranger appears in discover query");
 }
+
+// bole-4m2
+#[tokio::test]
+async fn loopback_stranger_trust_path() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::object::Object;
+    use bole::refs::{Ref, RefName, Tag};
+    use bole::repo::collab::COLLAB_REMOTES_PREFIX;
+    use bole::sync::collab::{collab_fetch_transient, serve_collab_tcp_once};
+    use bole::rank_strangers;
+
+    // Relay aggregates a chain: querier(me) follows X; X vouches Y; Y follows stranger.
+    let me = CollabSigner::from_seed([50u8; 32]);
+    let x = CollabSigner::from_seed([51u8; 32]);
+    let y = CollabSigner::from_seed([52u8; 32]);
+    let stranger = CollabSigner::from_seed([53u8; 32]);
+    let lonely = CollabSigner::from_seed([54u8; 32]);
+
+    let relay = Repository::memory();
+    relay.publish_profile(&CollabSigner::from_seed([59u8; 32]).sign_profile("relay".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    // Seed the relay's cache with X's vouch->Y, Y's follow->stranger, and both stranger + lonely profiles.
+    async fn cache(repo: &Repository, obj: CollabObject) {
+        use bole::collab::fingerprint;
+        let (author, leaf) = match &obj {
+            CollabObject::Profile(p) => (p.key, "profile".to_string()),
+            CollabObject::TrustEdge(e) => (e.from_key, format!("edge/{}/{}",
+                match e.kind { TrustKind::Vouch => "vouch", TrustKind::Follow => "follow", TrustKind::Review => "review" },
+                fingerprint(&e.to_key))),
+        };
+        let id = repo.objects.put(&Object::Collab(obj)).await.unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new(format!("{COLLAB_REMOTES_PREFIX}{}/{leaf}", fingerprint(&author))).unwrap(),
+               Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+    }
+    cache(&relay, CollabObject::TrustEdge(x.sign_edge(y.public_key(), TrustKind::Vouch, Some("y".into()), 1))).await;
+    cache(&relay, CollabObject::TrustEdge(y.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1))).await;
+    cache(&relay, CollabObject::Profile(stranger.sign_profile("target".into(), String::new(), vec![], vec![], 1))).await;
+    cache(&relay, CollabObject::Profile(lonely.sign_profile("target".into(), String::new(), vec![], vec![], 1))).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay, true).await });
+    let mut conn = connect(addr).await;
+    let corpus = collab_fetch_transient(&mut conn).await.unwrap();
+    srv.await.unwrap().unwrap();
+
+    // Querier's own edge: me -follow-> x.
+    let own = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let hits = rank_strangers(&me.public_key(), &own, &corpus, "target", 4);
+    let connected = hits.iter().find(|h| h.key == stranger.public_key()).unwrap();
+    assert_eq!(connected.hops, Some(3), "me->x->y->stranger is 3 hops");
+    let via: Vec<_> = connected.trust_path.as_ref().unwrap().iter().map(|h| h.via).collect();
+    assert_eq!(via, vec![TrustKind::Follow, TrustKind::Vouch, TrustKind::Follow]);
+    let unconnected = hits.iter().find(|h| h.key == lonely.public_key()).unwrap();
+    assert_eq!(unconnected.trust_path, None, "lonely stranger has no path");
+}
+
+// bole-4m2
+#[tokio::test]
+async fn loopback_withheld_and_forged() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::rank_strangers;
+
+    let me = CollabSigner::from_seed([55u8; 32]);
+    let x = CollabSigner::from_seed([56u8; 32]);
+    let stranger = CollabSigner::from_seed([57u8; 32]);
+    let own = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+
+    // Withheld: relay omits x->stranger. Path is None (completeness degrades, soundness holds).
+    let withheld_corpus = vec![
+        CollabObject::Profile(stranger.sign_profile("s".into(), String::new(), vec![], vec![], 1)),
+    ];
+    let hits = rank_strangers(&me.public_key(), &own, &withheld_corpus, "s", 4);
+    assert_eq!(hits[0].trust_path, None, "withheld middle edge -> no path (sound)");
+
+    // Forged: relay injects a tampered x->stranger edge (bad signature). A real
+    // fetch drops it at verify; simulate that the corpus (post-verify) never
+    // contains it, so the path is still None. (Verification happens in
+    // collab_fetch_transient; a forged edge cannot enter the graph.)
+    let forged = {
+        let mut e = x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1);
+        e.seq = 999; // mutate a signed field -> signature no longer verifies
+        e
+    };
+    assert!(!bole::verify_edge(&forged), "forged edge does not verify");
+    // rank_strangers assumes a pre-verified corpus (fetch already dropped it);
+    // with the forged edge absent, the stranger stays unconnected.
+    let hits2 = rank_strangers(&me.public_key(), &own, &withheld_corpus, "s", 4);
+    assert_eq!(hits2[0].trust_path, None, "forged edge never in verified corpus -> no fake path");
+}
