@@ -34,14 +34,87 @@ impl FromRequestParts<AppState> for RequestAuth {
 /// then signed request (Task 4), then trusted mTLS proxy header (Task 5), else
 /// anonymous. Task 3 implements only bearer + anonymous; the other arms are
 /// added by their tasks.
-fn resolve_principal(parts: &Parts, _state: &AppState) -> Result<Principal, ApiError> {
+// bole-3xj5
+fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiError> {
     if let Some(auth) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         let value = auth.to_str().map_err(|_| ApiError::bad_request("non-ascii Authorization header"))?;
         if let Some(token) = value.strip_prefix("Bearer ") {
             return Ok(Principal::Token(token.to_string()));
         }
+        if let Some(rest) = value.strip_prefix("Signature ") {
+            return verify_signed(rest, parts, state);
+        }
     }
     Ok(Principal::Anonymous)
+}
+
+// bole-3xj5
+const SIGNED_REQUEST_DOMAIN: &[u8] = b"bole-http-req-v1\0";
+const MAX_SKEW_SECS: u64 = 300;
+
+// bole-3xj5
+/// Verifies `Signature keyId="…",sig="…"` against a registered key. GET/empty
+/// body only carries a hash of the (possibly empty) body — the body is not read
+/// here (read-only endpoints have empty request bodies), so `body_hash` is the
+/// sha256 of an empty byte string. If a future write endpoint needs body
+/// binding, buffer the body in a layer and stash its hash in extensions.
+fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principal, ApiError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use sha2::{Digest, Sha256};
+
+    let key_id = extract_param(rest, "keyId").ok_or_else(|| ApiError::unauthorized("missing keyId"))?;
+    let sig_hex = extract_param(rest, "sig").ok_or_else(|| ApiError::unauthorized("missing sig"))?;
+    let registered = state
+        .config
+        .keys
+        .get(&key_id)
+        .ok_or_else(|| ApiError::unauthorized("unknown keyId"))?;
+
+    // Replay window.
+    let date = parts
+        .headers
+        .get("x-bole-date")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("missing X-Bole-Date"))?;
+    let ts: u64 = date.parse().map_err(|_| ApiError::unauthorized("X-Bole-Date must be unix seconds"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if now.abs_diff(ts) > MAX_SKEW_SECS {
+        return Err(ApiError::unauthorized("X-Bole-Date outside skew window"));
+    }
+
+    // Canonical message.
+    let method = parts.method.as_str();
+    let path = parts.uri.path();
+    let body_hash = hex::encode(Sha256::digest(b""));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(SIGNED_REQUEST_DOMAIN);
+    msg.extend_from_slice(format!("{method}\n{path}\n{date}\n{body_hash}").as_bytes());
+
+    let vk = VerifyingKey::from_bytes(&registered.pubkey)
+        .map_err(|_| ApiError::unauthorized("bad registered key"))?;
+    let sig_bytes: [u8; 64] = hex::decode(&sig_hex)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| ApiError::unauthorized("sig must be 64-byte hex"))?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    vk.verify(&msg, &signature).map_err(|_| ApiError::unauthorized("signature verification failed"))?;
+
+    Ok(Principal::SshKey(key_id))
+}
+
+// bole-3xj5
+/// Extracts `name="value"` from a comma-separated parameter string.
+fn extract_param(s: &str, name: &str) -> Option<String> {
+    for part in s.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix(&format!("{name}=")) {
+            return Some(v.trim_matches('"').to_string());
+        }
+    }
+    None
 }
 
 /// The `ConnectInfo` peer address, used by the mTLS proxy-header arm (Task 5).

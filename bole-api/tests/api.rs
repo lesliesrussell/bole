@@ -85,6 +85,90 @@ async fn token_maps_to_actor_principal() {
     let _ = Principal::Anonymous; // keep the import used
 }
 
+// bole-3xj5
+#[tokio::test]
+async fn signed_request_maps_to_actor() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+
+    let (_dir, state) = state_with_temp_repo().await;
+    let seed = [7u8; 32];
+    let signing = SigningKey::from_bytes(&seed);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    let date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let method = "GET";
+    let path = "/debug/whoami";
+    let body_hash = hex::encode(Sha256::digest(b""));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"bole-http-req-v1\0");
+    msg.extend_from_slice(format!("{method}\n{path}\n{date}\n{body_hash}").as_bytes());
+    let sig = hex::encode(signing.sign(&msg).to_bytes());
+
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header("authorization", format!("Signature keyId=\"k1\",sig=\"{sig}\""))
+                .header("x-bole-date", date)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["principal"], "SshKey");
+    assert_eq!(json["actor"], "carol");
+}
+
+// bole-3xj5
+#[tokio::test]
+async fn signed_request_stale_date_rejected() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
+    let (_dir, state) = state_with_temp_repo().await;
+    let signing = SigningKey::from_bytes(&[7u8; 32]);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    let date = "1000000000"; // year 2001, far outside skew
+    let body_hash = hex::encode(Sha256::digest(b""));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"bole-http-req-v1\0");
+    msg.extend_from_slice(format!("GET\n/debug/whoami\n{date}\n{body_hash}").as_bytes());
+    let sig = hex::encode(signing.sign(&msg).to_bytes());
+
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/debug/whoami")
+                .header("authorization", format!("Signature keyId=\"k1\",sig=\"{sig}\""))
+                .header("x-bole-date", date)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn no_credential_is_anonymous() {
     let (_dir, state) = state_with_temp_repo().await;
