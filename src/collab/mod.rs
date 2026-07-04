@@ -16,6 +16,9 @@ pub mod trust;
 pub mod naming;
 // bole-0ms
 pub mod alias;
+// bole-n9fx
+mod search;
+pub use search::search_ball;
 
 pub use object::{
     verify_profile, CollabObject, CollabSigner, Profile,
