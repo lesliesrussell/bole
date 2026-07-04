@@ -82,6 +82,8 @@ pub use repo::collab::COLLAB_RELAYS_PREFIX;
 pub use collab::trust::TrustHop;
 // bole-jom
 pub use collab::discovery::{rank_strangers, StrangerHit};
+// bole-yc9x
+pub use collab::discovery::rank_strangers_multi;
 
 pub(crate) mod codec;
 
@@ -129,3 +131,5 @@ pub use sync::collab::collab_pull;
 pub use sync::collab::collab_fetch_transient;
 // bole-8lm
 pub use sync::collab::serve_collab_tcp_once;
+// bole-yc9x
+pub use sync::collab::{collab_fetch_authenticated, query_relay_set};

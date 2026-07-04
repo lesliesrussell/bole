@@ -26,7 +26,7 @@ async fn loopback_pull_roundtrip() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // bole-jdo
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false, None).await });
 
     let client_repo = Repository::memory();
     let mut conn = connect(addr).await;
@@ -55,7 +55,7 @@ async fn loopback_scoped_never_pulled() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // bole-jdo
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &server_repo, false, None).await });
 
     let client_repo = Repository::memory();
     let mut conn = connect(addr).await;
@@ -109,7 +109,7 @@ async fn loopback_cache_forward_depth2() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // bole-jdo
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false, None).await });
     let mut conn = connect(addr).await;
     collab_pull(&mut conn, &anode).await.unwrap();
     srv.await.unwrap().unwrap();
@@ -153,7 +153,7 @@ async fn loopback_over_depth_excluded() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // bole-jdo
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &bnode, false, None).await });
     let mut conn = connect(addr).await;
     collab_pull(&mut conn, &anode).await.unwrap();
     srv.await.unwrap().unwrap();
@@ -202,7 +202,7 @@ async fn relay_transient_fetch_no_persist() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let relay1 = relay.clone();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay1, true).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay1, true, None).await });
     let mut conn = connect(addr).await;
     let objs = collab_fetch_transient(&mut conn).await.unwrap();
     srv.await.unwrap().unwrap();
@@ -224,7 +224,7 @@ async fn relay_transient_fetch_no_persist() {
     let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr2 = listener2.local_addr().unwrap();
     let relay2 = relay.clone();
-    let srv2 = tokio::spawn(async move { serve_collab_tcp_once(&listener2, &relay2, true).await });
+    let srv2 = tokio::spawn(async move { serve_collab_tcp_once(&listener2, &relay2, true, None).await });
     let mut conn2 = connect(addr2).await;
     let objs2 = collab_fetch_transient(&mut conn2).await.unwrap();
     srv2.await.unwrap().unwrap();
@@ -301,7 +301,7 @@ async fn loopback_stranger_trust_path() {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay, true).await });
+    let srv = tokio::spawn(async move { serve_collab_tcp_once(&listener, &relay, true, None).await });
     let mut conn = connect(addr).await;
     let corpus = collab_fetch_transient(&mut conn).await.unwrap();
     srv.await.unwrap().unwrap();
@@ -349,4 +349,348 @@ async fn loopback_withheld_and_forged() {
     // with the forged edge absent, the stranger stays unconnected.
     let hits2 = rank_strangers(&me.public_key(), &own, &withheld_corpus, "s", 4);
     assert_eq!(hits2[0].trust_path, None, "forged edge never in verified corpus -> no fake path");
+}
+
+// bole-yc9x
+/// Helper: seed a CollabObject into a relay's remotes cache with the correct ref layout.
+async fn cache_relay(repo: &bole::Repository, obj: bole::collab::CollabObject) {
+    use bole::collab::{fingerprint, CollabObject, TrustKind};
+    use bole::object::Object;
+    use bole::refs::{Ref, RefName, Tag};
+    use bole::repo::collab::COLLAB_REMOTES_PREFIX;
+    let (author, leaf) = match &obj {
+        CollabObject::Profile(p) => (p.key, "profile".to_string()),
+        CollabObject::TrustEdge(e) => (
+            e.from_key,
+            format!(
+                "edge/{}/{}",
+                match e.kind {
+                    TrustKind::Vouch => "vouch",
+                    TrustKind::Follow => "follow",
+                    TrustKind::Review => "review",
+                },
+                fingerprint(&e.to_key)
+            ),
+        ),
+    };
+    let id = repo.objects.put(&Object::Collab(obj)).await.unwrap();
+    let mut tx = repo.refs.transaction();
+    tx.set(
+        RefName::new(format!("{COLLAB_REMOTES_PREFIX}{}/{leaf}", fingerprint(&author))).unwrap(),
+        Ref::Tag(Tag { target: id, created_at: 0, message: None }),
+    );
+    tx.commit().unwrap();
+}
+
+// bole-yc9x
+// Two relays each hold one slice of the chain; a merged query yields the stranger
+// with a trust-path spanning both, attributed to both relay keys.
+#[tokio::test]
+async fn multi_relay_merged_trust_path_and_attribution() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::{query_relay_set, RelayPin};
+
+    let me = CollabSigner::from_seed([60u8; 32]);
+    let x = CollabSigner::from_seed([61u8; 32]);
+    let stranger = CollabSigner::from_seed([62u8; 32]);
+
+    // Relay A: holds x->stranger edge + stranger profile. Signs with a_signer.
+    let a_signer = CollabSigner::from_seed([63u8; 32]);
+    let relay_a = Repository::memory();
+    relay_a
+        .publish_profile(
+            &a_signer.sign_profile("relay-a".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_a,
+        CollabObject::TrustEdge(x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_a,
+        CollabObject::Profile(
+            stranger.sign_profile("Pat".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    // Relay B: also holds the stranger's profile. Signs with b_signer.
+    let b_signer = CollabSigner::from_seed([64u8; 32]);
+    let relay_b = Repository::memory();
+    relay_b
+        .publish_profile(
+            &b_signer.sign_profile("relay-b".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_b,
+        CollabObject::Profile(
+            stranger.sign_profile("Pat".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    // Spin up listeners.
+    let la = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = la.local_addr().unwrap();
+    let a_signer2 = CollabSigner::from_seed([63u8; 32]);
+    let srv_a =
+        tokio::spawn(async move { serve_collab_tcp_once(&la, &relay_a, true, Some(&a_signer2)).await });
+
+    let lb = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = lb.local_addr().unwrap();
+    let b_signer2 = CollabSigner::from_seed([64u8; 32]);
+    let srv_b =
+        tokio::spawn(async move { serve_collab_tcp_once(&lb, &relay_b, true, Some(&b_signer2)).await });
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let relays = vec![
+        RelayPin { key: a_signer.public_key(), endpoint: addr_a.to_string() },
+        RelayPin { key: b_signer.public_key(), endpoint: addr_b.to_string() },
+    ];
+    let hits = query_relay_set(&me.public_key(), &own_edges, &relays, "Pat", 4).await;
+
+    srv_a.await.unwrap().unwrap();
+    srv_b.await.unwrap().unwrap();
+
+    let hit = hits.iter().find(|h| h.key == stranger.public_key()).expect("stranger found");
+    assert!(hit.trust_path.is_some(), "trust path me->x->stranger resolved");
+    assert_eq!(hit.hops, Some(2));
+    // Attributed to at least one relay (both served the profile).
+    assert!(
+        hit.relays.contains(&a_signer.public_key())
+            && hit.relays.contains(&b_signer.public_key()),
+        "attributed to BOTH relays that served the profile"
+    );
+}
+
+// bole-yc9x
+// A relay serving a bad handshake signature is dropped; the query still completes
+// using the honest relay (completeness degraded, soundness intact).
+#[tokio::test]
+async fn multi_relay_bad_sig_dropped_query_completes() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::{query_relay_set, RelayPin};
+
+    let me = CollabSigner::from_seed([70u8; 32]);
+    let x = CollabSigner::from_seed([71u8; 32]);
+    let stranger = CollabSigner::from_seed([72u8; 32]);
+
+    // Good relay: honest signer, pinned key matches what it uses.
+    let good_signer = CollabSigner::from_seed([73u8; 32]);
+    let good_relay = Repository::memory();
+    good_relay
+        .publish_profile(
+            &good_signer.sign_profile("good".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &good_relay,
+        CollabObject::TrustEdge(x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &good_relay,
+        CollabObject::Profile(
+            stranger.sign_profile("target".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    // Bad relay: serves a WRONG signer's signature (pinned key ≠ signing key).
+    let bad_signer = CollabSigner::from_seed([74u8; 32]); // the actual signer
+    let pinned_bad_key = CollabSigner::from_seed([75u8; 32]).public_key(); // what client expects
+    let bad_relay = Repository::memory();
+    bad_relay
+        .publish_profile(
+            &bad_signer.sign_profile("bad".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+
+    let lg = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_good = lg.local_addr().unwrap();
+    let good_signer2 = CollabSigner::from_seed([73u8; 32]);
+    let srv_good =
+        tokio::spawn(async move { serve_collab_tcp_once(&lg, &good_relay, true, Some(&good_signer2)).await });
+
+    let lb = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_bad = lb.local_addr().unwrap();
+    let bad_signer2 = CollabSigner::from_seed([74u8; 32]);
+    let srv_bad =
+        tokio::spawn(async move { serve_collab_tcp_once(&lb, &bad_relay, true, Some(&bad_signer2)).await });
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let relays = vec![
+        RelayPin { key: good_signer.public_key(), endpoint: addr_good.to_string() },
+        RelayPin { key: pinned_bad_key, endpoint: addr_bad.to_string() }, // mismatch -> rejected
+    ];
+    let hits = query_relay_set(&me.public_key(), &own_edges, &relays, "target", 4).await;
+
+    srv_good.await.unwrap().unwrap();
+    // Bad server also completes (it sent a Welcome, client rejected and dropped).
+    let _ = srv_bad.await;
+
+    // Stranger still found via the good relay.
+    assert!(
+        hits.iter().any(|h| h.key == stranger.public_key()),
+        "stranger found from honest relay despite bad relay being dropped"
+    );
+}
+
+// bole-yc9x
+// An unreachable relay endpoint is skipped; the query still completes.
+#[tokio::test]
+async fn multi_relay_unreachable_skipped() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::{query_relay_set, RelayPin};
+
+    let me = CollabSigner::from_seed([80u8; 32]);
+    let x = CollabSigner::from_seed([81u8; 32]);
+    let stranger = CollabSigner::from_seed([82u8; 32]);
+
+    let good_signer = CollabSigner::from_seed([83u8; 32]);
+    let good_relay = Repository::memory();
+    good_relay
+        .publish_profile(
+            &good_signer.sign_profile("good".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &good_relay,
+        CollabObject::TrustEdge(x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &good_relay,
+        CollabObject::Profile(
+            stranger.sign_profile("ghost".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    let lg = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_good = lg.local_addr().unwrap();
+    let good_signer2 = CollabSigner::from_seed([83u8; 32]);
+    let srv =
+        tokio::spawn(async move { serve_collab_tcp_once(&lg, &good_relay, true, Some(&good_signer2)).await });
+
+    // Use a dead port (bind then drop immediately) as the unreachable relay.
+    let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_addr = dead_listener.local_addr().unwrap();
+    drop(dead_listener); // port now unreachable
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let dead_key = CollabSigner::from_seed([84u8; 32]).public_key();
+    let relays = vec![
+        RelayPin { key: dead_key, endpoint: dead_addr.to_string() }, // unreachable
+        RelayPin { key: good_signer.public_key(), endpoint: addr_good.to_string() },
+    ];
+    let hits = query_relay_set(&me.public_key(), &own_edges, &relays, "ghost", 4).await;
+
+    srv.await.unwrap().unwrap();
+
+    assert!(
+        hits.iter().any(|h| h.key == stranger.public_key()),
+        "stranger found from reachable relay despite unreachable relay in set"
+    );
+}
+
+// bole-yc9x
+// A stranger served by BOTH relays appears once (profile dedup), attributed to both.
+#[tokio::test]
+async fn multi_relay_dedups_shared_stranger() {
+    use bole::collab::{CollabObject, CollabSigner, TrustKind};
+    use bole::sync::collab::serve_collab_tcp_once;
+    use bole::{query_relay_set, RelayPin};
+
+    let me = CollabSigner::from_seed([90u8; 32]);
+    let x = CollabSigner::from_seed([91u8; 32]);
+    let stranger = CollabSigner::from_seed([92u8; 32]);
+
+    let a_signer = CollabSigner::from_seed([93u8; 32]);
+    let relay_a = Repository::memory();
+    relay_a
+        .publish_profile(
+            &a_signer.sign_profile("relay-a".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    // Both relays have the edge and the stranger's profile.
+    cache_relay(
+        &relay_a,
+        CollabObject::TrustEdge(x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_a,
+        CollabObject::Profile(
+            stranger.sign_profile("shared".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    let b_signer = CollabSigner::from_seed([94u8; 32]);
+    let relay_b = Repository::memory();
+    relay_b
+        .publish_profile(
+            &b_signer.sign_profile("relay-b".into(), String::new(), vec![], vec![], 1),
+        )
+        .await
+        .unwrap();
+    cache_relay(
+        &relay_b,
+        CollabObject::TrustEdge(x.sign_edge(stranger.public_key(), TrustKind::Follow, None, 1)),
+    )
+    .await;
+    cache_relay(
+        &relay_b,
+        CollabObject::Profile(
+            stranger.sign_profile("shared".into(), String::new(), vec![], vec![], 1),
+        ),
+    )
+    .await;
+
+    let la = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_a = la.local_addr().unwrap();
+    let a_signer2 = CollabSigner::from_seed([93u8; 32]);
+    let srv_a =
+        tokio::spawn(async move { serve_collab_tcp_once(&la, &relay_a, true, Some(&a_signer2)).await });
+
+    let lb = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr_b = lb.local_addr().unwrap();
+    let b_signer2 = CollabSigner::from_seed([94u8; 32]);
+    let srv_b =
+        tokio::spawn(async move { serve_collab_tcp_once(&lb, &relay_b, true, Some(&b_signer2)).await });
+
+    let own_edges = vec![me.sign_edge(x.public_key(), TrustKind::Follow, None, 1)];
+    let relays = vec![
+        RelayPin { key: a_signer.public_key(), endpoint: addr_a.to_string() },
+        RelayPin { key: b_signer.public_key(), endpoint: addr_b.to_string() },
+    ];
+    let hits = query_relay_set(&me.public_key(), &own_edges, &relays, "shared", 4).await;
+
+    srv_a.await.unwrap().unwrap();
+    srv_b.await.unwrap().unwrap();
+
+    // Exactly one hit (deduped), attributed to both relays.
+    let stranger_hits: Vec<_> = hits.iter().filter(|h| h.key == stranger.public_key()).collect();
+    assert_eq!(stranger_hits.len(), 1, "shared stranger deduped to exactly one result");
+    let hit = &stranger_hits[0];
+    assert!(
+        hit.relays.contains(&a_signer.public_key()),
+        "attributed to relay A"
+    );
+    assert!(
+        hit.relays.contains(&b_signer.public_key()),
+        "attributed to relay B"
+    );
 }
