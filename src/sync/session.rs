@@ -42,7 +42,8 @@ async fn serve_fetch(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor
     // bole-yl2: the objects we may serve are rooted only at refs this accessor is
     // authorized to read. Capture that set BEFORE trusting the client's `want`.
     let authorized: HashSet<ObjectId> = refs.iter().map(|r| r.target).collect();
-    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
+    // bole-nbug
+    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs, relay_sig: None }).await?;
     let (want, have) = match conn.recv().await? {
         Message::HaveWant { want, have } => (want, have),
         _ => return Err(Error::Storage("protocol: expected HaveWant".into())),
@@ -64,7 +65,8 @@ async fn serve_fetch(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor
 async fn serve_push(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) -> Result<()> {
     // Advertise the server's current heads (its `have` summary for the targets).
     let refs = advertise(repo, accessor)?;
-    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs }).await?;
+    // bole-nbug
+    conn.send(&Message::Welcome { proto: PROTO_VERSION, caps: CapSet::EMPTY, refs, relay_sig: None }).await?;
 
     // Decode + verify the pack (bounded — bole-oby) but do NOT land it yet.
     let pack = match conn.recv().await? {
@@ -288,11 +290,13 @@ pub async fn client_fetch(
     local: &Repository,
     remote_name: &str,
 ) -> Result<Vec<(RefName, ObjectId)>> {
+    // bole-nbug
     conn.send(&Message::Hello {
         proto_min: PROTO_VERSION,
         proto_max: PROTO_VERSION,
         caps: CapSet::EMPTY,
         intent: Intent::Fetch,
+        client_nonce: None,
     })
     .await?;
     let refs = match conn.recv().await? {
@@ -334,11 +338,13 @@ pub async fn client_push(
     remote_name: &str,
     timelines: &[RefName],
 ) -> Result<Vec<RefStatusEntry>> {
+    // bole-nbug
     conn.send(&Message::Hello {
         proto_min: PROTO_VERSION,
         proto_max: PROTO_VERSION,
         caps: CapSet::EMPTY,
         intent: Intent::Push,
+        client_nonce: None,
     })
     .await?;
     let server_refs = match conn.recv().await? {
@@ -527,11 +533,13 @@ mod tests {
             serve(&mut sc, &srv, &Accessor::new()).await
         });
 
+        // bole-nbug
         cc.send(&Message::Hello {
             proto_min: PROTO_VERSION,
             proto_max: PROTO_VERSION,
             caps: CapSet::EMPTY,
             intent: Intent::Push,
+            client_nonce: None,
         })
         .await
         .unwrap();
@@ -651,12 +659,14 @@ mod tests {
         });
 
         // Client asks for the protected head DIRECTLY, bypassing the advert.
+        // bole-nbug
         client_conn
             .send(&Message::Hello {
                 proto_min: PROTO_VERSION,
                 proto_max: PROTO_VERSION,
                 caps: CapSet::EMPTY,
                 intent: Intent::Fetch,
+                client_nonce: None,
             })
             .await
             .unwrap();

@@ -39,9 +39,10 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 // that connects and never sends data cannot wedge the accept loop forever.
                 // Fully-concurrent (spawned-per-connection) serving is deferred to WS8c;
                 // this timeout only prevents a permanent wedge.
+                // bole-nbug
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    serve_collab_tcp_once(&listener, &ctx.repo, relay),
+                    serve_collab_tcp_once(&listener, &ctx.repo, relay, None),
                 )
                 .await
                 {
