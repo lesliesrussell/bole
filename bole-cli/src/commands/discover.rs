@@ -70,7 +70,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
         }
         // bole-0vh
         Cmd::Relay { endpoint, term, max_hops, key_env, key_file } => {
-            let self_key = crate::collabkey::signer_from(&key_env, key_file.as_deref())?.public_key();
+            let self_key = signer_from(&key_env, key_file.as_deref())?.public_key();
             // Gather the querier's own verified edges (own published + tracked cache).
             let mut own_edges = ctx.repo.public_edges().await?;
             for o in ctx.repo.tracked_collab().await? {
