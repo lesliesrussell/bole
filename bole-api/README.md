@@ -110,10 +110,12 @@ directly (bypassing the trusted proxy) could otherwise spoof the header.
 keyId="...",sig="..."` scheme verifies an ed25519 signature over:
 
 ```
-"bole-http-req-v1\0" + METHOD + "\n" + PATH + "\n" + X-Bole-Date + "\n" + hex(sha256(body))
+"bole-http-req-v1\0" + METHOD + "\n" + TARGET + "\n" + X-Bole-Date + "\n" + hex(sha256(body))
 ```
 
-where `METHOD` and `PATH` are the request method and path (no query string),
+where `METHOD` is the request method and `TARGET` is the full request target —
+the path **and** query string (e.g. `/v1/snapshots/{id}/blob?path=src/main.rs`),
+so query parameters cannot be altered in transit without breaking the signature.
 `X-Bole-Date` is a unix-seconds timestamp header, and the body hash is the
 hex-encoded SHA-256 of the request body (empty string for the GET-only
 endpoints this server currently exposes). The `X-Bole-Date` value must be

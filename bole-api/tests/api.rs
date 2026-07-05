@@ -167,6 +167,95 @@ async fn signed_request_maps_to_actor() {
     assert_eq!(json["actor"], "carol");
 }
 
+// bole-e333
+/// Signs a GET request and returns (date, sig) for the given request target
+/// (path, optionally with `?query`), binding the full target into the canonical
+/// message exactly as the server does.
+fn sign_get(signing: &ed25519_dalek::SigningKey, target: &str) -> (String, String) {
+    use ed25519_dalek::Signer;
+    use sha2::{Digest, Sha256};
+    let date = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let body_hash = hex::encode(Sha256::digest(b""));
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"bole-http-req-v1\0");
+    msg.extend_from_slice(format!("GET\n{target}\n{date}\n{body_hash}").as_bytes());
+    (date, hex::encode(signing.sign(&msg).to_bytes()))
+}
+
+// bole-e333
+/// A signature over a request target that includes a query string must verify
+/// when the request is sent to that exact target — proving the query is part of
+/// the signed canonical message.
+#[tokio::test]
+async fn signed_request_with_query_accepted_when_matching() {
+    use ed25519_dalek::SigningKey;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signing = SigningKey::from_bytes(&[7u8; 32]);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    let target = "/debug/whoami?scope=public";
+    let (date, sig) = sign_get(&signing, target);
+
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(target)
+                .header("authorization", format!("Signature keyId=\"k1\",sig=\"{sig}\""))
+                .header("x-bole-date", date)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["actor"], "carol");
+}
+
+// bole-e333
+/// A signature over one query must NOT verify a request whose query was altered
+/// in transit — the query is bound, so tampering breaks the signature.
+#[tokio::test]
+async fn signed_request_tampered_query_rejected() {
+    use ed25519_dalek::SigningKey;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signing = SigningKey::from_bytes(&[7u8; 32]);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+
+    // Sign for scope=public, but send scope=admin.
+    let (date, sig) = sign_get(&signing, "/debug/whoami?scope=public");
+
+    let app = bole_api::router::debug_auth_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/debug/whoami?scope=admin")
+                .header("authorization", format!("Signature keyId=\"k1\",sig=\"{sig}\""))
+                .header("x-bole-date", date)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // bole-3xj5
 #[tokio::test]
 async fn signed_request_stale_date_rejected() {

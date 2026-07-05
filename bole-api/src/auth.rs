@@ -66,10 +66,11 @@ const SIGNED_REQUEST_DOMAIN: &[u8] = b"bole-http-req-v1\0";
 const MAX_SKEW_SECS: u64 = 300;
 
 // bole-3xj5
-/// Verifies `Signature keyId="…",sig="…"` against a registered key. GET/empty
-/// body only carries a hash of the (possibly empty) body — the body is not read
-/// here (read-only endpoints have empty request bodies), so `body_hash` is the
-/// sha256 of an empty byte string. If a future write endpoint needs body
+/// Verifies `Signature keyId="…",sig="…"` against a registered key. The
+/// canonical message binds the method, the full request target (path + query,
+/// per bole-e333), the `X-Bole-Date`, and a hash of the body. The body is not
+/// read here (read-only endpoints have empty request bodies), so `body_hash` is
+/// the sha256 of an empty byte string. If a future write endpoint needs body
 /// binding, buffer the body in a layer and stash its hash in extensions.
 fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principal, ApiError> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -100,7 +101,14 @@ fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principa
 
     // Canonical message.
     let method = parts.method.as_str();
-    let path = parts.uri.path();
+    // bole-e333: bind the full request target (path AND query) so query params
+    // (e.g. `?path=`) cannot be altered in transit without breaking the
+    // signature. Falls back to the bare path when there is no query.
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| parts.uri.path());
     let body_hash = hex::encode(Sha256::digest(b""));
     let mut msg = Vec::new();
     msg.extend_from_slice(SIGNED_REQUEST_DOMAIN);
