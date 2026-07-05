@@ -1,7 +1,8 @@
 # bole-4q6
 # bole-aqk
+# bole-3xj5
 [workspace]
-members = ["bole-cli"]
+members = ["bole-cli", "bole-api"]
 
 [package]
 name = "bole"
