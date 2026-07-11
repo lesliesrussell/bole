@@ -920,5 +920,60 @@ mod extractor_status {
         assert_eq!(json["error"]["code"], "bad_request");
         let msg = json["error"]["message"].as_str().unwrap();
         assert!(!msg.to_lowercase().contains("deserialize") && !msg.contains("missing field"), "leaked detail: {msg}");
+// bole-wyx7
+/// Characterization: credential resolution is strict-precedence, not
+/// fall-through. The first presented credential class decides — an
+/// Authorization header is resolved (or rejected) on its own and never falls
+/// through to the x-bole-client-subject mTLS arm.
+mod auth_precedence {
+    use super::*;
+
+    /// A mapped bearer token wins even when a trusted-proxy mTLS subject is
+    /// also present.
+    #[tokio::test]
+    async fn authorization_wins_over_trusted_proxy_mtls() {
+        let (_dir, state) = state_with_temp_repo().await;
+        let cfg = AuthConfig::parse(
+            "[tokens]\n\"t-secret\" = \"alice\"\n[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n",
+        )
+        .unwrap();
+        let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+        let app = bole_api::router::debug_auth_router(state);
+        let req = with_peer(
+            Request::builder()
+                .uri("/debug/whoami")
+                .header("authorization", "Bearer t-secret")
+                .header("x-bole-client-subject", "CN=bob")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1",
+        );
+        let json = body_json(app.oneshot(req).await.unwrap()).await;
+        assert_eq!(json["principal"], "Token");
+        assert_eq!(json["actor"], "alice");
+    }
+
+    /// An unrecognized Authorization scheme is a 401 and does NOT fall through
+    /// to a valid mTLS subject — strict precedence, no silent downgrade.
+    #[tokio::test]
+    async fn bad_authorization_does_not_fall_through_to_mtls() {
+        let (_dir, state) = state_with_temp_repo().await;
+        let cfg = AuthConfig::parse(
+            "[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n",
+        )
+        .unwrap();
+        let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+        let app = bole_api::router::debug_auth_router(state);
+        let req = with_peer(
+            Request::builder()
+                .uri("/debug/whoami")
+                .header("authorization", "Basic dXNlcjpwdw==")
+                .header("x-bole-client-subject", "CN=bob")
+                .body(Body::empty())
+                .unwrap(),
+            "127.0.0.1",
+        );
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
