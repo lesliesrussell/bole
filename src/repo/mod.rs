@@ -1639,6 +1639,20 @@ mod tests {
         assert!(matches!(err, Error::PolicyViolation(_)), "expected PolicyViolation, got {err:?}");
     }
 
+    // bole-553f: symmetry with fast_forward_only_accepts_descendant — Append
+    // and FastForwardOnly share the descendant rule, so a descendant advance
+    // on an Append timeline must be allowed. Closes the one variant-coverage
+    // gap in the timeline-policy enforcement verification.
+    #[tokio::test]
+    async fn append_accepts_descendant() {
+        use crate::refs::RefName;
+        let (repo, base, child, _sibling, full) = policy_fixture().await;
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), base, TimelinePolicy::Append, 0, "persistent".into(), None).unwrap();
+        repo.advance_timeline(&name, child, &full).await.unwrap();
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, child);
+    }
+
     // bole-3w9
     #[tokio::test]
     async fn unrestricted_allows_non_descendant() {
