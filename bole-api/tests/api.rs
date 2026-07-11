@@ -119,6 +119,51 @@ async fn token_maps_to_actor_principal() {
     assert_eq!(json["actor"], "alice");
 }
 
+// bole-rvyl
+/// Every error path speaks the JSON envelope — including axum's own defaults:
+/// unmatched routes, wrong methods, and extractor rejections must not return
+/// bare text/empty bodies a JSON client can't parse.
+#[tokio::test]
+async fn unmatched_route_and_extractor_errors_use_envelope() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let snap = seed_snapshot_and_timeline(&state.repo).await;
+    let app = build_router(state);
+
+    // Unmatched route → 404 envelope.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/nope").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "not_found");
+
+    // Wrong method on a matched route → 405 envelope.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().method("POST").uri("/v1/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "method_not_allowed");
+
+    // Missing required query param (Query extractor rejection) → 400 envelope.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/snapshots/{snap}/blob"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "bad_request");
+}
+
 // bole-261x
 /// Contract: a request that PRESENTS a bearer token which maps to no actor is
 /// 401, not silently anonymous — a stale or typo'd token must surface as an

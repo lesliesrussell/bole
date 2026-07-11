@@ -21,7 +21,22 @@ pub fn build_router(state: AppState) -> Router {
         // bole-3xj5
         .route("/v1/repos", get(handlers::repos::list))
         .route("/v1/profiles/{key}", get(handlers::profiles::get_profile))
+        // bole-rvyl: axum's defaults for unmatched routes (bare 404) and wrong
+        // methods (bare 405) are the only non-JSON error surfaces; every error
+        // must speak the envelope.
+        .fallback(unmatched)
+        .method_not_allowed_fallback(wrong_method)
         .with_state(state)
+}
+
+// bole-rvyl
+async fn unmatched() -> crate::error::ApiError {
+    crate::error::ApiError::not_found("no such route")
+}
+
+// bole-rvyl
+async fn wrong_method() -> crate::error::ApiError {
+    crate::error::ApiError::method_not_allowed("method not allowed on this route")
 }
 
 // bole-3xj5

@@ -1,7 +1,9 @@
 // bole-3xj5
 //! `GET /v1/timelines` and `GET /v1/timelines/{name}`.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
+// bole-rvyl
+use crate::extract::ApiPath;
 use axum::Json;
 use serde_json::json;
 
@@ -40,7 +42,7 @@ pub async fn list(
 // bole-3xj5
 pub async fn get_one(
     State(state): State<AppState>,
-    Path(name): Path<String>,
+    ApiPath(name): ApiPath<String>,
     auth: RequestAuth,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ref_name = bole::RefName::new(name).map_err(|_| ApiError::bad_request("invalid ref name"))?;
