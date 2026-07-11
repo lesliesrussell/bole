@@ -471,3 +471,36 @@ fn cli_discover_relay_search_transparent() {
     assert_eq!(pat["hops"], 1, "direct follow = 1 hop: {pat}");
     assert_eq!(pat["trust_path"][0]["via"], "follow", "edge type is follow: {pat}");
 }
+
+// bole-k93a
+#[test]
+fn cli_profile_bundle_contract() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "b7".repeat(32);
+    // Own identity: set a profile and follow a peer.
+    ok(w, &["profile", "set", "--display-name", "Me", "--bio", "hi"], Some(&seed));
+    let peer = "c1".repeat(32);
+    ok(w, &["trust", "follow", &peer], Some(&seed));
+
+    // Own bundle: is_local, profile present, the follow out-edge present.
+    let out = ok(w, &["profile", "bundle", "--json"], Some(&seed));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["is_local"], true);
+    assert_eq!(v["profile"]["display_name"], "Me");
+    assert!(
+        v["trust"]["edges"].as_array().unwrap().iter().any(|e| e["to"] == peer && e["kind"] == "follow"),
+        "follow out-edge must be in the bundle: {v}"
+    );
+    assert!(v["timelines"].is_array());
+
+    // Unknown key: the null/empty contract.
+    let ghost = "d2".repeat(32);
+    let out2 = ok(w, &["profile", "bundle", &ghost, "--json"], Some(&seed));
+    let v2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(v2["is_local"], false);
+    assert_eq!(v2["profile"], serde_json::Value::Null);
+    assert!(v2["trust"]["edges"].as_array().unwrap().is_empty());
+    assert!(v2["timelines"].as_array().unwrap().is_empty());
+}

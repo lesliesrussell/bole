@@ -41,6 +41,30 @@ pub(crate) fn kind_seg(kind: TrustKind) -> &'static str {
     }
 }
 
+// bole-k93a
+/// The head-snapshot summary of one timeline in this repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineView {
+    pub name: String,
+    pub head: ObjectId,
+    pub author: String,
+    pub created_at: u64,
+}
+
+// bole-k93a
+/// The locally-verifiable hub view of a developer key: identity + own trust
+/// out-edges (+ this repo's timelines when `key` is the repo's own identity).
+/// Every emitted profile/edge is verified fail-closed. Transport-agnostic — the
+/// library returns typed data; a caller renders JSON.
+#[derive(Debug, Clone)]
+pub struct ProfileBundle {
+    pub key: Key,
+    pub is_local: bool,
+    pub profile: Option<Profile>,
+    pub edges: Vec<TrustEdge>,
+    pub timelines: Vec<TimelineView>,
+}
+
 // bole-581
 /// One resolved discovery hit for the CLI: the canonical key, the author's
 /// self-asserted display name (a hint), the trust-graph-resolved petname (None
@@ -192,6 +216,71 @@ impl Repository {
             }
         }
         Ok(out)
+    }
+
+    // bole-k93a
+    /// Aggregate the locally-verifiable hub view of `key`: verified identity,
+    /// own trust out-edges (`from_key == key`), and — when `key` is this repo's
+    /// own published identity — the repo's timelines. Read-only; every emitted
+    /// profile and edge is verified fail-closed (dropped if it does not verify).
+    /// The first "bole as backend API" surface for the Grove frontend.
+    pub async fn profile_bundle(&self, key: &Key, accessor: &crate::acl::Accessor) -> Result<ProfileBundle> {
+        // is_local: this repo publishes a PUBLIC profile for `key`.
+        let publics = self.public_profiles().await?;
+        let is_local = publics.iter().any(|p| &p.key == key);
+
+        // profile: own published (if local) else tracked peer; verified.
+        let profile = if is_local {
+            publics.into_iter().find(|p| &p.key == key)
+        } else {
+            self.tracked_collab().await?.into_iter().find_map(|o| match o {
+                CollabObject::Profile(p) if &p.key == key => Some(p),
+                _ => None,
+            })
+        }
+        .filter(verify_profile);
+
+        // edges: out-edges (from_key == key), verified fail-closed.
+        let mut edges = Vec::new();
+        if is_local {
+            for e in self.public_edges().await? {
+                if &e.from_key == key && verify_edge(&e) {
+                    edges.push(e);
+                }
+            }
+        } else {
+            for o in self.tracked_collab().await? {
+                if let CollabObject::TrustEdge(e) = o {
+                    if &e.from_key == key && verify_edge(&e) {
+                        edges.push(e);
+                    }
+                }
+            }
+        }
+
+        // timelines: this repo's timelines when local, else empty. bole-k93a:
+        // enumerate through the serve-path gate (list_refs_served) with the
+        // caller's accessor, not a raw refs.list — so an ACL-protected or
+        // scoped-collab timeline never enters a bundle served to a caller who
+        // cannot read it (the bole-e78l serve-path invariant). The CLI passes
+        // a privileged (read-all) accessor for the owner's own hub view.
+        let mut timelines = Vec::new();
+        if is_local {
+            for name in self.list_refs_served("", accessor)? {
+                if let Some(Ref::Timeline(t)) = self.refs.get(&name)? {
+                    if let Some(Object::Snapshot(s)) = self.objects.get(&t.head).await? {
+                        timelines.push(TimelineView {
+                            name: name.as_str().to_string(),
+                            head: t.head,
+                            author: s.author,
+                            created_at: s.created_at,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(ProfileBundle { key: *key, is_local, profile, edges, timelines })
     }
 
     // bole-440
@@ -454,6 +543,151 @@ mod tests {
         // Whichever ordering occurred, a lower seq must never overwrite a higher one.
         let cur = repo.profile(&a.public_key()).await.unwrap().unwrap();
         assert_eq!(cur.seq, 3, "highest seq must be current after concurrent publish");
+    }
+
+    // bole-k93a
+    /// Caches a verified peer collab object under the remotes/ prefix, as a pull
+    /// would — the shared fixture the discovery tests use.
+    async fn cache_peer(repo: &Repository, key: &crate::collab::Key, obj: CollabObject, leaf: &str) {
+        use crate::refs::{Ref, RefName, Tag};
+        let id = repo.objects.put(&Object::Collab(obj)).await.unwrap();
+        let fp = crate::collab::fingerprint(key);
+        let mut tx = repo.refs.transaction();
+        tx.set(
+            RefName::new(format!("{}{fp}/{leaf}", crate::repo::collab::COLLAB_REMOTES_PREFIX)).unwrap(),
+            Ref::Tag(Tag { target: id, created_at: 0, message: None }),
+        );
+        tx.commit().unwrap();
+    }
+
+    // bole-k93a
+    #[tokio::test]
+    async fn bundle_own_identity_full() {
+        use crate::collab::{CollabSigner, TrustKind};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([1u8; 32]);
+        let x = CollabSigner::from_seed([2u8; 32]);
+        repo.publish_profile(&me.sign_profile("Me".into(), "hi".into(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_edge(&me.sign_edge(x.public_key(), TrustKind::Follow, Some("ex".into()), 1)).await.unwrap();
+
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap_id = repo.objects.put(&Object::Snapshot(Snapshot { root: tree, parents: vec![], author: "me".into(), created_at: 7, message: "m".into() })).await.unwrap();
+        repo.refs.create_timeline(RefName::new("main").unwrap(), snap_id, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let b = repo.profile_bundle(&me.public_key(), &crate::acl::Accessor::privileged()).await.unwrap();
+        assert!(b.is_local);
+        assert_eq!(b.profile.as_ref().unwrap().display_name, "Me");
+        assert_eq!(b.edges.len(), 1);
+        assert_eq!(b.edges[0].to_key, x.public_key());
+        assert_eq!(b.timelines.len(), 1);
+        assert_eq!(b.timelines[0].name, "main");
+        assert_eq!(b.timelines[0].head, snap_id);
+        assert_eq!(b.timelines[0].author, "me");
+        assert_eq!(b.timelines[0].created_at, 7);
+    }
+
+    // bole-k93a
+    /// A timeline the accessor cannot read is excluded from the bundle — the
+    /// serve-path ACL gate (bole-e78l) applies to profile_bundle too.
+    #[tokio::test]
+    async fn bundle_timelines_respect_accessor_acl() {
+        use crate::acl::{Accessor, Permission, TimelineAcl, TimelineRole};
+        use crate::collab::CollabSigner;
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([20u8; 32]);
+        repo.publish_profile(&me.sign_profile("Me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap = repo.objects.put(&Object::Snapshot(Snapshot { root: tree, parents: vec![], author: "me".into(), created_at: 0, message: "m".into() })).await.unwrap();
+        repo.refs.create_timeline(RefName::new("public/main").unwrap(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(RefName::new("secret/x").unwrap(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.acls.set_timeline_acl(TimelineAcl { pattern: "secret/**".into() }).unwrap();
+
+        // An accessor cleared only for the public timeline sees just that one.
+        let limited = Accessor::new().with_timeline_role(TimelineRole { pattern: "public/**".into(), permission: Permission::Read });
+        let b = repo.profile_bundle(&me.public_key(), &limited).await.unwrap();
+        let names: Vec<&str> = b.timelines.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"public/main"));
+        assert!(!names.contains(&"secret/x"), "protected timeline must not leak into the bundle: {names:?}");
+
+        // A privileged (read-all) accessor sees both.
+        let b2 = repo.profile_bundle(&me.public_key(), &Accessor::privileged()).await.unwrap();
+        assert_eq!(b2.timelines.len(), 2);
+    }
+
+    // bole-k93a
+    #[tokio::test]
+    async fn bundle_peer_from_cache_no_timelines() {
+        use crate::collab::{CollabObject, CollabSigner, TrustKind};
+
+        let repo = Repository::memory();
+        let peer = CollabSigner::from_seed([4u8; 32]);
+        let y = CollabSigner::from_seed([5u8; 32]);
+        cache_peer(&repo, &peer.public_key(), CollabObject::Profile(peer.sign_profile("Peer".into(), String::new(), vec![], vec![], 1)), "profile").await;
+        cache_peer(&repo, &peer.public_key(), CollabObject::TrustEdge(peer.sign_edge(y.public_key(), TrustKind::Follow, None, 1)), "edge/follow/y").await;
+
+        let b = repo.profile_bundle(&peer.public_key(), &crate::acl::Accessor::privileged()).await.unwrap();
+        assert!(!b.is_local);
+        assert_eq!(b.profile.as_ref().unwrap().display_name, "Peer");
+        assert_eq!(b.edges.len(), 1);
+        assert!(b.timelines.is_empty(), "peers get no timelines");
+    }
+
+    // bole-k93a
+    #[tokio::test]
+    async fn bundle_unknown_key_is_empty() {
+        use crate::collab::CollabSigner;
+        let repo = Repository::memory();
+        let ghost = CollabSigner::from_seed([6u8; 32]);
+        let b = repo.profile_bundle(&ghost.public_key(), &crate::acl::Accessor::privileged()).await.unwrap();
+        assert!(!b.is_local);
+        assert!(b.profile.is_none());
+        assert!(b.edges.is_empty());
+        assert!(b.timelines.is_empty());
+    }
+
+    // bole-k93a
+    #[tokio::test]
+    async fn bundle_out_edges_only() {
+        use crate::collab::{CollabObject, CollabSigner, TrustKind};
+        let repo = Repository::memory();
+        let me = CollabSigner::from_seed([7u8; 32]);
+        let other = CollabSigner::from_seed([8u8; 32]);
+        repo.publish_profile(&me.sign_profile("Me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        // An IN-edge (other -> me) cached under other's remotes prefix must not
+        // appear in me's bundle: me authored no out-edge.
+        cache_peer(&repo, &other.public_key(), CollabObject::TrustEdge(other.sign_edge(me.public_key(), TrustKind::Follow, None, 1)), "edge/follow/me").await;
+        let b = repo.profile_bundle(&me.public_key(), &crate::acl::Accessor::privileged()).await.unwrap();
+        assert!(b.edges.iter().all(|e| e.from_key == me.public_key()), "only out-edges");
+        assert!(b.edges.is_empty());
+    }
+
+    // bole-k93a
+    #[tokio::test]
+    async fn bundle_drops_unverifiable() {
+        use crate::collab::{CollabObject, CollabSigner, TrustKind};
+        let repo = Repository::memory();
+        let peer = CollabSigner::from_seed([9u8; 32]);
+        let y = CollabSigner::from_seed([10u8; 32]);
+        // Cache a TAMPERED peer profile + out-edge (seq mutated after signing).
+        let mut bad_p = peer.sign_profile("Peer".into(), String::new(), vec![], vec![], 1);
+        bad_p.seq = 999;
+        let mut bad_e = peer.sign_edge(y.public_key(), TrustKind::Follow, None, 1);
+        bad_e.seq = 999;
+        cache_peer(&repo, &peer.public_key(), CollabObject::Profile(bad_p), "profile").await;
+        cache_peer(&repo, &peer.public_key(), CollabObject::TrustEdge(bad_e), "edge/follow/y").await;
+
+        let b = repo.profile_bundle(&peer.public_key(), &crate::acl::Accessor::privileged()).await.unwrap();
+        assert!(b.profile.is_none(), "tampered profile dropped -> None");
+        assert!(b.edges.is_empty(), "tampered edge dropped");
     }
 
     // bole-440
