@@ -82,11 +82,14 @@ Every error response is JSON of the shape:
 { "error": { "code": "not_found", "message": "no such snapshot" } }
 ```
 
-`code` is one of `bad_request`, `unauthorized`, `not_found`, `internal`, with
-a matching HTTP status code. This envelope is used for every error a handler
-returns (e.g. a well-formed snapshot id that doesn't exist yields a 404
-envelope); a request to a path with no matching route at all falls through to
-axum's default (empty-body) 404, since no `.fallback()` is registered.
+`code` is one of `bad_request`, `unauthorized`, `not_found`,
+`method_not_allowed`, or `internal`, with a matching HTTP status code. Every
+error uses this envelope — handler errors (e.g. a well-formed snapshot id that
+does not exist yields a 404 envelope), unmatched routes and wrong methods (via
+`Router::fallback` / `method_not_allowed_fallback`), and extractor rejections
+(via the `ApiPath`/`ApiQuery` wrappers, which preserve the rejection's real
+status — a malformed query is a 400, a route/handler param-arity mismatch is a
+500 — without leaking deserializer detail).
 
 ## ACL model
 

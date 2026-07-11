@@ -21,7 +21,10 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match Path::<T>::from_request_parts(parts, state).await {
             Ok(Path(v)) => Ok(ApiPath(v)),
-            Err(rej) => Err(ApiError::bad_request(rej.to_string())),
+            // bole-i8zl: keep the rejection's own status (MissingPathParams is a
+            // 500-class server/config error, not a client 400) and use a
+            // generic message so serde-internal detail is not surfaced.
+            Err(rej) => Err(ApiError::from_status(rej.status(), "invalid path parameter")),
         }
     }
 }
@@ -38,7 +41,8 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         match Query::<T>::from_request_parts(parts, state).await {
             Ok(Query(v)) => Ok(ApiQuery(v)),
-            Err(rej) => Err(ApiError::bad_request(rej.to_string())),
+            // bole-i8zl: preserve the rejection status; generic message.
+            Err(rej) => Err(ApiError::from_status(rej.status(), "invalid query parameter")),
         }
     }
 }
