@@ -39,6 +39,15 @@ pub enum Error {
     // bole-3w9
     /// A timeline advance was rejected because it violates the timeline's [`TimelinePolicy`](crate::refs::TimelinePolicy).
     #[error("policy violation: {0}")] PolicyViolation(String),
+    // bole-p2bf
+    /// A timeline advance is not denied outright but requires more approvals: a
+    /// `RequiresApproval` policy-hook verdict surfaced from `advance_timeline`
+    /// (WS1-O2). Distinct from [`Error::PolicyViolation`] (a hard deny) so a
+    /// caller can prompt for the outstanding `needed` approvals and retry,
+    /// mirroring [`MergeCheck::RequiresApproval`](crate::MergeCheck) on the
+    /// merge path.
+    #[error("approval required: {reason}")]
+    ApprovalRequired { reason: String, needed: u32 },
     // bole-sk6
     #[error("transaction conflict: {0}")] TransactionConflict(String),
 }
