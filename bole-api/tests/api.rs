@@ -920,6 +920,9 @@ mod extractor_status {
         assert_eq!(json["error"]["code"], "bad_request");
         let msg = json["error"]["message"].as_str().unwrap();
         assert!(!msg.to_lowercase().contains("deserialize") && !msg.contains("missing field"), "leaked detail: {msg}");
+    }
+}
+
 // bole-wyx7
 /// Characterization: credential resolution is strict-precedence, not
 /// fall-through. The first presented credential class decides — an
