@@ -51,14 +51,12 @@ pub async fn get_one(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ref_name = bole::RefName::new(name).map_err(|_| ApiError::bad_request("invalid ref name"))?;
     // A timeline the accessor cannot read must be indistinguishable from one
-    // that doesn't exist: gate on the same ACL-aware listing used by `list`,
-    // and return 404 (never 403) when it's hidden.
-    let visible = state
-        .repo
-        .list_refs_served("", &auth.accessor)?
-        .iter()
-        .any(|n| n == &ref_name);
-    if !visible {
+    // that doesn't exist: return 404 (never 403) when it's hidden.
+    // bole-tgr8
+    // ref_served is the point-lookup twin of the list endpoint's
+    // list_refs_served (same label gate, same scoped-collab exclusion) —
+    // membership without the O(all-refs) scan.
+    if !state.repo.ref_served(&ref_name, &auth.accessor)? {
         return Err(ApiError::not_found("no such ref"));
     }
     match state.repo.refs.get(&ref_name)? {

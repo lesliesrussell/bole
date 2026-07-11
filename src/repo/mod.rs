@@ -386,6 +386,25 @@ impl Repository {
             .collect())
     }
 
+    // bole-tgr8
+    /// Point-lookup twin of [`Repository::list_refs_served`]: whether `name`
+    /// would appear in that listing, without the O(all-refs) scan. Same label
+    /// gate as `list_refs_filtered` and the same structural scoped-collab
+    /// exclusion — keep the three in lockstep.
+    pub fn ref_served(&self, name: &RefName, accessor: &Accessor) -> Result<bool> {
+        if name.as_str().starts_with(collab::COLLAB_SCOPED_PREFIX) {
+            return Ok(false);
+        }
+        if self.refs.get(name)?.is_none() {
+            return Ok(false);
+        }
+        let lattice = self.acls.lattice()?;
+        let rules = self.acls.label_ruleset()?;
+        let label = rules.label_for_timeline(&lattice, name.as_str());
+        Ok(label == lattice.bottom()
+            || accessor.can_read(&label, ResourceRef::Timeline(name.as_str())))
+    }
+
     // bole-9by
     // bole-p8u
     /// Checks whether merging `source` into `dest` is safe with respect to path ACLs,
@@ -1893,6 +1912,58 @@ mod tests {
         repo.add_attestation(&alice.attest("release/1.0", child)).await.unwrap();
         repo.advance_timeline(&dest, child, &writer).await.unwrap();
         assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, child);
+    }
+
+    // bole-tgr8
+    /// `ref_served` is the point-lookup twin of `list_refs_served`: same label
+    /// gate, same structural scoped-collab exclusion, no O(all-refs) scan.
+    #[tokio::test]
+    async fn ref_served_matches_list_semantics() {
+        use crate::acl::{Accessor, Permission, TimelineAcl, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() })
+            .await
+            .unwrap();
+        let public = RefName::new("main").unwrap();
+        let hidden = RefName::new("private/x").unwrap();
+        repo.refs.create_timeline(public.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(hidden.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.acls.set_timeline_acl(TimelineAcl { pattern: "private/**".into() }).unwrap();
+        let scoped = RefName::new(format!("{}profile/x", crate::repo::collab::COLLAB_SCOPED_PREFIX)).unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(scoped.clone(), crate::refs::Ref::Tag(crate::refs::Tag { target: snap, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let anon = Accessor::new();
+        let cleared = Accessor::new().with_timeline_role(TimelineRole {
+            pattern: "private/**".into(),
+            permission: Permission::Read,
+        });
+
+        // Point lookups agree with list membership for every case.
+        for accessor in [&anon, &cleared, &Accessor::privileged()] {
+            let listed = repo.list_refs_served("", accessor).unwrap();
+            for name in [&public, &hidden, &scoped] {
+                assert_eq!(
+                    repo.ref_served(name, accessor).unwrap(),
+                    listed.contains(name),
+                    "ref_served({}) diverges from list membership",
+                    name.as_str()
+                );
+            }
+        }
+        // Spot-check the interesting cases directly.
+        assert!(repo.ref_served(&public, &anon).unwrap());
+        assert!(!repo.ref_served(&hidden, &anon).unwrap());
+        assert!(repo.ref_served(&hidden, &cleared).unwrap());
+        assert!(!repo.ref_served(&scoped, &Accessor::privileged()).unwrap(), "scoped is structural");
     }
 
     // bole-au0t
