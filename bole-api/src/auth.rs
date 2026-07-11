@@ -24,6 +24,16 @@ impl FromRequestParts<AppState> for RequestAuth {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let principal = resolve_principal(parts, state)?;
         let actor = state.config.actors.actor_for(&principal).map(str::to_string);
+        // bole-261x
+        // Contract: presented-but-unknown credentials are 401, never a silent
+        // downgrade to anonymous. The lib's ActorMap maps unmapped principals
+        // to anonymous (a sync-serve convention); over HTTP that would make a
+        // stale or typo'd token indistinguishable from no token at all, masking
+        // misconfiguration and inviting confused-deputy mistakes. Only a
+        // request that presents NO credential is anonymous.
+        if actor.is_none() && principal != Principal::Anonymous {
+            return Err(ApiError::unauthorized("credentials do not map to a known actor"));
+        }
         let accessor = accessor_for(&state.repo.acls, &state.config.actors, &principal)
             .map_err(ApiError::from)?;
         Ok(RequestAuth { accessor, principal, actor })

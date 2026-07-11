@@ -119,6 +119,53 @@ async fn token_maps_to_actor_principal() {
     assert_eq!(json["actor"], "alice");
 }
 
+// bole-261x
+/// Contract: a request that PRESENTS a bearer token which maps to no actor is
+/// 401, not silently anonymous — a stale or typo'd token must surface as an
+/// auth failure, never as a quiet capability downgrade.
+#[tokio::test]
+async fn unknown_bearer_token_is_401() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[tokens]\n\"t-secret\" = \"alice\"\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/timelines")
+                .header("authorization", "Bearer t-wrong")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "unauthorized");
+}
+
+// bole-261x
+/// Same contract for the trusted-proxy mTLS header: a subject the actor map
+/// does not know is 401, not anonymous.
+#[tokio::test]
+async fn unknown_mtls_subject_from_trusted_proxy_is_401() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = build_router(state);
+    let req = with_peer(
+        Request::builder()
+            .uri("/v1/timelines")
+            .header("x-bole-client-subject", "CN=mallory")
+            .body(Body::empty())
+            .unwrap(),
+        "127.0.0.1",
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 // bole-3xj5
 #[tokio::test]
 async fn signed_request_maps_to_actor() {

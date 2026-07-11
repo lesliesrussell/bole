@@ -52,6 +52,12 @@ Resolution order per request: `Authorization: Bearer <token>` →
 `X-Bole-Client-Subject` (only if the immediate peer is in `[proxy].trusted`) →
 `Anonymous`.
 
+Presented-but-unknown credentials are **401**, never a silent downgrade to
+anonymous: a bearer token or trusted-proxy mTLS subject that maps to no
+configured actor is rejected, so a stale or typo'd credential surfaces as an
+auth failure instead of quietly serving only anonymous-visible data. Only a
+request that presents no credential at all resolves to `Anonymous`.
+
 ## Endpoints
 
 | Method | Path | Description |
