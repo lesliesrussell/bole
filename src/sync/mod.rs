@@ -128,18 +128,19 @@ impl Repository {
         // bole-au0t: gate on the DESTINATION's bound policy exactly like the
         // wire path (`apply_push_ops`). Building the registry fails closed on a
         // hook kind this binary cannot resolve; a non-deterministic registry
-        // refuses every op (the bole-7c1 replicated-advance guard).
+        // refuses every eligible op (the bole-7c1 replicated-advance guard).
         let registry = to.policy_registry().await?;
-        if !registry.deterministic() {
-            let reason = format!(
+        // bole-mi3a: refuse fail-closed, but only AFTER the per-timeline
+        // ownership/write checks, so a timeline the caller doesn't own or that
+        // doesn't exist locally reports that accurate reason rather than the
+        // blanket non-determinism one. Still fail-closed: no eligible op is
+        // ever applied while the peer's policy is non-deterministic.
+        let nondeterministic_reason = (!registry.deterministic()).then(|| {
+            format!(
                 "peer binds non-deterministic policy hook(s) [{}]; refusing replicated push (fail-closed)",
                 registry.non_deterministic().join(", ")
-            );
-            return Ok(timelines
-                .iter()
-                .map(|name| RefResult { name: name.clone(), status: PushStatus::Denied(reason.clone()) })
-                .collect());
-        }
+            )
+        });
 
         for name in timelines {
             let local = match self.refs.get_timeline(name)? {
@@ -158,6 +159,15 @@ impl Repository {
                 results.push(RefResult {
                     name: name.clone(),
                     status: PushStatus::Denied("write denied on timeline".into()),
+                });
+                continue;
+            }
+            // bole-mi3a: the timeline is owned + writable; now the peer's
+            // non-deterministic policy refuses it (fail-closed).
+            if let Some(reason) = &nondeterministic_reason {
+                results.push(RefResult {
+                    name: name.clone(),
+                    status: PushStatus::Denied(reason.clone()),
                 });
                 continue;
             }
@@ -429,6 +439,54 @@ mod tests {
             "expected fail-closed unknown-kind rejection, got {err:?}"
         );
         assert_eq!(server.refs.get_timeline(&name).unwrap().unwrap().head, base, "peer head must not move");
+    }
+
+    // bole-mi3a
+    /// The non-deterministic-peer refusal must not mislabel timelines the
+    /// caller doesn't own: a nonexistent local timeline still reports "no such
+    /// local timeline", while an eligible one reports the non-deterministic
+    /// reason. Both are refused (fail-closed preserved), but with accurate
+    /// per-timeline status.
+    #[tokio::test]
+    async fn non_deterministic_peer_still_reports_accurate_per_timeline_status() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use std::collections::BTreeMap;
+
+        let server = Repository::memory();
+        let (name, base) = seed(&server, "main", b"base").await;
+        let client = Repository::clone_from(&server, &Accessor::privileged()).await.unwrap();
+        server
+            .set_policy_root(&PolicyRoot {
+                lattice: ObjectId::from_content(b"lattice"),
+                rules: ObjectId::from_content(b"rules"),
+                parent: None,
+                hooks: vec![HookSpec {
+                    kind: "signed-approval".into(),
+                    pattern: "**".into(),
+                    params: BTreeMap::from([("needed".to_string(), 1u64)]),
+                }],
+            })
+            .await
+            .unwrap();
+        advance(&client, &name, b"next", base).await;
+
+        let missing = RefName::new("does/not/exist").unwrap();
+        let res = client
+            .push("origin", &server, &[name.clone(), missing.clone()], &writer())
+            .await
+            .unwrap();
+
+        let by_name = |n: &RefName| res.iter().find(|r| &r.name == n).unwrap().status.clone();
+        match by_name(&missing) {
+            PushStatus::Denied(r) => assert_eq!(r, "no such local timeline", "got {r}"),
+            other => panic!("missing timeline should report absence, got {other:?}"),
+        }
+        match by_name(&name) {
+            PushStatus::Denied(r) => assert!(r.contains("non-deterministic"), "got {r}"),
+            other => panic!("eligible timeline should report non-determinism, got {other:?}"),
+        }
+        // Fail-closed preserved: nothing moved on the peer.
+        assert_eq!(server.refs.get_timeline(&name).unwrap().unwrap().head, base);
     }
 
     // bole-au0t
