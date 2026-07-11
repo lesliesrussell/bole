@@ -43,6 +43,16 @@ pub enum Cmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    // bole-k93a
+    /// Aggregated hub bundle for a dev: profile + own trust out-edges + (own) timelines.
+    Bundle {
+        /// 64-hex public key to bundle (omit for own key).
+        key: Option<String>,
+        #[arg(long, default_value = "BOLE_COLLAB_KEY")]
+        key_env: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
 }
 
 /// Dispatches a `profile` subcommand.
@@ -84,6 +94,63 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     || serde_json::json!({ "profile": null }),
                 ),
             }
+            Ok(())
+        }
+        // bole-k93a
+        Cmd::Bundle { key, key_env, key_file } => {
+            let k = match key {
+                Some(h) => key::parse_hex_32(&h)?,
+                None => signer_from(&key_env, key_file.as_deref())?.public_key(),
+            };
+            // bole-k93a: the owner's own hub view — a read-all accessor. A
+            // served bundle (Grove, later) would pass the caller's accessor so
+            // ACL-protected timelines are filtered per bole-e78l.
+            let b = ctx.repo.profile_bundle(&k, &bole::Accessor::privileged()).await?;
+            let profile_json = match &b.profile {
+                Some(p) => serde_json::json!({
+                    "key": key::hex32(&p.key),
+                    "display_name": p.display_name,
+                    "bio": p.bio,
+                    "endpoints": p.endpoints,
+                    "dns_aliases": p.dns_aliases,
+                    "seq": p.seq,
+                }),
+                None => serde_json::Value::Null,
+            };
+            let edges_json: Vec<_> = b.edges.iter().map(|e| serde_json::json!({
+                "to": key::hex32(&e.to_key),
+                "kind": match e.kind {
+                    bole::TrustKind::Follow => "follow",
+                    bole::TrustKind::Vouch => "vouch",
+                    bole::TrustKind::Review => "review",
+                },
+                "petname": e.petname,
+                "seq": e.seq,
+            })).collect();
+            let timelines_json: Vec<_> = b.timelines.iter().map(|t| serde_json::json!({
+                "name": t.name,
+                "head": t.head.to_string(),
+                "author": t.author,
+                "created_at": t.created_at,
+            })).collect();
+            let bundle_key = key::hex32(&b.key);
+            let is_local = b.is_local;
+            out.emit(
+                || format!(
+                    "{} [{}] {} edges, {} timelines",
+                    bundle_key,
+                    if is_local { "local" } else { "peer" },
+                    edges_json.len(),
+                    timelines_json.len(),
+                ),
+                || serde_json::json!({
+                    "key": bundle_key,
+                    "is_local": is_local,
+                    "profile": profile_json,
+                    "trust": { "edges": edges_json },
+                    "timelines": timelines_json,
+                }),
+            );
             Ok(())
         }
     }
