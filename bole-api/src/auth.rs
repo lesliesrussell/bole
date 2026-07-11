@@ -48,12 +48,21 @@ impl FromRequestParts<AppState> for RequestAuth {
 fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiError> {
     if let Some(auth) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         let value = auth.to_str().map_err(|_| ApiError::bad_request("non-ascii Authorization header"))?;
-        if let Some(token) = value.strip_prefix("Bearer ") {
-            return Ok(Principal::Token(token.to_string()));
+        // bole-261x
+        // An Authorization header is a presented credential: an unrecognized
+        // or malformed scheme is 401, never a silent fallthrough to anonymous.
+        // Scheme names compare case-insensitively (RFC 7235), so a
+        // spec-compliant `bearer` client reaches the bearer arm.
+        let (scheme, rest) = value
+            .split_once(' ')
+            .ok_or_else(|| ApiError::unauthorized("malformed Authorization header"))?;
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return Ok(Principal::Token(rest.to_string()));
         }
-        if let Some(rest) = value.strip_prefix("Signature ") {
+        if scheme.eq_ignore_ascii_case("signature") {
             return verify_signed(rest, parts, state);
         }
+        return Err(ApiError::unauthorized("unrecognized Authorization scheme"));
     }
     // bole-3xj5
     // mTLS via trusted-proxy header: only honored when the immediate peer is an
@@ -180,6 +189,8 @@ fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
 }
 
 /// A human label for a principal variant (for the debug route / logging).
+// bole-gejz: test-only surface, compiled out of the shipped lib/binary.
+#[cfg(feature = "testing")]
 pub fn principal_kind(p: &Principal) -> &'static str {
     match p {
         Principal::SshKey(_) => "SshKey",

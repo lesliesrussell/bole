@@ -191,6 +191,64 @@ async fn unknown_bearer_token_is_401() {
 }
 
 // bole-261x
+/// The scheme parse is part of the same contract: an Authorization header with
+/// an unrecognized scheme (or no scheme separator) is a presented credential
+/// and must 401, and scheme names are case-insensitive per RFC 7235 — a
+/// spec-compliant `bearer` client must reach the bearer arm, not silently
+/// downgrade to anonymous.
+#[tokio::test]
+async fn unrecognized_or_case_variant_auth_scheme_handled() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[tokens]\n\"t-secret\" = \"alice\"\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = build_router(state);
+
+    // Unknown scheme → 401 (previously: silent anonymous 200).
+    for header in ["Basic dXNlcjpwdw==", "Bearer"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/timelines")
+                    .header("authorization", header)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "header {header:?} must 401");
+    }
+
+    // Lowercase scheme + unknown token → 401 proves it entered the bearer arm
+    // (a silent-anonymous fallthrough would have returned 200).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/timelines")
+                .header("authorization", "bearer t-wrong")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Lowercase scheme + known token → authenticated request succeeds.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/timelines")
+                .header("authorization", "bearer t-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// bole-261x
 /// Same contract for the trusted-proxy mTLS header: a subject the actor map
 /// does not know is 401, not anonymous.
 #[tokio::test]
