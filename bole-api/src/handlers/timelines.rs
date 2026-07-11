@@ -18,7 +18,11 @@ pub async fn list(
     // Only enumerate refs the accessor is actually permitted to read; this
     // omits ACL-protected timelines entirely rather than exposing their
     // name/head/policy to callers who can't read them.
-    for name in state.repo.list_refs_filtered("", &auth.accessor)? {
+    // bole-e78l
+    // list_refs_served additionally excludes refs/collab/scoped/** for every
+    // caller (M2): unlabeled refs default to the lattice bottom, so the label
+    // check alone would enumerate scoped names/ids to anonymous callers.
+    for name in state.repo.list_refs_served("", &auth.accessor)? {
         match state.repo.refs.get(&name)? {
             Some(bole::Ref::Timeline(t)) => timelines.push(json!({
                 "name": name.as_str(),
@@ -49,7 +53,7 @@ pub async fn get_one(
     // and return 404 (never 403) when it's hidden.
     let visible = state
         .repo
-        .list_refs_filtered("", &auth.accessor)?
+        .list_refs_served("", &auth.accessor)?
         .iter()
         .any(|n| n == &ref_name);
     if !visible {

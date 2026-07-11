@@ -421,15 +421,11 @@ fn tracking_ref(remote_name: &str, name: &RefName) -> Result<RefName> {
 // bole-6qy
 pub(crate) fn advertise(repo: &Repository, accessor: &Accessor) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
-    for name in repo.list_refs_filtered("", accessor)? {
-        // bole-e78l: M2 — scoped collab state never travels the general sync
-        // path, for any accessor. Unlabeled refs default to the lattice bottom
-        // (world-readable), so without this structural gate a scoped ref would
-        // be advertised to every anonymous peer. The collab endpoint enforces
-        // the same rule structurally (collab_adverts).
-        if name.as_str().starts_with(crate::repo::collab::COLLAB_SCOPED_PREFIX) {
-            continue;
-        }
+    // bole-e78l: M2 — list_refs_served structurally excludes scoped collab
+    // state for any accessor (unlabeled refs default to the lattice bottom,
+    // so a label check alone cannot gate them). The collab endpoint enforces
+    // the same rule structurally (collab_adverts).
+    for name in repo.list_refs_served("", accessor)? {
         match repo.refs.get(&name)? {
             Some(Ref::Timeline(t)) => out.push(RefAdvert { name, target: t.head, is_timeline: true }),
             Some(Ref::Tag(t)) => out.push(RefAdvert { name, target: t.target, is_timeline: false }),
