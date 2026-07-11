@@ -237,3 +237,46 @@ fn secret_rekey_rotates_master_key() {
         .unwrap();
     assert!(!old.status.success(), "old key should no longer decrypt");
 }
+
+// bole-oea4
+/// `secret share` creates a multi-recipient secret for several recipients at
+/// once (each identified by a recipient key file), plus the sharer. Every
+/// recipient — and the sharer — can reveal it; an unrelated key cannot.
+#[test]
+fn secret_share_multi_recipient() {
+    const KEY3: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const KEY4: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    ok(w, &["init", "."]);
+
+    // Write two recipient key files (KEY2, KEY3); the sharer is BOLE_KEY (KEY).
+    let f2 = w.join("r2.key");
+    let f3 = w.join("r3.key");
+    std::fs::write(&f2, KEY2).unwrap();
+    std::fs::write(&f3, KEY3).unwrap();
+
+    let mut child = bin()
+        .args([
+            "secret", "share", "team/token", "--from-stdin",
+            "--recipient-key-file", f2.to_str().unwrap(),
+            "--recipient-key-file", f3.to_str().unwrap(),
+        ])
+        .current_dir(w)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"shared-value").unwrap();
+    assert!(child.wait_with_output().unwrap().status.success(), "share failed");
+
+    // The sharer and both recipients can reveal; an unrelated key cannot.
+    for key in [KEY, KEY2, KEY3] {
+        let out = run_as(w, key, &["secret", "reveal", "team/token", "--json"]);
+        assert!(out.status.success(), "reveal as {key} failed: {out:?}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["value"], "shared-value");
+    }
+    assert!(!run_as(w, KEY4, &["secret", "reveal", "team/token"]).status.success(),
+        "an unrelated key must not reveal the shared secret");
+}

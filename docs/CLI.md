@@ -262,12 +262,22 @@ bole secret rekey [--all | <name>...] \                       # rotate the maste
     --from-key-env <VAR> [--from-key-file <path>] \
     --to-key-env <VAR>   [--to-key-file <path>]
 bole secret list
+bole secret share <name> --from-stdin | --from-file <path> \  # create a multi-recipient secret
+    [--key-env <VAR>] [--key-file <path>] \                   #   your key (also a recipient)
+    --recipient-key-file <path> [--recipient-key-file <path>] #   each additional recipient (repeatable)
 bole secret grant-actor <name> \                              # give another actor read access
     [--key-env <VAR>] [--key-file <path>] \                   #   your key (must already read)
     --recipient-key-env <VAR> [--recipient-key-file <path>]   #   the recipient's key
 bole secret revoke-actor <name> \                             # drop an actor's read access
     --recipient-key-env <VAR> [--recipient-key-file <path>]
 ```
+
+`share` creates a secret that is multi-recipient from the start: the value's data
+key is wrapped separately for the sharer and every `--recipient-key-file`, so any
+one of them decrypts with only their own key. Use it when a secret is known up
+front to belong to a set of actors; use `grant-actor` to add recipients to an
+existing secret. Recipient keys are read from files rather than argv so they
+never appear in the process table.
 
 `grant-actor` moves a secret from a single shared key toward *per-actor* keys: the
 value's data key is wrapped separately for each recipient, so each actor decrypts
