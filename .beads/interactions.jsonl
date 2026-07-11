@@ -174,3 +174,4 @@
 {"id":"int-d1e47e882d7d0d7cb79483b42cb34596","kind":"field_change","created_at":"2026-07-11T19:58:41.679668Z","actor":"Leslie Russell","issue_id":"bole-lbd1","extra":{"field":"status","new_value":"deferred","old_value":"open"}}
 {"id":"int-1f38d5921007399f8bf87762d82bfc3e","kind":"field_change","created_at":"2026-07-11T19:58:42.063602Z","actor":"Leslie Russell","issue_id":"bole-ttik","extra":{"field":"status","new_value":"deferred","old_value":"open"}}
 {"id":"int-579968cde537a477e95f091f2c7961e4","kind":"field_change","created_at":"2026-07-11T19:58:42.488685Z","actor":"Leslie Russell","issue_id":"bole-1foo","extra":{"field":"status","new_value":"deferred","old_value":"open"}}
+{"id":"int-932e56df7a7c022b9282e26cf9755479","kind":"field_change","created_at":"2026-07-11T21:17:28.148708Z","actor":"Leslie Russell","issue_id":"bole-vl2m","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
