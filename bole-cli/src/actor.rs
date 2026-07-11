@@ -81,9 +81,12 @@ pub fn get(ctx: &RepoContext, name: &str) -> Result<ActorDef> {
 pub fn effective_accessor(ctx: &RepoContext) -> Result<Accessor> {
     let state = ctx.load_state()?;
     match state.current_actor {
+        // bole-eean: tag the accessor with the bound actor name so audited
+        // decisions are attributable (does not affect access).
         Some(name) => Ok(get(ctx, &name)
             .with_context(|| format!("bound actor '{name}' is not in the registry"))?
-            .to_accessor()),
+            .to_accessor()
+            .with_actor(name)),
         None => Ok(resolve::full_access()),
     }
 }

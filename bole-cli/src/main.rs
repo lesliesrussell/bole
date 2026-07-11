@@ -15,6 +15,8 @@ mod resolve;
 mod worktree;
 // bole-ef8
 mod actor;
+// bole-eean
+mod audit;
 // bole-1q9
 mod key;
 mod registry;
