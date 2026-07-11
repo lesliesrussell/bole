@@ -206,12 +206,62 @@ impl Repository {
     /// every resolved declarative hook (fail-closed on unknown kinds).
     // bole-7c1: pub(crate) so the sync push-acceptance path can assert the bound
     // policy is deterministic before letting it gate a replicated advance.
-    pub(crate) fn policy_registry(&self) -> Result<PolicyRegistry> {
+    pub(crate) async fn policy_registry(&self) -> Result<PolicyRegistry> {
         let mut reg = PolicyRegistry::new();
         for spec in &self.hooks {
             reg.push(crate::acl::hook::resolve_hook(spec)?);
         }
+        // bole-au0t: hooks declared by the pinned, replicated policy root bind
+        // too. resolve_hook rejects unknown kinds, so a replica that lacks a
+        // kind named in a synced root refuses the operation (WS1-O5).
+        if let Some((_, root)) = self.policy_root().await? {
+            for spec in &root.hooks {
+                reg.push(crate::acl::hook::resolve_hook(spec)?);
+            }
+        }
         Ok(reg)
+    }
+
+    // bole-au0t
+    /// Pins `root` as the active policy root: stores it content-addressed and
+    /// points `refs/policy/root` at it. Because the ref and its closure
+    /// replicate via sync, the root's hooks bind on every replica through
+    /// [`Repository::policy_registry`] — a replica that cannot resolve one of
+    /// the root's hook kinds refuses advance/merge/replicated push fail-closed
+    /// (WS1-O5). Returns the root's object id.
+    pub async fn set_policy_root(&self, root: &crate::acl::policy_object::PolicyRoot) -> Result<ObjectId> {
+        let id = self
+            .objects
+            .put(&Object::Policy(PolicyObject::Root(root.clone())))
+            .await?;
+        let name = RefName::new(crate::acl::policy_object::POLICY_ROOT_REF)?;
+        let mut tx = self.refs.transaction();
+        tx.set(name, Ref::Tag(crate::refs::Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(id)
+    }
+
+    // bole-au0t
+    /// Loads the pinned policy root (`None` if the repo has never pinned one).
+    /// Fail-closed: a `refs/policy/root` that does not point at a stored
+    /// `PolicyObject::Root` is an error, not an absent policy.
+    pub async fn policy_root(&self) -> Result<Option<(ObjectId, crate::acl::policy_object::PolicyRoot)>> {
+        let name = RefName::new(crate::acl::policy_object::POLICY_ROOT_REF)?;
+        let target = match self.refs.get(&name)? {
+            Some(Ref::Tag(t)) => t.target,
+            Some(Ref::Timeline(_)) => {
+                return Err(Error::PolicyViolation(
+                    "refs/policy/root is a timeline, not a policy-root tag (fail-closed)".into(),
+                ))
+            }
+            None => return Ok(None),
+        };
+        match self.objects.get(&target).await? {
+            Some(Object::Policy(PolicyObject::Root(r))) => Ok(Some((target, r))),
+            _ => Err(Error::PolicyViolation(
+                "refs/policy/root does not point at a stored policy root (fail-closed)".into(),
+            )),
+        }
     }
 
     // bole-6i7
@@ -370,7 +420,7 @@ impl Repository {
         }
         // bole-fo2
         // After the leak scan, run registered Merge hooks (most restrictive wins).
-        let registry = self.policy_registry()?;
+        let registry = self.policy_registry().await?;
         let ctx = PolicyContext {
             event: PolicyEvent::Merge {
                 source,
@@ -627,7 +677,7 @@ impl Repository {
                 }
             }
         }
-        let registry = self.policy_registry()?;
+        let registry = self.policy_registry().await?;
         let ctx = PolicyContext {
             event: PolicyEvent::Advance {
                 timeline: name,
@@ -1825,6 +1875,144 @@ mod tests {
         repo.add_attestation(&alice.attest("release/1.0", child)).await.unwrap();
         repo.advance_timeline(&dest, child, &writer).await.unwrap();
         assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, child);
+    }
+
+    // bole-au0t
+    #[tokio::test]
+    async fn policy_root_pin_round_trip() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        assert!(repo.policy_root().await.unwrap().is_none(), "fresh repo has no pinned root");
+
+        let root = PolicyRoot {
+            lattice: ObjectId::from_content(b"lattice"),
+            rules: ObjectId::from_content(b"rules"),
+            parent: None,
+            hooks: vec![HookSpec {
+                kind: "timeline-policy".into(),
+                pattern: "**".into(),
+                params: BTreeMap::new(),
+            }],
+        };
+        let id = repo.set_policy_root(&root).await.unwrap();
+        let (got_id, got) = repo.policy_root().await.unwrap().expect("pinned root");
+        assert_eq!(got_id, id);
+        assert_eq!(got, root);
+
+        // Re-pinning replaces the tip.
+        let root2 = PolicyRoot { parent: Some(id), hooks: vec![], ..root.clone() };
+        let id2 = repo.set_policy_root(&root2).await.unwrap();
+        let (got_id2, got2) = repo.policy_root().await.unwrap().expect("re-pinned root");
+        assert_eq!(got_id2, id2);
+        assert_eq!(got2, root2);
+    }
+
+    // bole-au0t
+    #[tokio::test]
+    async fn unknown_hook_kind_in_pinned_root_fails_closed_on_advance() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        repo.set_policy_root(&PolicyRoot {
+            lattice: ObjectId::from_content(b"lattice"),
+            rules: ObjectId::from_content(b"rules"),
+            parent: None,
+            hooks: vec![HookSpec {
+                kind: "quantum-approval".into(),
+                pattern: "**".into(),
+                params: BTreeMap::new(),
+            }],
+        })
+        .await
+        .unwrap();
+
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() })
+            .await
+            .unwrap();
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "c".into() })
+            .await
+            .unwrap();
+        let name = RefName::new("main").unwrap();
+        repo.refs
+            .create_timeline(name.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+        let writer = Accessor::new().with_timeline_role(TimelineRole {
+            pattern: "**".into(),
+            permission: Permission::Write,
+        });
+
+        // A replica that does not recognize the pinned root's hook kind must
+        // refuse the advance (fail-closed, WS1-O5), not skip the hook.
+        let err = repo.advance_timeline(&name, child, &writer).await.unwrap_err();
+        assert!(
+            matches!(&err, crate::error::Error::PolicyViolation(r) if r.contains("unknown policy hook kind")),
+            "expected fail-closed unknown-kind rejection, got {err:?}"
+        );
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, base, "head must not move");
+    }
+
+    // bole-au0t
+    #[tokio::test]
+    async fn pinned_policy_root_hooks_gate_advance() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        // No register_hook: the ONLY binding channel is the pinned policy root,
+        // i.e. state a replica receives via sync. The hook must still gate.
+        let repo = Repository::memory();
+        repo.set_policy_root(&PolicyRoot {
+            lattice: ObjectId::from_content(b"lattice"),
+            rules: ObjectId::from_content(b"rules"),
+            parent: None,
+            hooks: vec![HookSpec {
+                kind: "signed-approval".into(),
+                pattern: "release/**".into(),
+                params: BTreeMap::from([("needed".to_string(), 1u64)]),
+            }],
+        })
+        .await
+        .unwrap();
+
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() })
+            .await
+            .unwrap();
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "c".into() })
+            .await
+            .unwrap();
+        let dest = RefName::new("release/1.0").unwrap();
+        repo.refs
+            .create_timeline(dest.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+        let writer = Accessor::new().with_timeline_role(TimelineRole {
+            pattern: "release/**".into(),
+            permission: Permission::Write,
+        });
+
+        let err = repo.advance_timeline(&dest, child, &writer).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::PolicyViolation(_)),
+            "pinned-root signed-approval hook must gate the advance, got {err:?}"
+        );
+        assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, base, "head must not move");
     }
 
     // bole-wy4

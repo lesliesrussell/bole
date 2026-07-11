@@ -16,6 +16,13 @@ pub struct HookSpec {
     pub params: BTreeMap<String, u64>,
 }
 
+// bole-au0t
+/// Ref pinning a repository's active policy root. The root (and its object
+/// closure) replicates via sync like any other tagged object, so every replica
+/// binds the same declarative hooks — and fails closed on kinds it cannot
+/// resolve (WS1-O5).
+pub const POLICY_ROOT_REF: &str = "refs/policy/root";
+
 // bole-fo2
 /// The root tying a policy generation together; what a policy ref points at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

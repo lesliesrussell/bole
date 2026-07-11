@@ -120,6 +120,11 @@ The internal audit's confirmed findings are fixed and regression-tested:
   default to fast-forward-only (`bole-e9a`).
 - **Signature domain separation** — all Ed25519 schemes are domain-tagged
   (`bole-m2p`).
+- **Fail-closed on unknown hook kinds across replicas** — a repository pins its
+  active policy root at `refs/policy/root` (content-addressed, replicated via
+  sync); every advance/merge/replicated push resolves the root's declarative
+  hooks, and a replica that does not recognize a hook kind refuses the
+  operation rather than skipping the hook (`bole-au0t`, WS1-O5).
 
 ### Per-request resource caps
 

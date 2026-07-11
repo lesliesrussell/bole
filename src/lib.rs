@@ -67,6 +67,8 @@ pub use acl::attestation::{
 };
 // bole-ehx
 pub use acl::policy_object::HookSpec;
+// bole-au0t
+pub use acl::policy_object::{PolicyRoot, POLICY_ROOT_REF};
 // bole-eup
 pub use collab::{fingerprint, key_hex, verify_profile, CollabObject, CollabSigner, Key, Profile,
     // bole-2zq

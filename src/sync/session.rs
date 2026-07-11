@@ -144,7 +144,7 @@ pub(crate) async fn apply_push_ops(
     // all incoming ops fail-closed rather than accept a history a peer might
     // reject (divergence under CAS-on-heads). Default repos bind only the
     // deterministic built-in, so this is a no-op for them.
-    let registry = repo.policy_registry()?;
+    let registry = repo.policy_registry().await?;
     if !registry.deterministic() {
         let reason = format!(
             "repository binds non-deterministic policy hook(s) [{}]; refusing replicated push (fail-closed)",
@@ -481,6 +481,47 @@ mod tests {
             }
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }
+    }
+
+    // bole-au0t
+    /// A replica whose pinned policy root names a hook kind this binary does not
+    /// recognize must refuse a replicated push fail-closed, not skip the hook.
+    #[tokio::test]
+    async fn push_refused_when_pinned_root_has_unknown_hook_kind() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        let repo = Repository::memory();
+        let (name, base) = seed(&repo, "main", b"a").await;
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: repo.objects.put_tree(BTreeMap::new()).await.unwrap(),
+                parents: vec![base],
+                author: "t".into(),
+                created_at: 1,
+                message: "c".into(),
+            })
+            .await
+            .unwrap();
+        let op = RefUpdateOp { name, expected_old: Some(base), new_head: child };
+
+        repo.set_policy_root(&PolicyRoot {
+            lattice: ObjectId::from_content(b"lattice"),
+            rules: ObjectId::from_content(b"rules"),
+            parent: None,
+            hooks: vec![HookSpec {
+                kind: "quantum-approval".into(),
+                pattern: "**".into(),
+                params: BTreeMap::new(),
+            }],
+        })
+        .await
+        .unwrap();
+
+        let err = apply_push_ops(&repo, &writer(), std::slice::from_ref(&op)).await.unwrap_err();
+        assert!(
+            err.to_string().contains("unknown policy hook kind"),
+            "expected fail-closed unknown-kind rejection, got {err:?}"
+        );
     }
 
     // bole-sq4
