@@ -504,3 +504,38 @@ fn cli_profile_bundle_contract() {
     assert!(v2["trust"]["edges"].as_array().unwrap().is_empty());
     assert!(v2["timelines"].as_array().unwrap().is_empty());
 }
+
+// bole-xwqv
+#[test]
+fn cli_pr_create_list_show() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "e3".repeat(32);
+
+    // Create a proposal.
+    let created = ok(w, &["pr", "create", "--from", "feature/x", "--into", "release/1.0", "--title", "Add x", "--json"], Some(&seed));
+    let cv: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    assert_eq!(cv["from"], "feature/x");
+    assert_eq!(cv["into"], "release/1.0");
+    assert_eq!(cv["title"], "Add x");
+    let id = cv["id"].as_str().unwrap().to_string();
+
+    // List shows it.
+    let listed = ok(w, &["pr", "list", "--json"], Some(&seed));
+    let lv: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let rows = lv["proposals"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], id);
+    assert_eq!(rows[0]["title"], "Add x");
+
+    // Show by id.
+    let shown = ok(w, &["pr", "show", &id, "--json"], Some(&seed));
+    let sv: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+    assert_eq!(sv["from"], "feature/x");
+    assert_eq!(sv["into"], "release/1.0");
+
+    // Show a bogus id errors.
+    let bad = run(w, &["pr", "show", &"00".repeat(32)], Some(&seed));
+    assert!(!bad.status.success(), "unknown proposal id must error");
+}

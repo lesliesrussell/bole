@@ -1,0 +1,116 @@
+// bole-xwqv
+//! `bole pr` — create, list, and show change proposals (the PR system).
+
+use std::path::PathBuf;
+
+use anyhow::{anyhow, Result};
+use bole::pr::ProposalSigner;
+use clap::Subcommand;
+
+use crate::context::RepoContext;
+use crate::key;
+use crate::output::Output;
+
+/// Change-proposal subcommands.
+#[derive(Subcommand)]
+pub enum Cmd {
+    /// Open a proposal to merge one timeline (`--from`) into another (`--into`).
+    Create {
+        /// Source timeline ref name (the branch being proposed).
+        #[arg(long)]
+        from: String,
+        /// Target timeline ref name (where it would merge).
+        #[arg(long)]
+        into: String,
+        /// A short title for the proposal.
+        #[arg(long)]
+        title: String,
+        /// Env var holding the 64-hex Ed25519 seed (the author).
+        #[arg(long, default_value = "BOLE_COLLAB_KEY")]
+        key_env: String,
+        /// File holding the 64-hex Ed25519 seed.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// List open proposals.
+    List,
+    /// Show one proposal by id.
+    Show {
+        /// The proposal's object id (64 hex).
+        id: String,
+    },
+}
+
+/// Dispatches a `pr` subcommand.
+pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Create { from, into, title, key_env, key_file } => {
+            let seed = key::resolve(&key_env, key_file.as_deref())?;
+            let signer = ProposalSigner::from_seed(seed);
+            // Wall-clock seconds; the field is signed so it can't be altered.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let p = signer.sign_proposal(from.clone(), into.clone(), title.clone(), now);
+            let id = ctx.repo.publish_proposal(&p).await?;
+            out.emit(
+                || format!("opened proposal {id}: {from} -> {into} ({title})"),
+                || serde_json::json!({
+                    "id": id.to_string(),
+                    "from": from,
+                    "into": into,
+                    "title": title,
+                    "author": key::hex32(&p.author),
+                }),
+            );
+            Ok(())
+        }
+        Cmd::List => {
+            let proposals = ctx.repo.list_proposals().await?;
+            let rows: Vec<_> = proposals.iter().map(|(id, p)| serde_json::json!({
+                "id": id.to_string(),
+                "from": p.source,
+                "into": p.target,
+                "title": p.title,
+                "author": key::hex32(&p.author),
+                "created_at": p.created_at,
+            })).collect();
+            out.emit(
+                || {
+                    if rows.is_empty() {
+                        "no open proposals".to_string()
+                    } else {
+                        proposals
+                            .iter()
+                            .map(|(id, p)| format!("{id}  {} -> {}  {}", p.source, p.target, p.title))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                },
+                || serde_json::json!({ "proposals": rows }),
+            );
+            Ok(())
+        }
+        Cmd::Show { id } => {
+            let oid = id.parse::<bole::ObjectId>().map_err(|e| anyhow!("invalid proposal id: {e}"))?;
+            let p = ctx
+                .repo
+                .get_proposal(&oid)
+                .await?
+                .ok_or_else(|| anyhow!("no such proposal: {id}"))?;
+            out.emit(
+                || format!("{} -> {}  {}  (author {})", p.source, p.target, p.title, key::hex32(&p.author)),
+                || serde_json::json!({
+                    "id": oid.to_string(),
+                    "from": p.source,
+                    "into": p.target,
+                    "title": p.title,
+                    "author": key::hex32(&p.author),
+                    "created_at": p.created_at,
+                }),
+            );
+            Ok(())
+        }
+    }
+}

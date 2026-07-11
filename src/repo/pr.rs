@@ -9,7 +9,14 @@
 use crate::error::{Error, Result};
 use crate::object::{Object, ObjectId};
 use crate::pr::{verify_proposal, ChangeProposal};
+use crate::refs::{Ref, RefName, Tag};
 use crate::repo::Repository;
+
+// bole-xwqv
+/// Ref prefix under which published change proposals are pinned (one tag per
+/// proposal, named by its object id). Pinning makes proposals GC-roots so they
+/// survive `gc()`, and lets `list_proposals` enumerate them.
+pub const PROPOSALS_PREFIX: &str = "refs/proposals/";
 
 impl Repository {
     // bole-060a
@@ -40,6 +47,35 @@ impl Repository {
             Some(Object::ChangeProposal(p)) if verify_proposal(&p) => Ok(Some(p)),
             _ => Ok(None),
         }
+    }
+
+    // bole-xwqv
+    /// Publishes a signed [`ChangeProposal`]: stores it (fail-closed verify) and
+    /// pins it under `refs/proposals/<id>` so it survives GC and appears in
+    /// [`list_proposals`](Repository::list_proposals). Returns its id.
+    /// Idempotent — the ref name is the content id.
+    pub async fn publish_proposal(&self, p: &ChangeProposal) -> Result<ObjectId> {
+        let id = self.put_proposal(p).await?;
+        let name = RefName::new(format!("{PROPOSALS_PREFIX}{id}"))?;
+        let mut tx = self.refs.transaction();
+        tx.set(name, Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(id)
+    }
+
+    // bole-xwqv
+    /// Every published proposal (id + proposal), verified fail-closed — a
+    /// pinned ref whose object is missing or does not verify is skipped.
+    pub async fn list_proposals(&self) -> Result<Vec<(ObjectId, ChangeProposal)>> {
+        let mut out = Vec::new();
+        for name in self.refs.list(PROPOSALS_PREFIX)? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                if let Some(p) = self.get_proposal(&tag.target).await? {
+                    out.push((tag.target, p));
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -76,6 +112,38 @@ mod tests {
         // An id pointing at a non-proposal object.
         let blob = repo.objects.put_blob(bytes::Bytes::from("x")).await.unwrap();
         assert!(repo.get_proposal(&blob).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn publish_list_and_survives_gc() {
+        let repo = Repository::memory();
+        let signer = ProposalSigner::from_seed([11u8; 32]);
+        let a = signer.sign_proposal("feature/a", "main", "A", 1);
+        let b = signer.sign_proposal("feature/b", "main", "B", 2);
+        let ida = repo.publish_proposal(&a).await.unwrap();
+        let idb = repo.publish_proposal(&b).await.unwrap();
+
+        let mut listed = repo.list_proposals().await.unwrap();
+        listed.sort_by_key(|(_, p)| p.title.clone());
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, ida);
+        assert_eq!(listed[1].0, idb);
+
+        // Pinned proposals are GC-roots: a sweep does not collect them.
+        repo.gc(&[], 0, 1_000_000).await.unwrap();
+        assert!(repo.get_proposal(&ida).await.unwrap().is_some(), "pinned proposal must survive GC");
+        assert_eq!(repo.list_proposals().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn publish_is_idempotent() {
+        let repo = Repository::memory();
+        let signer = ProposalSigner::from_seed([12u8; 32]);
+        let p = signer.sign_proposal("x", "y", "t", 0);
+        let id1 = repo.publish_proposal(&p).await.unwrap();
+        let id2 = repo.publish_proposal(&p).await.unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(repo.list_proposals().await.unwrap().len(), 1, "same proposal pinned once");
     }
 
     #[tokio::test]
