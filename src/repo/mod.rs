@@ -12,6 +12,8 @@ pub mod git_import;
 pub mod ephemeral;
 // bole-18p
 pub mod collab;
+// bole-060a
+pub mod pr;
 
 // bole-1vi
 use std::collections::BTreeMap;

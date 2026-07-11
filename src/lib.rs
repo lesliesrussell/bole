@@ -52,6 +52,9 @@ pub mod crypto;
 pub mod sync;
 // bole-eean
 pub mod audit;
+// bole-060a
+pub mod pr;
+pub use pr::{verify_proposal, ChangeProposal, ProposalSigner};
 pub use audit::{AuditDecision, AuditEvent, AuditSink};
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{

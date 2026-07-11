@@ -75,4 +75,7 @@ pub enum Object {
     // bole-eup
     /// A signed, content-addressed collaboration object (profile or trust edge).
     Collab(CollabObject),
+    // bole-060a
+    /// A signed change proposal (a PR: merge one timeline into another).
+    ChangeProposal(crate::pr::ChangeProposal),
 }
