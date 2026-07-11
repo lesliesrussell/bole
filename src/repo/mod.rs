@@ -224,11 +224,14 @@ impl Repository {
 
     // bole-au0t
     /// Pins `root` as the active policy root: stores it content-addressed and
-    /// points `refs/policy/root` at it. Because the ref and its closure
-    /// replicate via sync, the root's hooks bind on every replica through
-    /// [`Repository::policy_registry`] — a replica that cannot resolve one of
-    /// the root's hook kinds refuses advance/merge/replicated push fail-closed
-    /// (WS1-O5). Returns the root's object id.
+    /// points `refs/policy/root` at it. On any node that has pinned a root, its
+    /// hooks bind through [`Repository::policy_registry`] — a node that cannot
+    /// resolve one of the root's hook kinds refuses advance/merge/replicated
+    /// push fail-closed (WS1-O5). The root's object closure transfers via sync,
+    /// but a replica enforces it only after pinning it locally: adoption of a
+    /// fetched root is an explicit step (verified adoption via `verify_chain`
+    /// is future work), never a side effect of fetch/clone. Returns the root's
+    /// object id.
     pub async fn set_policy_root(&self, root: &crate::acl::policy_object::PolicyRoot) -> Result<ObjectId> {
         let id = self
             .objects
@@ -1960,6 +1963,87 @@ mod tests {
             "expected fail-closed unknown-kind rejection, got {err:?}"
         );
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, base, "head must not move");
+    }
+
+    // bole-au0t
+    #[tokio::test]
+    async fn unknown_hook_kind_in_pinned_root_fails_closed_on_check_merge() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() })
+            .await
+            .unwrap();
+        let source = RefName::new("feature/x").unwrap();
+        let dest = RefName::new("main").unwrap();
+        repo.refs.create_timeline(source.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(dest.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        repo.set_policy_root(&PolicyRoot {
+            lattice: ObjectId::from_content(b"lattice"),
+            rules: ObjectId::from_content(b"rules"),
+            parent: None,
+            hooks: vec![HookSpec { kind: "quantum-approval".into(), pattern: "**".into(), params: BTreeMap::new() }],
+        })
+        .await
+        .unwrap();
+
+        let writer = Accessor::new().with_timeline_role(TimelineRole {
+            pattern: "**".into(),
+            permission: Permission::Write,
+        });
+        let err = repo.check_merge(&source, &dest, &writer).await.unwrap_err();
+        assert!(
+            matches!(&err, crate::error::Error::PolicyViolation(r) if r.contains("unknown policy hook kind")),
+            "check_merge must fail closed on an unknown pinned hook kind, got {err:?}"
+        );
+    }
+
+    // bole-au0t
+    #[tokio::test]
+    async fn malformed_policy_root_ref_fails_closed() {
+        use crate::acl::policy_object::POLICY_ROOT_REF;
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        // (a) A timeline squatting the policy-root ref name is an error, not an
+        // absent policy.
+        let repo = Repository::memory();
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let snap = repo
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() })
+            .await
+            .unwrap();
+        let root_ref = RefName::new(POLICY_ROOT_REF).unwrap();
+        repo.refs
+            .create_timeline(root_ref.clone(), snap, TimelinePolicy::Unrestricted, 0, "persistent".into(), None)
+            .unwrap();
+        assert!(repo.policy_root().await.is_err(), "timeline at refs/policy/root must fail closed");
+        assert!(repo.policy_registry().await.is_err(), "registry must refuse a malformed pin");
+
+        // (b) A tag pointing at a non-PolicyRoot object is an error too.
+        let repo2 = Repository::memory();
+        let blob = repo2.objects.put_blob(Bytes::from("junk")).await.unwrap();
+        let mut tx = repo2.refs.transaction();
+        tx.set(root_ref.clone(), crate::refs::Ref::Tag(crate::refs::Tag { target: blob, created_at: 0, message: None }));
+        tx.commit().unwrap();
+        assert!(repo2.policy_root().await.is_err(), "non-root target must fail closed");
+
+        // (c) A dangling tag target is an error too.
+        let repo3 = Repository::memory();
+        let mut tx = repo3.refs.transaction();
+        tx.set(root_ref, crate::refs::Ref::Tag(crate::refs::Tag { target: ObjectId::from_content(b"missing"), created_at: 0, message: None }));
+        tx.commit().unwrap();
+        assert!(repo3.policy_root().await.is_err(), "dangling target must fail closed");
     }
 
     // bole-au0t

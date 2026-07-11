@@ -120,11 +120,19 @@ The internal audit's confirmed findings are fixed and regression-tested:
   default to fast-forward-only (`bole-e9a`).
 - **Signature domain separation** — all Ed25519 schemes are domain-tagged
   (`bole-m2p`).
-- **Fail-closed on unknown hook kinds across replicas** — a repository pins its
-  active policy root at `refs/policy/root` (content-addressed, replicated via
-  sync); every advance/merge/replicated push resolves the root's declarative
-  hooks, and a replica that does not recognize a hook kind refuses the
-  operation rather than skipping the hook (`bole-au0t`, WS1-O5).
+- **Fail-closed on unknown hook kinds** — a repository pins its active policy
+  root at `refs/policy/root` (a content-addressed tag whose closure transfers
+  via sync); every advance/merge and both replicated-push paths (wire and
+  in-process) resolve the root's declarative hooks, and a node that does not
+  recognize a hook kind refuses the operation rather than skipping the hook.
+  Push ops naming `refs/policy/*` are rejected as reserved (`bole-au0t`,
+  WS1-O5). **Limitations:** adoption of a fetched root is deliberately NOT
+  automatic — a node enforces a root only after it is pinned locally
+  (`set_policy_root`), and a verified adopt-from-remote step (via
+  `verify_chain`) is future work; and a pinned root containing the
+  non-deterministic `signed-approval` hook refuses ALL replicated pushes
+  (the `bole-7c1` guard), so approval-gated timelines and push replication
+  remain mutually exclusive.
 
 ### Per-request resource caps
 

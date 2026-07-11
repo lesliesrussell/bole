@@ -160,6 +160,19 @@ pub(crate) async fn apply_push_ops(
     }
 
     for op in ops {
+        // bole-au0t: the policy namespace is repository governance, never
+        // writable via push. Without this, a write-capable peer could squat
+        // `refs/policy/root` as a timeline and wedge every later
+        // `policy_root()` read (persistent fail-closed DoS) — or the whole
+        // batch would abort on the WrongRefKind read below, collateral-failing
+        // legitimate ops.
+        if op.name.as_str().starts_with("refs/policy/") {
+            results.push(RefStatusEntry {
+                name: op.name.clone(),
+                status: RefApplyStatus::Denied("reserved policy ref".into()),
+            });
+            continue;
+        }
         let label = rules.label_for_timeline(&lattice, op.name.as_str());
         if !accessor.can_write(&label, ResourceRef::Timeline(op.name.as_str())) {
             results.push(RefStatusEntry {
@@ -522,6 +535,44 @@ mod tests {
             err.to_string().contains("unknown policy hook kind"),
             "expected fail-closed unknown-kind rejection, got {err:?}"
         );
+    }
+
+    // bole-au0t
+    /// Ops naming reserved policy refs are denied per-op: a write-capable peer
+    /// must not be able to squat `refs/policy/root` (wedging every later
+    /// `policy_root()` read) or otherwise touch the policy namespace via push.
+    /// Legitimate ops in the same batch still apply.
+    #[tokio::test]
+    async fn push_op_naming_policy_ref_is_denied_as_reserved() {
+        let repo = Repository::memory();
+        let (name, base) = seed(&repo, "main", b"a").await;
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: repo.objects.put_tree(BTreeMap::new()).await.unwrap(),
+                parents: vec![base],
+                author: "t".into(),
+                created_at: 1,
+                message: "c".into(),
+            })
+            .await
+            .unwrap();
+        let squat = RefUpdateOp {
+            name: RefName::new("refs/policy/root").unwrap(),
+            expected_old: None,
+            new_head: child,
+        };
+        let legit = RefUpdateOp { name: name.clone(), expected_old: Some(base), new_head: child };
+
+        let results = apply_push_ops(&repo, &writer(), &[squat, legit]).await.unwrap();
+        match &results[0].status {
+            RefApplyStatus::Denied(r) => assert!(r.contains("reserved"), "reason: {r}"),
+            other => panic!("expected reserved-ref denial, got {other:?}"),
+        }
+        assert!(matches!(results[1].status, RefApplyStatus::Ok), "legit op must still apply: {:?}", results[1].status);
+        // The policy namespace is untouched; the repo is not wedged.
+        assert!(repo.policy_root().await.unwrap().is_none());
+        assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, child);
     }
 
     // bole-sq4

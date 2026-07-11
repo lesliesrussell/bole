@@ -125,6 +125,22 @@ impl Repository {
         let lattice = to.acls.lattice()?;
         let rules = to.acls.label_ruleset()?;
 
+        // bole-au0t: gate on the DESTINATION's bound policy exactly like the
+        // wire path (`apply_push_ops`). Building the registry fails closed on a
+        // hook kind this binary cannot resolve; a non-deterministic registry
+        // refuses every op (the bole-7c1 replicated-advance guard).
+        let registry = to.policy_registry().await?;
+        if !registry.deterministic() {
+            let reason = format!(
+                "peer binds non-deterministic policy hook(s) [{}]; refusing replicated push (fail-closed)",
+                registry.non_deterministic().join(", ")
+            );
+            return Ok(timelines
+                .iter()
+                .map(|name| RefResult { name: name.clone(), status: PushStatus::Denied(reason.clone()) })
+                .collect());
+        }
+
         for name in timelines {
             let local = match self.refs.get_timeline(name)? {
                 Some(t) => t,
@@ -172,6 +188,41 @@ impl Repository {
 
         // Objects-before-refs: land the closure on the peer before any CAS.
         to.sync_transfer(self, &wants).await?;
+
+        // bole-au0t: evaluate the destination's deterministic hooks on each
+        // advance to an existing peer timeline (after the transfer, so
+        // ancestry-walking hooks can resolve the new head). Denied ops drop out
+        // of the transaction; the rest still apply. Sync-side analogue of the
+        // bole-rdh evaluation in `apply_push_ops`.
+        let mut gated = Vec::with_capacity(plan.len());
+        for entry in plan {
+            if let Some(remote) = to.refs.get_timeline(&entry.0)? {
+                let ctx = crate::acl::hook::PolicyContext {
+                    event: crate::acl::hook::PolicyEvent::Advance {
+                        timeline: &entry.0,
+                        old_head: remote.head,
+                        new_head: entry.1,
+                    },
+                    accessor,
+                    objects: &to.objects,
+                    refs: &to.refs,
+                    now: 0,
+                };
+                match registry.evaluate_replayable(&ctx).await {
+                    crate::acl::hook::PolicyDecision::Allow => {}
+                    crate::acl::hook::PolicyDecision::Deny(reason)
+                    | crate::acl::hook::PolicyDecision::RequiresApproval { reason, .. } => {
+                        results.push(RefResult { name: entry.0.clone(), status: PushStatus::Denied(reason) });
+                        continue;
+                    }
+                }
+            }
+            gated.push(entry);
+        }
+        let plan = gated;
+        if plan.is_empty() {
+            return Ok(results);
+        }
 
         let mut tx = to.refs.transaction();
         for (name, local_head, expected_old, _tracking, local_tl) in &plan {
@@ -347,6 +398,96 @@ mod tests {
         assert!(missing.is_empty(), "nothing new to send");
         dst.fetch("origin", &src, &Accessor::privileged()).await.unwrap();
         assert_eq!(dst.objects.count().await.unwrap(), before);
+    }
+
+    // bole-au0t
+    /// The in-process push path must gate on the DESTINATION's pinned policy,
+    /// exactly like the wire path (`apply_push_ops`): a peer pinning a hook kind
+    /// this binary cannot resolve refuses the push fail-closed.
+    #[tokio::test]
+    async fn push_fails_closed_when_peer_pins_unknown_hook_kind() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use std::collections::BTreeMap;
+
+        let server = Repository::memory();
+        let (name, base) = seed(&server, "main", b"base").await;
+        let client = Repository::clone_from(&server, &Accessor::privileged()).await.unwrap();
+        server
+            .set_policy_root(&PolicyRoot {
+                lattice: ObjectId::from_content(b"lattice"),
+                rules: ObjectId::from_content(b"rules"),
+                parent: None,
+                hooks: vec![HookSpec { kind: "quantum-approval".into(), pattern: "**".into(), params: BTreeMap::new() }],
+            })
+            .await
+            .unwrap();
+
+        advance(&client, &name, b"next", base).await;
+        let err = client.push("origin", &server, std::slice::from_ref(&name), &writer()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("unknown policy hook kind"),
+            "expected fail-closed unknown-kind rejection, got {err:?}"
+        );
+        assert_eq!(server.refs.get_timeline(&name).unwrap().unwrap().head, base, "peer head must not move");
+    }
+
+    // bole-au0t
+    /// A destination pinning a non-deterministic hook (signed-approval) refuses
+    /// the in-process replicated push fail-closed, mirroring bole-7c1 on the
+    /// wire path.
+    #[tokio::test]
+    async fn push_refused_when_peer_pins_non_deterministic_hook() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use std::collections::BTreeMap;
+
+        let server = Repository::memory();
+        let (name, base) = seed(&server, "main", b"base").await;
+        let client = Repository::clone_from(&server, &Accessor::privileged()).await.unwrap();
+        server
+            .set_policy_root(&PolicyRoot {
+                lattice: ObjectId::from_content(b"lattice"),
+                rules: ObjectId::from_content(b"rules"),
+                parent: None,
+                hooks: vec![HookSpec {
+                    kind: "signed-approval".into(),
+                    pattern: "**".into(),
+                    params: BTreeMap::from([("needed".to_string(), 1u64)]),
+                }],
+            })
+            .await
+            .unwrap();
+
+        advance(&client, &name, b"next", base).await;
+        let res = client.push("origin", &server, std::slice::from_ref(&name), &writer()).await.unwrap();
+        match &res[0].status {
+            PushStatus::Denied(r) => assert!(r.contains("non-deterministic"), "reason: {r}"),
+            other => panic!("expected fail-closed Denied, got {other:?}"),
+        }
+        assert_eq!(server.refs.get_timeline(&name).unwrap().unwrap().head, base, "peer head must not move");
+    }
+
+    // bole-au0t
+    /// Fetch/clone must NOT adopt a peer's policy root: adoption is an explicit,
+    /// locally-verified step, never a side effect of sync.
+    #[tokio::test]
+    async fn clone_does_not_adopt_peer_policy_root() {
+        use crate::acl::policy_object::{HookSpec, PolicyRoot};
+        use std::collections::BTreeMap;
+
+        let server = Repository::memory();
+        seed(&server, "main", b"base").await;
+        server
+            .set_policy_root(&PolicyRoot {
+                lattice: ObjectId::from_content(b"lattice"),
+                rules: ObjectId::from_content(b"rules"),
+                parent: None,
+                hooks: vec![HookSpec { kind: "timeline-policy".into(), pattern: "**".into(), params: BTreeMap::new() }],
+            })
+            .await
+            .unwrap();
+
+        let client = Repository::clone_from(&server, &Accessor::privileged()).await.unwrap();
+        assert!(client.policy_root().await.unwrap().is_none(), "clone must not adopt the peer's policy root");
     }
 
     #[tokio::test]
