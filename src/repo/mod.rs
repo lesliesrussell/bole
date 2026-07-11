@@ -298,6 +298,65 @@ impl Repository {
         Ok(id)
     }
 
+    // bole-vl2m
+    /// Adopts a policy root offered by a remote as this repo's active pin, after
+    /// verifying it. Unlike [`set_policy_root`](Repository::set_policy_root)
+    /// (a local, trusted upsert), adoption is the verified path for a root whose
+    /// closure arrived via sync:
+    ///
+    /// 1. [`verify_chain`](crate::acl::authority::verify_chain) must `Accept`
+    ///    `tip` — every root in its `parent` chain present, its lattice/rules
+    ///    present, every hook kind resolvable here (fail-closed), and each root
+    ///    signed by a [`TrustAnchor`](crate::acl::authority::TrustAnchor) in
+    ///    `trust`.
+    /// 2. Anti-rollback: if a root is already pinned, `tip`'s chain must contain
+    ///    it (a policy fast-forward) — a divergent or older tip is refused, so a
+    ///    peer cannot roll governance back or fork it.
+    /// 3. The pin moves under a compare-and-swap on `refs/policy/root`, so a
+    ///    concurrent adoption conflicts rather than clobbering.
+    pub async fn adopt_policy_root(
+        &self,
+        tip: ObjectId,
+        sigs: &crate::acl::authority::SignatureStore,
+        trust: &crate::acl::authority::TrustStore,
+    ) -> Result<()> {
+        // 1. Verify the offered chain (signatures, presence, resolvable hooks).
+        match crate::acl::authority::verify_chain(&self.objects, tip, sigs, trust).await? {
+            crate::acl::authority::PolicyVerdict::Accept { .. } => {}
+            crate::acl::authority::PolicyVerdict::Reject(reason) => {
+                return Err(Error::PolicyViolation(format!("policy adoption rejected: {reason}")));
+            }
+        }
+        let name = RefName::new(crate::acl::policy_object::POLICY_ROOT_REF)?;
+        let current = self.refs.get(&name)?;
+        // 2. Anti-rollback: an existing pin must lie on the offered tip's chain.
+        match &current {
+            Some(Ref::Tag(cur)) => {
+                let offered = crate::acl::authority::chain_of(&self.objects, tip).await?;
+                if !offered.contains(&cur.target) {
+                    return Err(Error::PolicyViolation(
+                        "policy adoption is not a fast-forward of the pinned root (refusing rollback/divergence)".into(),
+                    ));
+                }
+            }
+            // bole-vl2m: a non-tag ref at refs/policy/root is a malformed pin
+            // (policy_root() treats it as fail-closed). Don't silently skip
+            // anti-rollback over it — refuse and require a local repair.
+            Some(_) => {
+                return Err(Error::PolicyViolation(
+                    "refs/policy/root is not a policy-root tag; refuse to adopt over a malformed pin".into(),
+                ))
+            }
+            None => {}
+        }
+        // 3. CAS pin: only move if refs/policy/root is still what we read.
+        let mut tx = self.refs.transaction();
+        tx.expect(name.clone(), current);
+        tx.set(name, Ref::Tag(crate::refs::Tag { target: tip, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(())
+    }
+
     // bole-au0t
     /// Loads the pinned policy root (`None` if the repo has never pinned one).
     /// Fail-closed: a `refs/policy/root` that does not point at a stored
@@ -2138,6 +2197,60 @@ mod tests {
         assert!(!repo.ref_served(&hidden, &anon).unwrap());
         assert!(repo.ref_served(&hidden, &cleared).unwrap());
         assert!(!repo.ref_served(&scoped, &Accessor::privileged()).unwrap(), "scoped is structural");
+    }
+
+    // bole-vl2m
+    /// Verified adoption: a signed policy-root chain from a trusted anchor is
+    /// accepted and pinned; an unsigned one is rejected; and a rollback /
+    /// divergent tip (whose chain does not contain the current pin) is refused.
+    #[tokio::test]
+    async fn adopt_policy_root_verified_and_anti_rollback() {
+        use crate::acl::authority::{PolicySigner, SignatureStore, TrustStore};
+        use crate::acl::policy_object::HookSpec;
+        use crate::acl::policy_object::PolicyRoot;
+        use crate::object::Object;
+        use std::collections::BTreeMap;
+
+        // Store a lattice + rules object so verify_chain's presence checks pass.
+        let repo = Repository::memory();
+        let lattice_id = repo.objects.put(&Object::Policy(crate::acl::policy_object::PolicyObject::Lattice(crate::acl::lattice::LabelLattice::two_point()))).await.unwrap();
+        let rules_id = repo.objects.put(&Object::Policy(crate::acl::policy_object::PolicyObject::RuleSet(crate::acl::rules::LabelRuleSet::default()))).await.unwrap();
+
+        let admin = PolicySigner::from_seed("admin", [9u8; 32]);
+        let mut trust = TrustStore::new();
+        trust.add(admin.anchor());
+
+        // Root 0 (generation 1), signed.
+        let root0 = PolicyRoot { lattice: lattice_id, rules: rules_id, parent: None, hooks: vec![] };
+        let root0_id = repo.objects.put(&Object::Policy(crate::acl::policy_object::PolicyObject::Root(root0.clone()))).await.unwrap();
+        let mut sigs = SignatureStore::new();
+        sigs.insert(admin.sign_root(root0_id));
+
+        // Unsigned adoption is rejected.
+        let empty_sigs = SignatureStore::new();
+        assert!(repo.adopt_policy_root(root0_id, &empty_sigs, &trust).await.is_err(), "unsigned root must be refused");
+        assert!(repo.policy_root().await.unwrap().is_none(), "nothing pinned after a rejected adopt");
+
+        // Signed adoption is accepted and pinned.
+        repo.adopt_policy_root(root0_id, &sigs, &trust).await.unwrap();
+        assert_eq!(repo.policy_root().await.unwrap().unwrap().0, root0_id);
+
+        // Root 1 (generation 2) descends root0 — a fast-forward, accepted.
+        let root1 = PolicyRoot { lattice: lattice_id, rules: rules_id, parent: Some(root0_id), hooks: vec![] };
+        let root1_id = repo.objects.put(&Object::Policy(crate::acl::policy_object::PolicyObject::Root(root1.clone()))).await.unwrap();
+        sigs.insert(admin.sign_root(root1_id));
+        repo.adopt_policy_root(root1_id, &sigs, &trust).await.unwrap();
+        assert_eq!(repo.policy_root().await.unwrap().unwrap().0, root1_id);
+
+        // A divergent tip (a different generation-2 root that does NOT descend
+        // root1) is a rollback/divergence: its chain omits the current pin.
+        let fork = PolicyRoot { lattice: lattice_id, rules: rules_id, parent: Some(root0_id), hooks: vec![HookSpec { kind: "timeline-policy".into(), pattern: "**".into(), params: BTreeMap::new() }] };
+        let fork_id = repo.objects.put(&Object::Policy(crate::acl::policy_object::PolicyObject::Root(fork.clone()))).await.unwrap();
+        sigs.insert(admin.sign_root(fork_id));
+        let err = repo.adopt_policy_root(fork_id, &sigs, &trust).await.unwrap_err();
+        assert!(matches!(&err, crate::error::Error::PolicyViolation(r) if r.contains("fast-forward") || r.contains("rollback")), "divergent adopt must be refused, got {err:?}");
+        // The pin is unchanged.
+        assert_eq!(repo.policy_root().await.unwrap().unwrap().0, root1_id);
     }
 
     // bole-au0t
