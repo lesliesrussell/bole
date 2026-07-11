@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
+// bole-rvyl
+use crate::extract::{ApiPath, ApiQuery};
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -17,7 +19,7 @@ use crate::state::AppState;
 
 pub async fn get_metadata(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    ApiPath(id): ApiPath<String>,
     auth: RequestAuth,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let oid: bole::ObjectId = id.parse()?; // ParseObjectIdError -> 400
@@ -48,8 +50,8 @@ pub struct BlobQuery {
 
 pub async fn get_blob(
     State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(q): Query<BlobQuery>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(q): ApiQuery<BlobQuery>,
     auth: RequestAuth,
 ) -> Result<Response, ApiError> {
     let oid: bole::ObjectId = id.parse()?;

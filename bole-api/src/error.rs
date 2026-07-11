@@ -22,6 +22,10 @@ impl ApiError {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self { status: StatusCode::NOT_FOUND, code: "not_found", message: message.into() }
     }
+    // bole-rvyl
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self { status: StatusCode::METHOD_NOT_ALLOWED, code: "method_not_allowed", message: message.into() }
+    }
     pub fn internal(message: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal", message: message.into() }
     }

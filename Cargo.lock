@@ -274,6 +274,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bole",
+ "bole-api",
  "clap",
  "ed25519-dalek",
  "hex",

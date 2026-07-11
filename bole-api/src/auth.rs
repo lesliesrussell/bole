@@ -24,6 +24,16 @@ impl FromRequestParts<AppState> for RequestAuth {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let principal = resolve_principal(parts, state)?;
         let actor = state.config.actors.actor_for(&principal).map(str::to_string);
+        // bole-261x
+        // Contract: presented-but-unknown credentials are 401, never a silent
+        // downgrade to anonymous. The lib's ActorMap maps unmapped principals
+        // to anonymous (a sync-serve convention); over HTTP that would make a
+        // stale or typo'd token indistinguishable from no token at all, masking
+        // misconfiguration and inviting confused-deputy mistakes. Only a
+        // request that presents NO credential is anonymous.
+        if actor.is_none() && principal != Principal::Anonymous {
+            return Err(ApiError::unauthorized("credentials do not map to a known actor"));
+        }
         let accessor = accessor_for(&state.repo.acls, &state.config.actors, &principal)
             .map_err(ApiError::from)?;
         Ok(RequestAuth { accessor, principal, actor })
@@ -38,21 +48,41 @@ impl FromRequestParts<AppState> for RequestAuth {
 fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiError> {
     if let Some(auth) = parts.headers.get(axum::http::header::AUTHORIZATION) {
         let value = auth.to_str().map_err(|_| ApiError::bad_request("non-ascii Authorization header"))?;
-        if let Some(token) = value.strip_prefix("Bearer ") {
-            return Ok(Principal::Token(token.to_string()));
+        // bole-261x
+        // An Authorization header is a presented credential: an unrecognized
+        // or malformed scheme is 401, never a silent fallthrough to anonymous.
+        // Scheme names compare case-insensitively (RFC 7235), so a
+        // spec-compliant `bearer` client reaches the bearer arm.
+        let (scheme, rest) = value
+            .split_once(' ')
+            .ok_or_else(|| ApiError::unauthorized("malformed Authorization header"))?;
+        if scheme.eq_ignore_ascii_case("bearer") {
+            return Ok(Principal::Token(rest.to_string()));
         }
-        if let Some(rest) = value.strip_prefix("Signature ") {
+        if scheme.eq_ignore_ascii_case("signature") {
             return verify_signed(rest, parts, state);
         }
+        return Err(ApiError::unauthorized("unrecognized Authorization scheme"));
     }
     // bole-3xj5
     // mTLS via trusted-proxy header: only honored when the immediate peer is an
     // allowlisted proxy (the proxy is trusted to have verified the client cert).
     if let Some(subject) = parts.headers.get("x-bole-client-subject").and_then(|v| v.to_str().ok()) {
-        let peer_ip = peer_addr(parts).map(|a| a.ip().to_string());
-        let trusted = peer_ip
-            .as_deref()
-            .map(|ip| state.config.trusted_proxies.iter().any(|t| t == ip))
+        // bole-6lzk
+        // Compare normalized IpAddrs, not strings: a dual-stack listener
+        // reports IPv4 peers as IPv4-mapped IPv6 (::ffff:a.b.c.d), which never
+        // string-matches a "127.0.0.1" config entry. Unparseable config
+        // entries are skipped (fail-closed).
+        let trusted = peer_addr(parts)
+            .map(|a| {
+                let peer = canonical_ip(a.ip());
+                state
+                    .config
+                    .trusted_proxies
+                    .iter()
+                    .filter_map(|t| t.parse::<std::net::IpAddr>().ok())
+                    .any(|t| canonical_ip(t) == peer)
+            })
             .unwrap_or(false);
         if trusted {
             return Ok(Principal::Mtls(subject.to_string()));
@@ -76,28 +106,33 @@ fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principa
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     use sha2::{Digest, Sha256};
 
-    let key_id = extract_param(rest, "keyId").ok_or_else(|| ApiError::unauthorized("missing keyId"))?;
-    let sig_hex = extract_param(rest, "sig").ok_or_else(|| ApiError::unauthorized("missing sig"))?;
-    let registered = state
-        .config
-        .keys
-        .get(&key_id)
-        .ok_or_else(|| ApiError::unauthorized("unknown keyId"))?;
+    // bole-6lzk
+    // Every failure in this arm returns the SAME generic 401: distinct error
+    // texts would let a caller distinguish unknown-keyId from bad-signature
+    // and enumerate registered key ids. For the same reason the replay window
+    // is checked BEFORE the key lookup.
+    let generic = || ApiError::unauthorized("signed request rejected");
 
-    // Replay window.
+    let key_id = extract_param(rest, "keyId").ok_or_else(generic)?;
+    let sig_hex = extract_param(rest, "sig").ok_or_else(generic)?;
+
+    // Replay window (before key lookup — bole-6lzk).
     let date = parts
         .headers
         .get("x-bole-date")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| ApiError::unauthorized("missing X-Bole-Date"))?;
-    let ts: u64 = date.parse().map_err(|_| ApiError::unauthorized("X-Bole-Date must be unix seconds"))?;
+        .ok_or_else(generic)?;
+    let ts: u64 = date.parse().map_err(|_| generic())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if now.abs_diff(ts) > MAX_SKEW_SECS {
-        return Err(ApiError::unauthorized("X-Bole-Date outside skew window"));
+        return Err(generic());
     }
+
+    // bole-6lzk
+    let registered = state.config.keys.get(&key_id).ok_or_else(generic)?;
 
     // Canonical message.
     let method = parts.method.as_str();
@@ -114,14 +149,14 @@ fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principa
     msg.extend_from_slice(SIGNED_REQUEST_DOMAIN);
     msg.extend_from_slice(format!("{method}\n{path}\n{date}\n{body_hash}").as_bytes());
 
-    let vk = VerifyingKey::from_bytes(&registered.pubkey)
-        .map_err(|_| ApiError::unauthorized("bad registered key"))?;
+    // bole-6lzk: same generic 401 on every failure (no enumeration oracle).
+    let vk = VerifyingKey::from_bytes(&registered.pubkey).map_err(|_| generic())?;
     let sig_bytes: [u8; 64] = hex::decode(&sig_hex)
         .ok()
         .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| ApiError::unauthorized("sig must be 64-byte hex"))?;
+        .ok_or_else(generic)?;
     let signature = Signature::from_bytes(&sig_bytes);
-    vk.verify(&msg, &signature).map_err(|_| ApiError::unauthorized("signature verification failed"))?;
+    vk.verify(&msg, &signature).map_err(|_| generic())?;
 
     Ok(Principal::SshKey(key_id))
 }
@@ -143,7 +178,19 @@ pub(crate) fn peer_addr(parts: &Parts) -> Option<std::net::SocketAddr> {
     parts.extensions.get::<ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0)
 }
 
+// bole-6lzk
+/// IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) normalize to their IPv4 form so
+/// dual-stack peer addresses compare equal to IPv4 config entries.
+fn canonical_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6.to_canonical(),
+        v4 => v4,
+    }
+}
+
 /// A human label for a principal variant (for the debug route / logging).
+// bole-gejz: test-only surface, compiled out of the shipped lib/binary.
+#[cfg(feature = "testing")]
 pub fn principal_kind(p: &Principal) -> &'static str {
     match p {
         Principal::SshKey(_) => "SshKey",

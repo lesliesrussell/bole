@@ -1,7 +1,9 @@
 // bole-3xj5
 //! `GET /v1/profiles/{key}` — a published Profile by 64-hex collab key.
 
-use axum::extract::{Path, State};
+use axum::extract::State;
+// bole-rvyl
+use crate::extract::ApiPath;
 use axum::Json;
 use serde_json::json;
 
@@ -11,7 +13,7 @@ use crate::state::AppState;
 
 pub async fn get_profile(
     State(state): State<AppState>,
-    Path(key_hex): Path<String>,
+    ApiPath(key_hex): ApiPath<String>,
     _auth: RequestAuth,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let raw = hex::decode(&key_hex).map_err(|_| ApiError::bad_request("key must be 64 hex chars"))?;
