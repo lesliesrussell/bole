@@ -158,6 +158,12 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::profile::Cmd,
     },
+    // bole-xwqv
+    /// Open, list, and show change proposals (PRs).
+    Pr {
+        #[command(subcommand)]
+        cmd: commands::pr::Cmd,
+    },
     /// Author/inspect this node's trust edges.
     Trust {
         #[command(subcommand)]
@@ -295,6 +301,11 @@ async fn run() -> Result<()> {
         Command::Profile { cmd } => {
             let ctx = open().await?;
             commands::profile::run(&ctx, &out, cmd).await
+        }
+        // bole-xwqv
+        Command::Pr { cmd } => {
+            let ctx = open().await?;
+            commands::pr::run(&ctx, &out, cmd).await
         }
         Command::Trust { cmd } => {
             let ctx = open().await?;

@@ -55,6 +55,8 @@ pub mod audit;
 // bole-060a
 pub mod pr;
 pub use pr::{verify_proposal, ChangeProposal, ProposalSigner};
+// bole-xwqv
+pub use repo::pr::PROPOSALS_PREFIX;
 pub use audit::{AuditDecision, AuditEvent, AuditSink};
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{
