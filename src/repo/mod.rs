@@ -371,6 +371,21 @@ impl Repository {
         Ok(out)
     }
 
+    // bole-e78l
+    /// [`Repository::list_refs_filtered`] minus namespaces that never travel a
+    /// serve path: `refs/collab/scoped/**` stays out of every peer-facing
+    /// enumeration regardless of labels (an unlabeled ref defaults to the
+    /// lattice bottom, i.e. world-readable, so a label check alone cannot gate
+    /// it). Every serve-side ref enumeration — wire adverts, in-process fetch,
+    /// and the HTTP API — must use this, not `list_refs_filtered` (WS8b M2).
+    pub fn list_refs_served(&self, prefix: &str, accessor: &Accessor) -> Result<Vec<RefName>> {
+        Ok(self
+            .list_refs_filtered(prefix, accessor)?
+            .into_iter()
+            .filter(|n| !n.as_str().starts_with(collab::COLLAB_SCOPED_PREFIX))
+            .collect())
+    }
+
     // bole-9by
     // bole-p8u
     /// Checks whether merging `source` into `dest` is safe with respect to path ACLs,

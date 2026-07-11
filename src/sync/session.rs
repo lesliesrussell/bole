@@ -166,10 +166,15 @@ pub(crate) async fn apply_push_ops(
         // `policy_root()` read (persistent fail-closed DoS) — or the whole
         // batch would abort on the WrongRefKind read below, collateral-failing
         // legitimate ops.
-        if op.name.as_str().starts_with("refs/policy/") {
+        // bole-e78l: same for the collab namespace, which is written only by
+        // local publish / verified pull — a squatted timeline at a collab tag
+        // name would wedge `collab_adverts` for every later collab connection.
+        if op.name.as_str().starts_with("refs/policy/")
+            || op.name.as_str().starts_with("refs/collab/")
+        {
             results.push(RefStatusEntry {
                 name: op.name.clone(),
-                status: RefApplyStatus::Denied("reserved policy ref".into()),
+                status: RefApplyStatus::Denied("reserved ref namespace".into()),
             });
             continue;
         }
@@ -416,7 +421,11 @@ fn tracking_ref(remote_name: &str, name: &RefName) -> Result<RefName> {
 // bole-6qy
 pub(crate) fn advertise(repo: &Repository, accessor: &Accessor) -> Result<Vec<RefAdvert>> {
     let mut out = Vec::new();
-    for name in repo.list_refs_filtered("", accessor)? {
+    // bole-e78l: M2 — list_refs_served structurally excludes scoped collab
+    // state for any accessor (unlabeled refs default to the lattice bottom,
+    // so a label check alone cannot gate them). The collab endpoint enforces
+    // the same rule structurally (collab_adverts).
+    for name in repo.list_refs_served("", accessor)? {
         match repo.refs.get(&name)? {
             Some(Ref::Timeline(t)) => out.push(RefAdvert { name, target: t.head, is_timeline: true }),
             Some(Ref::Tag(t)) => out.push(RefAdvert { name, target: t.target, is_timeline: false }),
@@ -573,6 +582,73 @@ mod tests {
         // The policy namespace is untouched; the repo is not wedged.
         assert!(repo.policy_root().await.unwrap().is_none());
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, child);
+    }
+
+    // bole-e78l
+    /// M2: `refs/collab/scoped/**` must never leak via ANY serve path. The
+    /// collab endpoint gates it structurally; the GENERAL sync advert must gate
+    /// it too — unlabeled refs default to the lattice bottom, so without an
+    /// explicit gate a scoped ref is advertised to every anonymous peer.
+    #[tokio::test]
+    async fn general_advertise_never_includes_scoped_collab_refs() {
+        use crate::repo::collab::COLLAB_SCOPED_PREFIX;
+        let repo = Repository::memory();
+        let (_name, _base) = seed(&repo, "main", b"a").await;
+        // Pin a (future capability-scoped) collab object under the scoped prefix.
+        let blob = repo.objects.put_blob(bytes::Bytes::from("scoped-secret")).await.unwrap();
+        let scoped = RefName::new(format!("{COLLAB_SCOPED_PREFIX}profile/x")).unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(scoped.clone(), Ref::Tag(Tag { target: blob, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        // Neither an anonymous accessor nor a privileged one may see it on the
+        // general endpoint: scoped collab state is not general-sync material.
+        for accessor in [Accessor::new(), Accessor::privileged()] {
+            let adverts = advertise(&repo, &accessor).unwrap();
+            assert!(
+                adverts.iter().all(|a| !a.name.as_str().starts_with(COLLAB_SCOPED_PREFIX)),
+                "scoped collab ref leaked via general advertise: {:?}",
+                adverts.iter().map(|a| a.name.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // bole-e78l
+    /// The collab namespace is written only by local publish / verified pull —
+    /// never by push. Without this, a write-capable peer could squat a timeline
+    /// at a `refs/collab/public/...` name, wedging `collab_adverts` (get_tag
+    /// returns WrongRefKind) for every later collab connection.
+    #[tokio::test]
+    async fn push_op_naming_collab_ref_is_denied_as_reserved() {
+        let repo = Repository::memory();
+        let (name, base) = seed(&repo, "main", b"a").await;
+        let child = repo
+            .objects
+            .put_snapshot(Snapshot {
+                root: repo.objects.put_tree(BTreeMap::new()).await.unwrap(),
+                parents: vec![base],
+                author: "t".into(),
+                created_at: 1,
+                message: "c".into(),
+            })
+            .await
+            .unwrap();
+        let squat = RefUpdateOp {
+            name: RefName::new("refs/collab/public/profile/deadbeef").unwrap(),
+            expected_old: None,
+            new_head: child,
+        };
+        let legit = RefUpdateOp { name: name.clone(), expected_old: Some(base), new_head: child };
+
+        let results = apply_push_ops(&repo, &writer(), &[squat, legit]).await.unwrap();
+        match &results[0].status {
+            RefApplyStatus::Denied(r) => assert!(r.contains("reserved"), "reason: {r}"),
+            other => panic!("expected reserved-ref denial, got {other:?}"),
+        }
+        assert!(matches!(results[1].status, RefApplyStatus::Ok));
+        // The collab endpoint is not wedged.
+        assert!(crate::sync::collab::collab_adverts(&repo, false).await.is_ok());
+        assert!(crate::sync::collab::collab_adverts(&repo, true).await.unwrap().is_empty());
     }
 
     // bole-sq4

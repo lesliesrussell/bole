@@ -662,6 +662,54 @@ async fn acl_protected_timeline_is_hidden_from_anonymous() {
     assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
 }
 
+// bole-e78l
+/// M2: `refs/collab/scoped/**` is not general-serve material — its names and
+/// target ids must not enumerate through the timelines endpoints for ANY
+/// caller (unlabeled refs default to the lattice bottom, so without a
+/// structural gate an anonymous caller would see them).
+#[tokio::test]
+async fn scoped_collab_refs_hidden_from_timelines_endpoints() {
+    let (_dir, state) = state_with_temp_repo().await;
+    seed_snapshot_and_timeline(&state.repo).await;
+    // Pin a scoped collab tag (a future capability-scoped object).
+    let id = state.repo.objects.put_blob(axum::body::Bytes::from("scoped")).await.unwrap();
+    let scoped = bole::RefName::new("refs/collab/scoped/profile/x").unwrap();
+    let mut tx = state.repo.refs.transaction();
+    tx.set(scoped, bole::Ref::Tag(bole::refs::Tag { target: id, created_at: 0, message: None }));
+    tx.commit().unwrap();
+
+    let app = build_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/v1/timelines").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    let names: Vec<&str> = json["timelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.starts_with("refs/collab/scoped/")),
+        "scoped collab refs leaked via /v1/timelines: {names:?}"
+    );
+
+    // Point lookup: hidden means 404, indistinguishable from absent.
+    let resp2 = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/timelines/refs/collab/scoped/profile/x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::NOT_FOUND);
+}
+
 // bole-3xj5
 /// I3 regression: hierarchical (slash-containing) timeline names must resolve
 /// through `GET /v1/timelines/{*name}`.

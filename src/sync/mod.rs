@@ -304,7 +304,7 @@ impl Repository {
 /// The `(ref, target)` heads a fetching actor may pull (ref-granularity filter).
 fn advertise(from: &Repository, accessor: &Accessor) -> Result<Vec<(RefName, ObjectId)>> {
     let mut adverts = Vec::new();
-    for name in from.list_refs_filtered("", accessor)? {
+    for name in from.list_refs_served("", accessor)? {
         match from.refs.get(&name)? {
             Some(Ref::Timeline(t)) => adverts.push((name, t.head)),
             Some(Ref::Tag(t)) => adverts.push((name, t.target)),
@@ -464,6 +464,30 @@ mod tests {
             other => panic!("expected fail-closed Denied, got {other:?}"),
         }
         assert_eq!(server.refs.get_timeline(&name).unwrap().unwrap().head, base, "peer head must not move");
+    }
+
+    // bole-e78l
+    /// M2: the in-process fetch path must not track (or transfer) scoped collab
+    /// refs either — symmetry with the wire `advertise` gate.
+    #[tokio::test]
+    async fn in_process_fetch_never_tracks_scoped_collab_refs() {
+        use crate::repo::collab::COLLAB_SCOPED_PREFIX;
+        let src = Repository::memory();
+        seed(&src, "main", b"v1").await;
+        let blob = src.objects.put_blob(bytes::Bytes::from("scoped-secret")).await.unwrap();
+        let scoped = RefName::new(format!("{COLLAB_SCOPED_PREFIX}profile/x")).unwrap();
+        let mut tx = src.refs.transaction();
+        tx.set(scoped, Ref::Tag(Tag { target: blob, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let dst = Repository::memory();
+        let tracked = dst.fetch("origin", &src, &Accessor::privileged()).await.unwrap();
+        assert!(
+            tracked.iter().all(|(n, _)| !n.as_str().contains("refs/collab/scoped/")),
+            "scoped collab ref tracked by in-process fetch: {:?}",
+            tracked.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+        );
+        assert!(dst.objects.get(&blob).await.unwrap().is_none(), "scoped closure must not transfer");
     }
 
     // bole-au0t
