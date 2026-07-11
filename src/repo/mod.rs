@@ -361,14 +361,29 @@ impl Repository {
         let all = self.refs.list(prefix)?;
         let mut out = Vec::new();
         for name in all {
-            let label = rules.label_for_timeline(&lattice, name.as_str());
-            if label == lattice.bottom()
-                || accessor.can_read(&label, ResourceRef::Timeline(name.as_str()))
-            {
+            // bole-rnpe: single source of the read-visibility rule (see below).
+            if Self::timeline_readable_with(&lattice, &rules, &name, accessor) {
                 out.push(name);
             }
         }
         Ok(out)
+    }
+
+    // bole-rnpe
+    /// The read-visibility rule for a timeline ref, evaluated against
+    /// pre-loaded `lattice`/`rules` (so a caller scanning many refs loads them
+    /// once): readable when the label is the lattice bottom (world-readable) or
+    /// the accessor can read it. Sole definition of the rule —
+    /// `list_refs_filtered` and its point-lookup twin `ref_served` both go
+    /// through here so the listing and the lookup cannot drift.
+    fn timeline_readable_with(
+        lattice: &LabelLattice,
+        rules: &LabelRuleSet,
+        name: &RefName,
+        accessor: &Accessor,
+    ) -> bool {
+        let label = rules.label_for_timeline(lattice, name.as_str());
+        label == lattice.bottom() || accessor.can_read(&label, ResourceRef::Timeline(name.as_str()))
     }
 
     // bole-e78l
@@ -395,14 +410,15 @@ impl Repository {
         if name.as_str().starts_with(collab::COLLAB_SCOPED_PREFIX) {
             return Ok(false);
         }
-        if self.refs.get(name)?.is_none() {
-            return Ok(false);
-        }
+        // bole-rnpe: evaluate the label gate AND the existence check
+        // unconditionally, then combine — a hidden (present-but-unreadable) ref
+        // and an absent one do the same work, so response timing cannot
+        // distinguish "exists but you can't see it" from "does not exist".
         let lattice = self.acls.lattice()?;
         let rules = self.acls.label_ruleset()?;
-        let label = rules.label_for_timeline(&lattice, name.as_str());
-        Ok(label == lattice.bottom()
-            || accessor.can_read(&label, ResourceRef::Timeline(name.as_str())))
+        let readable = Self::timeline_readable_with(&lattice, &rules, name, accessor);
+        let exists = self.refs.get(name)?.is_some();
+        Ok(readable && exists)
     }
 
     // bole-9by
