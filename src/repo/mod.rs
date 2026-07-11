@@ -745,8 +745,11 @@ impl Repository {
         match registry.evaluate(&ctx).await {
             PolicyDecision::Allow => {}
             PolicyDecision::Deny(reason) => return Err(Error::PolicyViolation(reason)),
-            PolicyDecision::RequiresApproval { reason, .. } => {
-                return Err(Error::PolicyViolation(reason))
+            // bole-p2bf: surface an approvable verdict as its own error variant
+            // (carrying the outstanding count), not a hard PolicyViolation, so a
+            // caller can distinguish "gather N approvals and retry" from "denied".
+            PolicyDecision::RequiresApproval { reason, needed } => {
+                return Err(Error::ApprovalRequired { reason, needed })
             }
         }
         // bole-qj4: commit via a compare-and-swap on the head we read and
@@ -1912,11 +1915,13 @@ mod tests {
         repo.set_approvers(&reg).await.unwrap();
 
         // No attestation for `child`: advancing the gated timeline is refused
-        // (Advance event, signed-approval hook — bole-rdh + bole-6i7).
+        // (Advance event, signed-approval hook — bole-rdh + bole-6i7). bole-p2bf:
+        // it surfaces as ApprovalRequired (approvable), NOT PolicyViolation
+        // (hard deny), carrying the outstanding count.
         let err = repo.advance_timeline(&dest, child, &writer).await.unwrap_err();
         assert!(
-            matches!(err, crate::error::Error::PolicyViolation(_)),
-            "expected the signed-approval gate to fire on a direct advance, got {err:?}"
+            matches!(&err, crate::error::Error::ApprovalRequired { needed: 1, .. }),
+            "expected ApprovalRequired {{ needed: 1 }} on a direct advance, got {err:?}"
         );
         assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, base, "head must not move");
 
@@ -2194,8 +2199,10 @@ mod tests {
         });
 
         let err = repo.advance_timeline(&dest, child, &writer).await.unwrap_err();
+        // bole-p2bf: a signed-approval hook is approvable, so the advance
+        // surfaces ApprovalRequired (not a hard PolicyViolation).
         assert!(
-            matches!(err, crate::error::Error::PolicyViolation(_)),
+            matches!(err, crate::error::Error::ApprovalRequired { .. }),
             "pinned-root signed-approval hook must gate the advance, got {err:?}"
         );
         assert_eq!(repo.refs.get_timeline(&dest).unwrap().unwrap().head, base, "head must not move");
