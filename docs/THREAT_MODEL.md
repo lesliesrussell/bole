@@ -120,6 +120,14 @@ The internal audit's confirmed findings are fixed and regression-tested:
   default to fast-forward-only (`bole-e9a`).
 - **Signature domain separation** — all Ed25519 schemes are domain-tagged
   (`bole-m2p`).
+- **Scoped collab refs never travel any serve path** — the collab endpoint
+  advertises only `refs/collab/public/**` (+ cached remotes) structurally
+  (`bole-g7i`), and the general sync advert now structurally excludes
+  `refs/collab/scoped/**` for every accessor — without that gate, unlabeled
+  scoped refs default to the lattice bottom and would advertise to anonymous
+  peers. Push ops naming `refs/collab/*` (like `refs/policy/*`) are rejected
+  as reserved, so a peer cannot squat a timeline that wedges the collab
+  adverts (`bole-e78l`, WS8b M2).
 - **Fail-closed on unknown hook kinds** — a repository pins its active policy
   root at `refs/policy/root` (a content-addressed tag whose closure transfers
   via sync); every advance/merge and both replicated-push paths (wire and
