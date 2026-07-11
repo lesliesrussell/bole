@@ -144,14 +144,19 @@ The internal audit's confirmed findings are fixed and regression-tested:
   via sync); every advance/merge and both replicated-push paths (wire and
   in-process) resolve the root's declarative hooks, and a node that does not
   recognize a hook kind refuses the operation rather than skipping the hook.
-  Push ops naming `refs/policy/*` are rejected as reserved (`bole-au0t`,
-  WS1-O5). **Limitations:** adoption of a fetched root is deliberately NOT
-  automatic — a node enforces a root only after it is pinned locally
-  (`set_policy_root`), and a verified adopt-from-remote step (via
-  `verify_chain`) is future work; and a pinned root containing the
-  non-deterministic `signed-approval` hook refuses ALL replicated pushes
-  (the `bole-7c1` guard), so approval-gated timelines and push replication
-  remain mutually exclusive.
+  Push ops naming `refs/policy/*` or `refs/collab/*` are rejected as reserved
+  on both push paths (`bole-au0t`, `bole-vl2m`, WS1-O5). Adoption of a fetched
+  root is never automatic — a node enforces a root only after it pins one
+  locally. Two pinning paths exist: `set_policy_root` (a local, trusted
+  upsert) and `adopt_policy_root` (`bole-vl2m`), the verified path for a root
+  received via sync — it requires `verify_chain` to `Accept` (every root in
+  the chain present, lattice/rules present, hook kinds resolvable, each root
+  trust-anchor-signed), enforces anti-rollback (the offered tip's chain must
+  contain the current pin — no rollback or fork), and moves the pin under a
+  compare-and-swap. **Limitation:** a pinned root containing the
+  non-deterministic `signed-approval` hook refuses ALL replicated pushes (the
+  `bole-7c1` guard), so approval-gated timelines and push replication remain
+  mutually exclusive.
 
 ### Per-request resource caps
 

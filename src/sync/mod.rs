@@ -143,6 +143,17 @@ impl Repository {
         });
 
         for name in timelines {
+            // bole-vl2m: the policy and collab namespaces are governance /
+            // publish-local state, never movable via push — mirror the wire
+            // path's reserved-namespace guard (apply_push_ops) so the in-process
+            // push path can't create a ref there either.
+            if name.as_str().starts_with("refs/policy/") || name.as_str().starts_with("refs/collab/") {
+                results.push(RefResult {
+                    name: name.clone(),
+                    status: PushStatus::Denied("reserved ref namespace".into()),
+                });
+                continue;
+            }
             let local = match self.refs.get_timeline(name)? {
                 Some(t) => t,
                 None => {
@@ -546,6 +557,28 @@ mod tests {
             tracked.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
         );
         assert!(dst.objects.get(&blob).await.unwrap().is_none(), "scoped closure must not transfer");
+    }
+
+    // bole-vl2m
+    /// The in-process push path denies a timeline named in a reserved namespace
+    /// (refs/policy/* or refs/collab/*), symmetric with the wire path.
+    #[tokio::test]
+    async fn in_process_push_denies_reserved_namespace() {
+        let server = Repository::memory();
+        let (main, base) = seed(&server, "main", b"base").await;
+        let client = Repository::clone_from(&server, &Accessor::privileged()).await.unwrap();
+        // Create a local timeline whose name squats the policy namespace.
+        let head = client.refs.get_timeline(&main).unwrap().unwrap().head;
+        let squat = RefName::new("refs/policy/root").unwrap();
+        client.refs.create_timeline(squat.clone(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let res = client.push("origin", &server, std::slice::from_ref(&squat), &writer()).await.unwrap();
+        match &res[0].status {
+            PushStatus::Denied(r) => assert!(r.contains("reserved"), "reason: {r}"),
+            other => panic!("expected reserved-namespace denial, got {other:?}"),
+        }
+        assert!(server.refs.get(&squat).unwrap().is_none(), "peer must not have a policy ref planted");
+        let _ = base;
     }
 
     // bole-au0t
