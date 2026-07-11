@@ -78,6 +78,32 @@ pub enum Cmd {
     },
     /// List secret names.
     List,
+    // bole-oea4
+    /// Store a new secret readable by several recipients at once (a
+    /// multi-recipient secret). The sharer (their own key) is always a
+    /// recipient; each `--recipient-key-file` adds another. Any recipient can
+    /// later `reveal` with only their own key.
+    Share {
+        /// Secret name (e.g. team/deploy/token).
+        name: String,
+        /// Read the plaintext from stdin.
+        #[arg(long)]
+        from_stdin: bool,
+        /// Read the plaintext from a file.
+        #[arg(long)]
+        from_file: Option<PathBuf>,
+        /// Env var holding YOUR 64-hex key (the sharer, also a recipient).
+        #[arg(long, default_value = "BOLE_KEY")]
+        key_env: String,
+        /// File holding YOUR 64-hex key.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+        /// File holding a recipient's 64-hex key. Repeatable; one per
+        /// additional recipient. Keys are read from files (never argv) so they
+        /// don't leak via the process table.
+        #[arg(long = "recipient-key-file")]
+        recipient_key_file: Vec<PathBuf>,
+    },
     /// Grant another actor read access by wrapping the data key for their key.
     ///
     /// A plain (single-recipient) secret is upgraded to multi-recipient on the
@@ -152,6 +178,10 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             rekey(ctx, out, all, names, from_key_env, from_key_file, to_key_env, to_key_file).await
         }
         Cmd::List => list(ctx, out),
+        // bole-oea4
+        Cmd::Share { name, from_stdin, from_file, key_env, key_file, recipient_key_file } => {
+            share(ctx, out, name, from_stdin, from_file, key_env, key_file, recipient_key_file).await
+        }
         Cmd::GrantActor { name, key_env, key_file, recipient_key_env, recipient_key_file } => {
             grant_actor(ctx, out, name, key_env, key_file, recipient_key_env, recipient_key_file)
                 .await
@@ -160,6 +190,60 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             revoke_actor(ctx, out, name, recipient_key_env, recipient_key_file).await
         }
     }
+}
+
+// bole-oea4
+/// Creates a multi-recipient secret readable by the sharer plus every
+/// `--recipient-key-file`. Wraps a single data key under each recipient's key,
+/// so any one of them can `reveal` with only their own key.
+#[allow(clippy::too_many_arguments)]
+async fn share(
+    ctx: &RepoContext,
+    out: &Output,
+    name: String,
+    from_stdin: bool,
+    from_file: Option<PathBuf>,
+    key_env: String,
+    key_file: Option<PathBuf>,
+    recipient_key_file: Vec<PathBuf>,
+) -> Result<()> {
+    let mut reg = registry::load(ctx, SECRETS_FILE)?;
+    if reg.contains_key(&name) {
+        bail!("secret already exists: {name} (use `secret rotate`)");
+    }
+    if recipient_key_file.is_empty() {
+        bail!("give at least one --recipient-key-file (the sharer is already a recipient)");
+    }
+    // The sharer is always a recipient; each key file adds another.
+    let sharer = key::build_chain(&key_env, key_file.as_deref())?;
+    let recipient_chains: Vec<bole::ProviderChain> = recipient_key_file
+        .iter()
+        .map(|f| key::build_chain("", Some(f.as_path())))
+        .collect::<Result<_>>()?;
+    let mut providers: Vec<&dyn bole::KeyProvider> = vec![sharer.active()?];
+    for rc in &recipient_chains {
+        providers.push(rc.active()?);
+    }
+
+    let aad = secret_aad(ctx, &name).await?;
+    let plaintext = read_plaintext(from_stdin, from_file)?;
+    let id = ctx
+        .repo
+        .objects
+        .put_multi_recipient(&plaintext, &providers, aad)
+        .await
+        .context("encrypting multi-recipient secret")?;
+    reg.insert(name.clone(), id.to_string());
+    registry::save(ctx, SECRETS_FILE, &reg)?;
+    // bole-oea4: the sharer is always among the recipients; report "you + N"
+    // so the total doesn't read as an off-by-one.
+    let others = recipient_key_file.len();
+    let recipients = providers.len();
+    out.emit(
+        || format!("shared secret {name} readable by you + {others} recipient(s)"),
+        || serde_json::json!({ "action": "shared", "name": name, "id": id.to_string(), "recipients": recipients }),
+    );
+    Ok(())
 }
 
 // bole-amy

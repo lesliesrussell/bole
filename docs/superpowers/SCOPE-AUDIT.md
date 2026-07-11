@@ -27,7 +27,7 @@ on, plus one genuinely unused capability. Nothing here argues for a rewrite; a f
 | **Access control** — label lattice, clearances, IFC (confined/no-write-down), policy hooks (`acl` 3346) | 3.3k | used by `object`/`repo`/`sync` | **CORE pillar, AHEAD depth** | The "secure" pillar, genuinely load-bearing (sync authz uses it). But it's as large as all of sync, and the IFC sophistication (information-flow no-write-down) exceeds what a v1 GitHub-like hub needs. Keep (foundational, hard to retrofit); **freeze further ACL depth.** |
 | **Discovery / relays** — profiles, trust edges, trust-paths, relays, multi-relay auth, server-side search, cost bounds (`collab` 1691 + WS8 sync) | ~2.5k | used by `repo`/`sync`/CLI | **CORE pillar, AHEAD depth** | The "discoverable" pillar — 10 shipped slices (WS8a→f-c1). Excellent, but **very deep for a frontend that doesn't exist yet**. Keep shipped; **freeze the tail (WS8f-c2/c3/c4/d, DNS, reputation)** until Grove pulls on it. |
 | **Secrets / env** — `Secret` (raw-key), `SecretV2` (master-key envelope + KMS), `EnvOverlay` (`object/secret` 470, `crypto` 393) | ~0.9k | `Secret`/`SecretV2` wired into env/clearance/session/KMS | **PLAUSIBLE** | CI/Actions-style secrets — reasonable for a hub. `Secret`+`SecretV2` are load-bearing. Keep. |
-| **`MultiRecipientSecret`** — per-recipient DK wrapping | (in secret 470) | store round-trips it; **no consuming feature** | **AHEAD** | Defined, persistable, re-exported, shown in `object` inspection — but **nothing creates or uses it** for a workflow (unlike `Secret`/`SecretV2`). The clearest "built ahead of need." **Prime consolidation/freeze target.** |
+| **`MultiRecipientSecret`** — per-recipient DK wrapping | (in secret 470) | `bole secret share` + `grant-actor`/`revoke-actor`/`reveal` | **WIRED** | Resolved (bole-oea4): `secret share` creates it for N recipients up front; `grant-actor` upgrades a plain secret to it; `reveal` reads it. Load-bearing, not ahead-of-need. |
 | **Git import/export** — `gix`-backed round-trip (`git_import` 812, `git_projection` 578) | ~1.4k | `repo` | **PLAUSIBLE** | Migration bridge from git. Useful, not core to the hub product. Keep; **freeze round-trip gap-filling** (submodules, annotated-tag export, `--prune`). |
 | **Workspaces / virtual repos / multi-actor** — `Workspace` trait, disk+ephemeral, actors/approvers | (in repo/refs) | `repo` | **CORE** | VCS infra + the "agents & humans as actors" pillar. Keep. |
 
@@ -40,7 +40,7 @@ the **transport** a non-Rust Grove calls (`bole-yd56`). The imbalance is real: d
 ## Freeze / prune / build map
 
 **Consolidate (built ahead of need, low pull):**
-- **`MultiRecipientSecret`** — either wire it to a real feature or remove it and collapse the secrets story
+- **`MultiRecipientSecret`** — RESOLVED (bole-oea4): wired to `bole secret share` (creates a multi-recipient secret for N recipients), consumed by `grant-actor`/`reveal`. No longer a consolidation target.
   to `Secret` + `SecretV2`. Decide deliberately; don't leave a third scheme no one drives. (bead: file one)
 
 **Freeze (shipped is enough; stop deepening until a consumer pulls):**
