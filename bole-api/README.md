@@ -52,6 +52,15 @@ Resolution order per request: `Authorization: Bearer <token>` →
 `X-Bole-Client-Subject` (only if the immediate peer is in `[proxy].trusted`) →
 `Anonymous`.
 
+This order is **strict precedence, not fall-through**: the first presented
+credential class decides the outcome. An `Authorization` header is resolved on
+its own — a valid one authenticates, an unrecognized scheme or unmapped
+credential is a **401** — and it never falls through to the
+`X-Bole-Client-Subject` mTLS arm. So a request that carries both an
+`Authorization` header and a trusted-proxy subject authenticates as the
+`Authorization` identity, and a request whose `Authorization` header is
+malformed is rejected rather than silently demoted to mTLS or anonymous.
+
 Presented-but-unknown credentials are **401**, never a silent downgrade to
 anonymous: a bearer token or trusted-proxy mTLS subject that maps to no
 configured actor is rejected, so a stale or typo'd credential surfaces as an
