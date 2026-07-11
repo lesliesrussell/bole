@@ -166,6 +166,75 @@ async fn unknown_mtls_subject_from_trusted_proxy_is_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+// bole-6lzk
+/// The signed arm must not be a keyId enumeration oracle: unknown keyId, bad
+/// signature, and stale date must all produce the SAME generic 401 body.
+#[tokio::test]
+async fn signed_auth_failures_are_indistinguishable() {
+    use ed25519_dalek::SigningKey;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signing = SigningKey::from_bytes(&[7u8; 32]);
+    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
+    let cfg = AuthConfig::parse(&format!(
+        "[keys]\n\"k1\" = {{ pubkey = \"{pubkey_hex}\", actor = \"carol\" }}\n"
+    ))
+    .unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = bole_api::router::debug_auth_router(state);
+
+    let (date, sig) = sign_get(&signing, "/debug/whoami");
+    let cases = [
+        // Unknown keyId, otherwise-valid signature and date.
+        (format!("Signature keyId=\"nope\",sig=\"{sig}\""), date.clone()),
+        // Known keyId, corrupted signature.
+        (format!("Signature keyId=\"k1\",sig=\"{}\"", "0".repeat(128)), date.clone()),
+        // Known keyId, valid-format signature, stale date.
+        (format!("Signature keyId=\"k1\",sig=\"{sig}\""), "1000000000".to_string()),
+    ];
+    let mut bodies = Vec::new();
+    for (auth_header, d) in cases {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/debug/whoami")
+                    .header("authorization", auth_header)
+                    .header("x-bole-date", d)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        bodies.push(body_json(resp).await);
+    }
+    assert_eq!(bodies[0], bodies[1], "unknown-keyId vs bad-sig bodies must match");
+    assert_eq!(bodies[1], bodies[2], "bad-sig vs stale-date bodies must match");
+}
+
+// bole-6lzk
+/// A dual-stack listener reports IPv4 peers as IPv4-mapped IPv6
+/// (::ffff:a.b.c.d); the trusted-proxy check must compare normalized IPs, not
+/// strings, or the mTLS arm silently stops working behind such a listener.
+#[tokio::test]
+async fn mtls_trusted_proxy_matches_ipv4_mapped_ipv6_peer() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let cfg = AuthConfig::parse("[mtls]\n\"CN=bob\" = \"bob\"\n[proxy]\ntrusted = [\"127.0.0.1\"]\n").unwrap();
+    let state = AppState { repo: state.repo.clone(), config: Arc::new(cfg) };
+    let app = bole_api::router::debug_auth_router(state);
+    let req = with_peer(
+        Request::builder()
+            .uri("/debug/whoami")
+            .header("x-bole-client-subject", "CN=bob")
+            .body(Body::empty())
+            .unwrap(),
+        "[::ffff:127.0.0.1]",
+    );
+    let json = body_json(app.oneshot(req).await.unwrap()).await;
+    assert_eq!(json["principal"], "Mtls");
+    assert_eq!(json["actor"], "bob");
+}
+
 // bole-3xj5
 #[tokio::test]
 async fn signed_request_maps_to_actor() {
