@@ -865,3 +865,60 @@ async fn repos_lists_this_store() {
     assert_eq!(json["repos"].as_array().unwrap().len(), 1);
     assert_eq!(json["repos"][0]["ref_count"], 1);
 }
+
+// bole-i8zl
+/// Extractor rejections must preserve their real HTTP status, not flatten to
+/// 400. A Path arity mismatch (MissingPathParams) is a 500-class server error;
+/// a Query deserialize failure is a genuine 400. Both must use the envelope,
+/// and neither may leak serde-internal detail in the message.
+mod extractor_status {
+    use super::*;
+    use axum::routing::get;
+    use axum::Router;
+    use bole_api::extract::{ApiPath, ApiQuery};
+
+    #[derive(serde::Deserialize)]
+    struct Q {
+        #[allow(dead_code)]
+        path: String,
+    }
+
+    async fn wants_path(ApiPath(_): ApiPath<String>) -> &'static str {
+        "ok"
+    }
+    async fn wants_query(ApiQuery(_): ApiQuery<Q>) -> &'static str {
+        "ok"
+    }
+
+    #[tokio::test]
+    async fn path_arity_mismatch_is_500_envelope() {
+        // Route has no path param, but the handler asks for one → a 500-class
+        // Path rejection (WrongNumberOfParameters / MissingPathParams).
+        let app: Router = Router::new().route("/noparam", get(wants_path));
+        let resp = app
+            .oneshot(Request::builder().uri("/noparam").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["code"], "internal");
+        // Generic message — no axum/serde internal detail leaked.
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("MissingPathParams") && !msg.to_lowercase().contains("deserialize"), "leaked detail: {msg}");
+    }
+
+    #[tokio::test]
+    async fn query_deserialize_failure_is_400_envelope() {
+        let app: Router = Router::new().route("/q", get(wants_query));
+        // Missing required `path` query param → Query rejection (400).
+        let resp = app
+            .oneshot(Request::builder().uri("/q").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"]["code"], "bad_request");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(!msg.to_lowercase().contains("deserialize") && !msg.contains("missing field"), "leaked detail: {msg}");
+    }
+}

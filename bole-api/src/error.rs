@@ -26,6 +26,22 @@ impl ApiError {
     pub fn method_not_allowed(message: impl Into<String>) -> Self {
         Self { status: StatusCode::METHOD_NOT_ALLOWED, code: "method_not_allowed", message: message.into() }
     }
+    // bole-i8zl
+    /// Builds an envelope error from an extractor rejection's own status,
+    /// preserving fidelity (a 500-class arity mismatch stays 500, a genuine
+    /// 400 stays 400) with a caller-supplied generic message — the rejection's
+    /// own text can carry serde-internal detail, so it is not surfaced.
+    pub fn from_status(status: StatusCode, message: impl Into<String>) -> Self {
+        let code = match status {
+            StatusCode::BAD_REQUEST => "bad_request",
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::METHOD_NOT_ALLOWED => "method_not_allowed",
+            s if s.is_server_error() => "internal",
+            _ => "bad_request",
+        };
+        Self { status, code, message: message.into() }
+    }
     pub fn internal(message: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal", message: message.into() }
     }
