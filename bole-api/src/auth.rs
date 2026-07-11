@@ -87,6 +87,17 @@ fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiEr
         if trusted {
             return Ok(Principal::Mtls(subject.to_string()));
         }
+        // bole-rnpe: the header was presented but the peer is not an
+        // allowlisted proxy, so it's ignored and the request falls through to
+        // anonymous. That silent demotion is the intended security boundary,
+        // but it's also the shape of a misconfiguration (proxy IP missing from
+        // [proxy].trusted, or an unparseable entry that was skipped). Log it so
+        // an operator whose mTLS "stopped working" can diagnose it.
+        tracing::warn!(
+            peer = ?peer_addr(parts),
+            "ignoring x-bole-client-subject from an untrusted peer; \
+             check [proxy].trusted contains this peer's IP"
+        );
     }
     Ok(Principal::Anonymous)
 }
@@ -94,6 +105,11 @@ fn resolve_principal(parts: &Parts, state: &AppState) -> Result<Principal, ApiEr
 // bole-3xj5
 const SIGNED_REQUEST_DOMAIN: &[u8] = b"bole-http-req-v1\0";
 const MAX_SKEW_SECS: u64 = 300;
+// bole-rnpe: fixed seed for the dummy verifying key an unknown-keyId request is
+// checked against, so it pays the same verify cost as a known-key request (no
+// enumeration timing oracle). Any valid 32-byte seed works; the key never
+// authenticates anything.
+const DUMMY_VERIFY_SEED: [u8; 32] = [0x42; 32];
 
 // bole-3xj5
 /// Verifies `Signature keyId="…",sig="…"` against a registered key. The
@@ -131,8 +147,12 @@ fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principa
         return Err(generic());
     }
 
-    // bole-6lzk
-    let registered = state.config.keys.get(&key_id).ok_or_else(generic)?;
+    // bole-6lzk / bole-rnpe: look the key up but do NOT early-return on miss.
+    // An unknown keyId must still pay the signature-verification cost (against
+    // a fixed dummy key below) so response timing can't distinguish
+    // unknown-keyId from bad-signature — closing the enumeration oracle that a
+    // skip-verify early return would leave.
+    let registered = state.config.keys.get(&key_id);
 
     // Canonical message.
     let method = parts.method.as_str();
@@ -149,14 +169,21 @@ fn verify_signed(rest: &str, parts: &Parts, state: &AppState) -> Result<Principa
     msg.extend_from_slice(SIGNED_REQUEST_DOMAIN);
     msg.extend_from_slice(format!("{method}\n{path}\n{date}\n{body_hash}").as_bytes());
 
-    // bole-6lzk: same generic 401 on every failure (no enumeration oracle).
-    let vk = VerifyingKey::from_bytes(&registered.pubkey).map_err(|_| generic())?;
-    let sig_bytes: [u8; 64] = hex::decode(&sig_hex)
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(generic)?;
-    let signature = Signature::from_bytes(&sig_bytes);
-    vk.verify(&msg, &signature).map_err(|_| generic())?;
+    // bole-6lzk / bole-rnpe: verify against the registered key, or a fixed
+    // dummy verifying key when the keyId is unknown, so both paths run the full
+    // decode + verify. Then reject if the key was unknown OR the signature did
+    // not verify — always the same generic 401.
+    let vk = match registered {
+        Some(r) => VerifyingKey::from_bytes(&r.pubkey).map_err(|_| generic())?,
+        None => ed25519_dalek::SigningKey::from_bytes(&DUMMY_VERIFY_SEED).verifying_key(),
+    };
+    let sig_bytes: Option<[u8; 64]> = hex::decode(&sig_hex).ok().and_then(|b| b.try_into().ok());
+    let verified = sig_bytes
+        .map(|sb| vk.verify(&msg, &Signature::from_bytes(&sb)).is_ok())
+        .unwrap_or(false);
+    if registered.is_none() || !verified {
+        return Err(generic());
+    }
 
     Ok(Principal::SshKey(key_id))
 }

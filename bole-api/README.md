@@ -139,3 +139,14 @@ hex-encoded SHA-256 of the request body (empty string for the GET-only
 endpoints this server currently exposes). The `X-Bole-Date` value must be
 within ±300 seconds of the server's clock or the request is rejected as
 `unauthorized`, to bound replay of captured signatures.
+
+**Troubleshooting a `signed request rejected` 401.** Every failure in the
+signed arm returns that one generic message on purpose — distinct texts would
+let a caller probe which `keyId`s are registered. So a single 401 covers all
+of: missing/malformed `keyId` or `sig`; a missing or non-numeric
+`X-Bole-Date`; a timestamp outside the ±300s window; an unknown `keyId`; and a
+signature that does not verify. When debugging your own client, check them in
+that order — clock skew and a canonical-string mismatch (wrong method, or a
+`TARGET` that omits the query string) are the usual causes. The server treats
+an unknown key exactly like a bad signature, including running a verify against
+a dummy key, so response timing does not reveal whether a `keyId` exists.
