@@ -117,6 +117,15 @@ mod store {
             }))
         }
 
+        // bole-553f
+        /// Low-level primitive: sets `name`'s head to `new_head` WITHOUT
+        /// checking the timeline's [`TimelinePolicy`] (ff/append/unrestricted).
+        /// Timeline-policy enforcement lives one layer up in
+        /// [`Repository::advance_timeline`] (via the always-preloaded
+        /// `TimelinePolicyHook`) and in the sync push / git re-import paths,
+        /// which fast-forward-gate before calling this. Callers that must honour
+        /// policy use `advance_timeline`; direct use is only for contexts that
+        /// have already decided the move is allowed.
         pub fn advance_head(&self, name: &RefName, new_head: ObjectId) -> Result<()> {
             match self.backend.get(name)? {
                 Some(Ref::Timeline(mut tl)) => {
