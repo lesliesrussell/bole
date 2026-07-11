@@ -120,6 +120,17 @@ The internal audit's confirmed findings are fixed and regression-tested:
   default to fast-forward-only (`bole-e9a`).
 - **Signature domain separation** — all Ed25519 schemes are domain-tagged
   (`bole-m2p`).
+
+- **Auditability of access decisions** — a repository can be given an
+  `AuditSink` (`Repository::with_audit_sink`); a timeline advance then emits a
+  structured `AuditEvent` — recording the actor, the ref, the old/new head, and
+  the decision (allowed / denied / approval-required) — for every attempt an
+  access or policy check decides, including ACL write-denials, not only
+  policy-registry verdicts. The bole CLI
+  installs a JSON-lines file sink when `$BOLE_AUDIT_LOG` is set, so
+  agent-initiated timeline transitions and the access/policy verdicts that
+  gated them are attributable after the fact (`bole-eean`). Emission is
+  side-effect-only and never changes an operation's outcome.
 - **Scoped collab refs never travel any serve path** — the collab endpoint
   advertises only `refs/collab/public/**` (+ cached remotes) structurally
   (`bole-g7i`), and the general sync advert now structurally excludes

@@ -73,6 +73,8 @@ impl RepoContext {
                 for spec in crate::commands::policy::load_hooks(&candidate)? {
                     repo.register_hook(spec);
                 }
+                // bole-eean: install the audit sink if $BOLE_AUDIT_LOG is set.
+                let repo = crate::audit::install(repo)?;
                 let state_path = candidate.join("cli-state.json");
                 return Ok(Self {
                     repo_dir: candidate,
@@ -102,6 +104,8 @@ impl RepoContext {
                 for spec in crate::commands::policy::load_hooks(&store)? {
                     repo.register_hook(spec);
                 }
+                // bole-eean: install the audit sink if $BOLE_AUDIT_LOG is set.
+                let repo = crate::audit::install(repo)?;
                 let state_path = store.join("worktrees").join(&ptr.id).join("state.json");
                 return Ok(Self {
                     repo_dir: store,

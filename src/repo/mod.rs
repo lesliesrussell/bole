@@ -150,6 +150,10 @@ pub struct Repository {
     /// Serializes collab publish read-check-write so concurrent publishes cannot
     /// both pass a stale monotonic-seq check (WS8b F4).
     publish_lock: tokio::sync::Mutex<()>,
+    // bole-eean
+    /// Optional audit sink; emitted to on each timeline advance. `None` = no
+    /// audit trail (the default).
+    audit: Option<std::sync::Arc<dyn crate::audit::AuditSink>>,
 }
 
 // bole-1vi
@@ -168,6 +172,8 @@ impl Repository {
             hooks: Vec::new(),
             // bole-eul
             publish_lock: tokio::sync::Mutex::new(()),
+            // bole-eean
+            audit: None,
         }
     }
 
@@ -186,6 +192,8 @@ impl Repository {
             hooks: Vec::new(),
             // bole-eul
             publish_lock: tokio::sync::Mutex::new(()),
+            // bole-eean
+            audit: None,
         })
     }
 
@@ -193,6 +201,52 @@ impl Repository {
     /// Registers a declarative policy hook binding.
     pub fn register_hook(&mut self, spec: crate::acl::policy_object::HookSpec) {
         self.hooks.push(spec);
+    }
+
+    // bole-eean
+    /// Installs an [`AuditSink`](crate::AuditSink); every subsequent
+    /// [`advance_timeline`](Repository::advance_timeline) emits an
+    /// [`AuditEvent`](crate::AuditEvent) recording the transition and its
+    /// access/policy decision. Chainable; replaces any prior sink.
+    pub fn with_audit_sink(mut self, sink: std::sync::Arc<dyn crate::audit::AuditSink>) -> Self {
+        self.audit = Some(sink);
+        self
+    }
+
+    // bole-eean
+    /// Emits `event` to the installed audit sink, if any. Best-effort and
+    /// side-effect-only — never affects the audited operation's outcome.
+    fn audit(&self, event: crate::audit::AuditEvent) {
+        if let Some(sink) = &self.audit {
+            sink.record(&event);
+        }
+    }
+
+    // bole-eean
+    /// Records an advance decision on `name`, if a sink is installed and the
+    /// timeline has a current head (`old_head`). Used at every access/policy
+    /// decision point in `advance_timeline` so ACL denials are audited too, not
+    /// only policy-registry verdicts.
+    fn audit_advance(
+        &self,
+        name: &RefName,
+        accessor: &Accessor,
+        old_head: Option<ObjectId>,
+        new_head: ObjectId,
+        decision: crate::audit::AuditDecision,
+    ) {
+        if self.audit.is_none() {
+            return;
+        }
+        if let Some(old_head) = old_head {
+            self.audit(crate::audit::AuditEvent::TimelineAdvance {
+                timeline: name.as_str().to_string(),
+                actor: accessor.actor().map(str::to_string),
+                old_head,
+                new_head,
+                decision,
+            });
+        }
     }
 
     // bole-sk6
@@ -674,13 +728,17 @@ impl Repository {
         // bole-fo2
         let lattice = self.acls.lattice()?;
         let rules = self.acls.label_ruleset()?;
+        // bole-eean: the current head for audit records (None if the timeline
+        // does not exist yet — an advance of a missing timeline is not an
+        // audited transition).
+        let audit_old = self.refs.get_timeline(name)?.map(|t| t.head);
         // Timeline write check via the dominance rule.
         let tl_label = rules.label_for_timeline(&lattice, name.as_str());
         if !accessor.can_write(&tl_label, ResourceRef::Timeline(name.as_str())) {
-            return Err(Error::AccessDenied(format!(
-                "write denied on timeline: {}",
-                name.as_str()
-            )));
+            // bole-eean
+            let reason = format!("write denied on timeline: {}", name.as_str());
+            self.audit_advance(name, accessor, audit_old, snapshot_id, crate::audit::AuditDecision::Denied { reason: reason.clone() });
+            return Err(Error::AccessDenied(reason));
         }
         let snap = match self.objects.get(&snapshot_id).await? {
             Some(Object::Snapshot(s)) => s,
@@ -702,7 +760,10 @@ impl Repository {
         for path in paths.keys() {
             let label = rules.label_for_path(&lattice, path);
             if !accessor.can_write(&label, ResourceRef::Path(path)) {
-                return Err(Error::AccessDenied(format!("write denied on path: {}", path)));
+                // bole-eean
+                let reason = format!("write denied on path: {}", path);
+                self.audit_advance(name, accessor, audit_old, snapshot_id, crate::audit::AuditDecision::Denied { reason: reason.clone() });
+                return Err(Error::AccessDenied(reason));
             }
         }
         // bole-fo2
@@ -723,10 +784,10 @@ impl Repository {
             if !paths.contains_key(path) {
                 let label = rules.label_for_path(&lattice, path);
                 if !accessor.can_write(&label, ResourceRef::Path(path)) {
-                    return Err(Error::AccessDenied(format!(
-                        "write denied on removed path: {}",
-                        path
-                    )));
+                    // bole-eean
+                    let reason = format!("write denied on removed path: {}", path);
+                    self.audit_advance(name, accessor, audit_old, snapshot_id, crate::audit::AuditDecision::Denied { reason: reason.clone() });
+                    return Err(Error::AccessDenied(reason));
                 }
             }
         }
@@ -744,12 +805,18 @@ impl Repository {
         };
         match registry.evaluate(&ctx).await {
             PolicyDecision::Allow => {}
-            PolicyDecision::Deny(reason) => return Err(Error::PolicyViolation(reason)),
+            PolicyDecision::Deny(reason) => {
+                // bole-eean
+                self.audit_advance(name, accessor, Some(timeline.head), snapshot_id, crate::audit::AuditDecision::Denied { reason: reason.clone() });
+                return Err(Error::PolicyViolation(reason));
+            }
             // bole-p2bf: surface an approvable verdict as its own error variant
             // (carrying the outstanding count), not a hard PolicyViolation, so a
             // caller can distinguish "gather N approvals and retry" from "denied".
             PolicyDecision::RequiresApproval { reason, needed } => {
-                return Err(Error::ApprovalRequired { reason, needed })
+                // bole-eean
+                self.audit_advance(name, accessor, Some(timeline.head), snapshot_id, crate::audit::AuditDecision::ApprovalRequired { needed, reason: reason.clone() });
+                return Err(Error::ApprovalRequired { reason, needed });
             }
         }
         // bole-qj4: commit via a compare-and-swap on the head we read and
@@ -761,6 +828,8 @@ impl Repository {
         let mut tx = self.refs.transaction();
         tx.advance_head_if(name.clone(), timeline.head, snapshot_id);
         tx.commit()?;
+        // bole-eean: the transition is applied — record it as allowed.
+        self.audit_advance(name, accessor, Some(timeline.head), snapshot_id, crate::audit::AuditDecision::Allowed);
         Ok(())
     }
 
@@ -1663,6 +1732,76 @@ mod tests {
         // Unrestricted: any snapshot is a valid new head.
         repo.advance_timeline(&name, sibling, &full).await.unwrap();
         assert_eq!(repo.refs.get_timeline(&name).unwrap().unwrap().head, sibling);
+    }
+
+    // bole-eean
+    #[tokio::test]
+    async fn advance_emits_audit_events() {
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::audit::{AuditDecision, AuditEvent, AuditSink};
+        use crate::refs::RefName;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Collector {
+            events: Mutex<Vec<AuditEvent>>,
+        }
+        impl AuditSink for Collector {
+            fn record(&self, e: &AuditEvent) {
+                self.events.lock().unwrap().push(e.clone());
+            }
+        }
+
+        let sink = Arc::new(Collector::default());
+        let repo = Repository::memory().with_audit_sink(sink.clone());
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let b = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() }).await.unwrap();
+        let c = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![b], author: "t".into(), created_at: 1, message: "c".into() }).await.unwrap();
+
+        let name = RefName::new("main").unwrap();
+        repo.refs.create_timeline(name.clone(), b, TimelinePolicy::FastForwardOnly, 0, "persistent".into(), None).unwrap();
+        let writer = Accessor::new()
+            .with_actor("alice")
+            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write });
+
+        // Allowed advance (c descends b).
+        repo.advance_timeline(&name, c, &writer).await.unwrap();
+        // Denied advance: a non-descendant on a FastForwardOnly timeline.
+        let orphan = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 2, message: "o".into() }).await.unwrap();
+        assert!(repo.advance_timeline(&name, orphan, &writer).await.is_err());
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "one event per advance attempt: {events:?}");
+        match &events[0] {
+            AuditEvent::TimelineAdvance { timeline, actor, old_head, new_head, decision } => {
+                assert_eq!(timeline, "main");
+                assert_eq!(actor.as_deref(), Some("alice"));
+                assert_eq!(*old_head, b);
+                assert_eq!(*new_head, c);
+                assert_eq!(*decision, AuditDecision::Allowed);
+            }
+        }
+        match &events[1] {
+            AuditEvent::TimelineAdvance { decision, new_head, .. } => {
+                assert!(matches!(decision, AuditDecision::Denied { .. }), "got {decision:?}");
+                assert_eq!(*new_head, orphan);
+            }
+        }
+
+        // bole-eean: an ACL write-denial (not just a policy verdict) is audited.
+        drop(events);
+        let noperm = Accessor::new().with_actor("mallory"); // no write clearance
+        assert!(repo.advance_timeline(&name, c, &noperm).await.is_err());
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 3, "the ACL denial must also emit: {events:?}");
+        match &events[2] {
+            AuditEvent::TimelineAdvance { actor, decision, .. } => {
+                assert_eq!(actor.as_deref(), Some("mallory"));
+                assert!(matches!(decision, AuditDecision::Denied { .. }), "got {decision:?}");
+            }
+        }
     }
 
     #[test]

@@ -115,3 +115,29 @@ async fn branch_alias_lists_timelines() {
     let v: serde_json::Value = serde_json::from_slice(&l.stdout).unwrap();
     assert_eq!(v[0]["name"], "main");
 }
+
+// bole-eean
+/// With $BOLE_AUDIT_LOG set, a timeline advance appends a JSON audit record.
+#[tokio::test]
+async fn advance_writes_audit_log_when_env_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let snaps = seed(dir.path(), 2).await;
+    let log = dir.path().join("audit.log");
+
+    run(dir.path(), &["timeline", "create", "main", "--from", &snaps[0]]);
+    let a = bin()
+        .args(["timeline", "advance", "main", "--to", &snaps[1]])
+        .env("BOLE_AUDIT_LOG", &log)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(a.status.success(), "advance failed: {a:?}");
+
+    let contents = std::fs::read_to_string(&log).expect("audit log written");
+    let line = contents.lines().next().expect("one audit line");
+    let v: serde_json::Value = serde_json::from_str(line).expect("audit line is JSON");
+    assert_eq!(v["event"], "timeline_advance");
+    assert_eq!(v["timeline"], "main");
+    assert_eq!(v["new_head"], snaps[1]);
+    assert_eq!(v["decision"], "allowed");
+}

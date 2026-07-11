@@ -50,6 +50,9 @@ pub mod collab;
 pub mod crypto;
 // bole-cy6
 pub mod sync;
+// bole-eean
+pub mod audit;
+pub use audit::{AuditDecision, AuditEvent, AuditSink};
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{
     Accessor, AclStore, CapabilityTrace, ClearanceEval, PathAcl, PathRole, Permission, SecretAcl,

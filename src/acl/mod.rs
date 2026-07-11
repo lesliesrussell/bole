@@ -185,6 +185,12 @@ pub struct Accessor {
     lattice: Arc<LabelLattice>,
     rules: Arc<LabelRuleSet>,
     clearances: ClearanceSet,
+    // bole-eean
+    /// Optional human/agent identity for the audit trail. Purely informational
+    /// — access is decided by `clearances`, never by this name. Callers that
+    /// resolved a principal (CLI actor, API auth) tag it so audited decisions
+    /// are attributable; unset for anonymous/internal accessors.
+    actor: Option<String>,
 }
 
 impl Default for Accessor {
@@ -193,6 +199,7 @@ impl Default for Accessor {
             lattice: Arc::new(LabelLattice::two_point()),
             rules: Arc::new(LabelRuleSet::default()),
             clearances: ClearanceSet::default(),
+            actor: None,
         }
     }
 }
@@ -211,7 +218,21 @@ impl Accessor {
         rules: Arc<LabelRuleSet>,
         clearances: ClearanceSet,
     ) -> Self {
-        Self { lattice, rules, clearances }
+        Self { lattice, rules, clearances, actor: None }
+    }
+
+    // bole-eean
+    /// Tags this accessor with an actor identity for the audit trail (does not
+    /// affect any access decision). Chainable.
+    pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
+        self.actor = Some(actor.into());
+        self
+    }
+
+    // bole-eean
+    /// The audit identity tagged on this accessor, if any.
+    pub fn actor(&self) -> Option<&str> {
+        self.actor.as_deref()
     }
 
     /// Lowers a `PathRole` into a `protected`-rule + a path-scoped clearance.
@@ -256,6 +277,7 @@ impl Accessor {
                 clearances: vec![Clearance { ceiling: top, cap: Capability::READ, scope: None }],
                 confined: false,
             },
+            actor: None,
         }
     }
 
