@@ -25,18 +25,24 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 // bole-3xj5
+// bole-gejz: test-only surface — compiled out of the shipped lib/binary.
+#[cfg(feature = "testing")]
 use crate::auth::{principal_kind, RequestAuth};
+#[cfg(feature = "testing")]
 use axum::Json;
+#[cfg(feature = "testing")]
 use serde_json::json;
 
 /// A test-only router that echoes the resolved principal. Not mounted in the
-/// real server; used by auth tests.
+/// real server; used by auth tests (requires the `testing` feature).
+#[cfg(feature = "testing")]
 pub fn debug_auth_router(state: AppState) -> Router {
     Router::new()
         .route("/debug/whoami", get(debug_whoami))
         .with_state(state)
 }
 
+#[cfg(feature = "testing")]
 async fn debug_whoami(auth: RequestAuth) -> Json<serde_json::Value> {
     Json(json!({
         "principal": principal_kind(&auth.principal),

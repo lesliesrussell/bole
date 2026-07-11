@@ -24,8 +24,17 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 hex = "0.4"
 
+# bole-gejz
+[features]
+# Test-only surface (debug_auth_router / principal_kind): compiled out of the
+# shipped lib and binary; enabled for this crate's own integration tests via
+# the self dev-dependency below.
+testing = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 http-body-util = "0.1"
+# bole-gejz
+bole-api = { path = ".", features = ["testing"] }
