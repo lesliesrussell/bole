@@ -420,3 +420,25 @@ Push is compare-and-swap on the peer's heads against A's remote-tracking refs,
 so a peer that moved since A last saw it rejects the push (non-fast-forward).
 A push into an approval-gated timeline is refused fail-closed unless the policy
 is deterministic across replicas.
+
+## Multi-user hub (owner-authenticated push)
+
+A hub node holds many users' repos in one store, namespaced by owner:
+`refs/users/<owner-fp>/<repo>/<timeline>`. A push must prove ownership by a
+challenge–response — the hub sends a random nonce, the pusher signs it with
+their owner key, the hub verifies it and scopes the write to
+`refs/users/<owner-fp>/**`. A user can only write their own namespace.
+
+```bash
+# Hub — accept owner-authenticated pushes into per-owner namespaces.
+bole serve --hub --listen 127.0.0.1:9000
+
+# User — push local `main` as repo `grove` to your namespace on the hub.
+#   --as is a key file holding your 64-hex owner seed (never on argv).
+bole push 127.0.0.1:9000 grove:main --as ~/.bole-owner.key
+bole push 127.0.0.1:9000 grove:main dotfiles:main --as ~/.bole-owner.key
+```
+
+Still no TLS — trusted networks only. This adds *ownership* (which namespace a
+connection may write), not transport confidentiality. Announce a repo so it
+lists under your profile with `bole repo announce <name> --description "…"`.
