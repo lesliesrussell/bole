@@ -14,6 +14,8 @@ pub mod ephemeral;
 pub mod collab;
 // bole-060a
 pub mod pr;
+// bole-ub3h
+pub mod reporecord;
 // bole-lkv3
 pub mod board;
 

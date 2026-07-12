@@ -64,6 +64,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::ReviewComment(_) => "review-comment",
         // bole-lkv3
         Object::Post(_) => "board-post",
+        // bole-ub3h
+        Object::RepoRecord(_) => "repo-record",
     }
 }
 

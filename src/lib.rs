@@ -55,6 +55,9 @@ pub mod audit;
 // bole-lkv3
 pub mod board;
 pub use board::{verify_post, BoardSigner, Post};
+// bole-ub3h
+pub mod reporecord;
+pub use reporecord::{verify_repo, RepoRecord, RepoSigner};
 // bole-lkv3
 pub use repo::board::BOARD_PREFIX;
 // bole-060a
