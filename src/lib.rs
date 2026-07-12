@@ -54,7 +54,7 @@ pub mod sync;
 pub mod audit;
 // bole-060a
 pub mod pr;
-pub use pr::{verify_proposal, ChangeProposal, ProposalSigner};
+pub use pr::{verify_comment, verify_proposal, ChangeProposal, ProposalSigner, ReviewComment};
 // bole-xwqv
 pub use repo::pr::PROPOSALS_PREFIX;
 pub use audit::{AuditDecision, AuditEvent, AuditSink};
