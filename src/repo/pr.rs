@@ -141,6 +141,73 @@ impl Repository {
         }
         Ok(out)
     }
+
+    // bole-ooxm
+    /// Merges the proposal at `id`: its `source` timeline into its `target`.
+    /// Reuses the existing merge machinery — no new gating engine. The ACL leak
+    /// scan and the approval `PolicyHook` are enforced by
+    /// [`advance_timeline`](Repository::advance_timeline), so a proposal into an
+    /// approval-gated target (e.g. `release/**` requiring N signed approvals)
+    /// returns [`Error::ApprovalRequired`](crate::Error::ApprovalRequired) until
+    /// the approvals exist. On a clean, permitted merge the target advances to a
+    /// new merge snapshot; a conflicting merge is reported without applying.
+    pub async fn merge_proposal(
+        &self,
+        id: &ObjectId,
+        author: String,
+        created_at: u64,
+        message: String,
+        accessor: &crate::acl::Accessor,
+    ) -> Result<ProposalMerge> {
+        let p = self
+            .get_proposal(id)
+            .await?
+            .ok_or_else(|| Error::Storage(format!("proposal not found: {id}")))?;
+        let source = RefName::new(&p.source)?;
+        let target = RefName::new(&p.target)?;
+        let source_head = self
+            .refs
+            .get_timeline(&source)?
+            .ok_or_else(|| Error::Storage(format!("source timeline not found: {}", p.source)))?
+            .head;
+        let target_head = self
+            .refs
+            .get_timeline(&target)?
+            .ok_or_else(|| Error::Storage(format!("target timeline not found: {}", p.target)))?
+            .head;
+
+        let result = self.merge_timelines(&source, &target, accessor).await?;
+        if !result.conflicts.is_empty() {
+            return Ok(ProposalMerge::Conflicts(result.conflicts));
+        }
+        let root = crate::repo::ephemeral::build_tree(&self.objects, &result.merged).await?;
+        let merged_snap = self
+            .objects
+            .put_snapshot(crate::object::Snapshot {
+                root,
+                parents: vec![target_head, source_head],
+                author,
+                created_at,
+                message,
+            })
+            .await?;
+        // Approval/ACL gate is enforced here (bole-rdh / bole-p2bf).
+        self.advance_timeline(&target, merged_snap, accessor).await?;
+        Ok(ProposalMerge::Merged(merged_snap))
+    }
+}
+
+// bole-ooxm
+/// The outcome of [`Repository::merge_proposal`] short of an error: either the
+/// merge was applied (the target advanced to `Merged(snapshot)`), or it had
+/// path conflicts and was not applied. Approval-required and access-denied
+/// outcomes surface as `Err` from `merge_proposal`, not here.
+#[derive(Debug, Clone)]
+pub enum ProposalMerge {
+    /// Applied cleanly; the target now points at this merge snapshot.
+    Merged(crate::object::ObjectId),
+    /// Not applied — these paths conflicted.
+    Conflicts(Vec<crate::repo::merge::MergeConflict>),
 }
 
 #[cfg(test)]
@@ -248,6 +315,76 @@ mod tests {
         // Comment on a non-existent proposal -> refused.
         let orphan = signer.sign_comment(crate::ObjectId::from_content(b"ghost"), "b", false, 0);
         assert!(repo.add_comment(&orphan).await.is_err(), "comment on unknown proposal refused");
+    }
+
+    #[tokio::test]
+    async fn merge_proposal_clean_advances_target() {
+        use crate::acl::{Accessor, PathRole, Permission, TimelineRole};
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use bytes::Bytes;
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        // base snapshot on both timelines; source adds a file.
+        let base_tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot { root: base_tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() }).await.unwrap();
+        let blob = repo.objects.put_blob(Bytes::from("hi")).await.unwrap();
+        let mut e = BTreeMap::new();
+        e.insert("f.txt".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let src_tree = repo.objects.put_tree(e).await.unwrap();
+        let src_head = repo.objects.put_snapshot(Snapshot { root: src_tree, parents: vec![base], author: "t".into(), created_at: 1, message: "add f".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("feature/x").unwrap(), src_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(RefName::new("main").unwrap(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let signer = ProposalSigner::from_seed([21u8; 32]);
+        let pid = repo.publish_proposal(&signer.sign_proposal("feature/x", "main", "add f", 0)).await.unwrap();
+        let writer = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+
+        let outcome = repo.merge_proposal(&pid, "merger".into(), 2, "merge".into(), &writer).await.unwrap();
+        match outcome {
+            crate::repo::pr::ProposalMerge::Merged(snap) => {
+                assert_eq!(repo.refs.get_timeline(&RefName::new("main").unwrap()).unwrap().unwrap().head, snap, "target advanced to the merge snapshot");
+            }
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_proposal_into_approval_gated_target_requires_approval() {
+        use crate::acl::attestation::{ApproverRegistry, AttestationSigner};
+        use crate::acl::policy_object::HookSpec;
+        use crate::acl::{Accessor, Permission, TimelineRole};
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+
+        let mut repo = Repository::memory();
+        // release/** requires 1 signed approval to advance.
+        repo.register_hook(HookSpec { kind: "signed-approval".into(), pattern: "release/**".into(), params: BTreeMap::from([("needed".to_string(), 1u64)]) });
+
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() }).await.unwrap();
+        let src_head = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![base], author: "t".into(), created_at: 1, message: "c".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("feature/x").unwrap(), src_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(RefName::new("release/1.0").unwrap(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let alice = AttestationSigner::from_seed("alice", [1u8; 32]);
+        let mut reg = ApproverRegistry::new();
+        reg.add(alice.approver());
+        repo.set_approvers(&reg).await.unwrap();
+
+        let signer = ProposalSigner::from_seed([22u8; 32]);
+        let pid = repo.publish_proposal(&signer.sign_proposal("feature/x", "release/1.0", "ship", 0)).await.unwrap();
+        let writer = Accessor::new().with_timeline_role(TimelineRole { pattern: "release/**".into(), permission: Permission::Write });
+
+        // No approval yet -> merge_proposal surfaces ApprovalRequired (bole-p2bf),
+        // and the target head does NOT move.
+        let err = repo.merge_proposal(&pid, "m".into(), 2, "merge".into(), &writer).await.unwrap_err();
+        assert!(matches!(err, crate::error::Error::ApprovalRequired { .. }), "PR into release/** needs approval, got {err:?}");
+        assert_eq!(repo.refs.get_timeline(&RefName::new("release/1.0").unwrap()).unwrap().unwrap().head, base, "target must not move");
     }
 
     #[tokio::test]

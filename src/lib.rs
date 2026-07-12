@@ -57,6 +57,8 @@ pub mod pr;
 pub use pr::{verify_comment, verify_proposal, ChangeProposal, ProposalSigner, ReviewComment};
 // bole-xwqv
 pub use repo::pr::PROPOSALS_PREFIX;
+// bole-ooxm
+pub use repo::pr::ProposalMerge;
 pub use audit::{AuditDecision, AuditEvent, AuditSink};
 pub use crypto::key_provider::{KeyProvider, LocalKeyProvider, ProviderChain, WrappedKey};
 pub use acl::{

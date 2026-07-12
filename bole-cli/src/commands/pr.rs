@@ -63,6 +63,15 @@ pub enum Cmd {
         /// The proposal's object id (64 hex).
         id: String,
     },
+    // bole-ooxm
+    /// Merge a proposal's source into its target (approval-gated).
+    Merge {
+        /// The proposal's object id (64 hex).
+        id: String,
+        /// The merge commit message.
+        #[arg(long, default_value = "merge proposal")]
+        message: String,
+    },
 }
 
 /// Dispatches a `pr` subcommand.
@@ -186,5 +195,38 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             );
             Ok(())
         }
+        // bole-ooxm
+        Cmd::Merge { id, message } => {
+            let oid = id.parse::<bole::ObjectId>().map_err(|e| anyhow!("invalid proposal id: {e}"))?;
+            let accessor = crate::actor::effective_accessor(ctx)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match ctx.repo.merge_proposal(&oid, default_author(), now, message, &accessor).await? {
+                bole::ProposalMerge::Merged(snap) => {
+                    out.emit(
+                        || format!("merged proposal {oid} -> {snap}"),
+                        || serde_json::json!({ "merged": true, "snapshot": snap.to_string() }),
+                    );
+                    Ok(())
+                }
+                bole::ProposalMerge::Conflicts(conflicts) => {
+                    let paths: Vec<String> = conflicts.iter().map(|c| c.path.clone()).collect();
+                    let paths2 = paths.clone();
+                    out.emit(
+                        || format!("merge has conflicts ({} paths):\n{}", paths.len(), paths.join("\n")),
+                        || serde_json::json!({ "merged": false, "conflicts": paths2 }),
+                    );
+                    anyhow::bail!("proposal not merged: {} conflicting paths", conflicts.len())
+                }
+            }
+        }
     }
+}
+
+// bole-ooxm
+/// The author string stamped on a proposal merge snapshot.
+fn default_author() -> String {
+    "bole-pr".to_string()
 }
