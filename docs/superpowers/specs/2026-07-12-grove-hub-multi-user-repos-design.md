@@ -48,6 +48,20 @@ a namespace-scoped accessor server-side.
   namespace.
 - Naming: the object is `RepoRecord` in the library (distinct from the existing
   `Repository` store handle); user-facing it is "repo".
+- **Confidentiality — public by default (bole-dqwr, decided 2026-07-12):** hub
+  repo metadata (repo names and timeline heads under `refs/users/**`) is
+  world-readable. This is *intended*, not a gap: the whole point of the hub is
+  "others pull from pushed repos" (see The model), so discovery must be public.
+  Push adds *ownership* (who may write a namespace), never transport
+  confidentiality — the read/pull path (slice 4) is unauthenticated on purpose.
+  Two consequences we accept: (a) a default hub labels `refs/users/**` at the
+  lattice bottom, so the owner-accessor's *read* scope is not a confidentiality
+  boundary — write-fencing is (the push handshake still filters its advert to
+  the pusher's own namespace so authentication doesn't enumerate other owners);
+  (b) anyone who can reach the hub can list every owner's repo names+heads and
+  pull their content. A *private* hub (per-owner labels, authenticated reads) is
+  possible later but is explicitly out of scope for this model. The transport
+  remains trusted-network-only regardless (no TLS/peer-auth).
 
 ## Slices (tracer bullets)
 
