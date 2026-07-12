@@ -20,6 +20,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/snapshots/{id}/blob", get(handlers::snapshots::get_blob))
         // bole-3xj5
         .route("/v1/repos", get(handlers::repos::list))
+        // bole-wy0f
+        .route("/v1/users/{key}/repos", get(handlers::repos::list_for_owner))
+        .route("/v1/repos/{owner}/{name}", get(handlers::repos::get_one))
         .route("/v1/profiles/{key}", get(handlers::profiles::get_profile))
         // bole-jgjt
         .route("/v1/profiles/{key}/bundle", get(handlers::profiles::get_bundle))
