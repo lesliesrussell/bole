@@ -124,8 +124,10 @@ async fn do_run(
         })
         .await
         .context("storing merge snapshot")?;
+    // bole-znv2: bind the advance to the head the diff was computed against, so
+    // a concurrent advance conflicts instead of being clobbered by a stale merge.
     ctx.repo
-        .advance_timeline(&tgt, merged_snap, &accessor)
+        .advance_timeline_expecting(&tgt, merged_snap, Some(target_head), &accessor)
         .await
         .with_context(|| format!("advancing '{target}' to merge snapshot"))?;
 

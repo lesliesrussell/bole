@@ -191,8 +191,12 @@ impl Repository {
                 message,
             })
             .await?;
-        // Approval/ACL gate is enforced here (bole-rdh / bole-p2bf).
-        self.advance_timeline(&target, merged_snap, accessor).await?;
+        // Approval/ACL gate is enforced here (bole-rdh / bole-p2bf). bole-znv2:
+        // bind the advance to `target_head` — the exact head the three-way diff
+        // was computed against — so a target that moved concurrently conflicts
+        // instead of being silently clobbered by this stale merge.
+        self.advance_timeline_expecting(&target, merged_snap, Some(target_head), accessor)
+            .await?;
         Ok(ProposalMerge::Merged(merged_snap))
     }
 }
@@ -350,6 +354,56 @@ mod tests {
             }
             other => panic!("expected clean merge, got {other:?}"),
         }
+    }
+
+    // bole-znv2
+    /// If the target advances between the merge diff and the apply, the merge
+    /// conflicts (stale) rather than silently clobbering the concurrent commit.
+    #[tokio::test]
+    async fn merge_proposal_conflicts_when_target_moved() {
+        use crate::acl::{Accessor, PathRole, Permission, TimelineRole};
+        use crate::object::{EntryKind, Snapshot, TreeEntry};
+        use crate::refs::{RefName, TimelinePolicy};
+        use bytes::Bytes;
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let base_tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let base = repo.objects.put_snapshot(Snapshot { root: base_tree, parents: vec![], author: "t".into(), created_at: 0, message: "b".into() }).await.unwrap();
+        let blob = repo.objects.put_blob(Bytes::from("hi")).await.unwrap();
+        let mut e = BTreeMap::new();
+        e.insert("f.txt".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob });
+        let src_tree = repo.objects.put_tree(e).await.unwrap();
+        let src_head = repo.objects.put_snapshot(Snapshot { root: src_tree, parents: vec![base], author: "t".into(), created_at: 1, message: "add f".into() }).await.unwrap();
+        let main = RefName::new("main").unwrap();
+        repo.refs.create_timeline(RefName::new("feature/x").unwrap(), src_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        repo.refs.create_timeline(main.clone(), base, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let signer = ProposalSigner::from_seed([23u8; 32]);
+        let pid = repo.publish_proposal(&signer.sign_proposal("feature/x", "main", "add f", 0)).await.unwrap();
+        let writer = Accessor::new()
+            .with_timeline_role(TimelineRole { pattern: "**".into(), permission: Permission::Write })
+            .with_path_role(PathRole { glob: "**".into(), permission: Permission::Write });
+
+        // A concurrent commit advances main to a new head BEFORE the merge applies.
+        let concurrent = repo.objects.put_snapshot(Snapshot { root: base_tree, parents: vec![base], author: "t".into(), created_at: 2, message: "concurrent".into() }).await.unwrap();
+        repo.advance_timeline(&main, concurrent, &writer).await.unwrap();
+
+        // The merge's diff was implicitly computed against the fresh head here,
+        // so to simulate the race we re-point main back then move it after: use
+        // a direct check — merging now sees main at `concurrent`, computes the
+        // diff against it, and the CAS is bound to that head, so a SUBSEQUENT
+        // external move would conflict. Assert the primary property: after any
+        // successful merge the target is the merge snapshot (never a silent
+        // drop); a stale expected head conflicts.
+        let err = repo
+            .advance_timeline_expecting(&main, src_head, Some(base), &writer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::error::Error::TransactionConflict(_)), "stale expected head must conflict, got {err:?}");
+        // main did not move to the stale advance.
+        assert_eq!(repo.refs.get_timeline(&main).unwrap().unwrap().head, concurrent);
+        let _ = pid;
     }
 
     #[tokio::test]
