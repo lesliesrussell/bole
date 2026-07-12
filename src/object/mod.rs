@@ -84,4 +84,7 @@ pub enum Object {
     // bole-lkv3
     /// A signed message-board post.
     Post(crate::board::Post),
+    // bole-ub3h
+    /// A signed repo record (a user's announcement that they own a named repo).
+    RepoRecord(crate::reporecord::RepoRecord),
 }
