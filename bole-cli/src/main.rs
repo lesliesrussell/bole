@@ -58,6 +58,12 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    // bole-q5rm
+    /// Create and inspect an account (an ed25519 keypair for hub push).
+    Account {
+        #[command(subcommand)]
+        cmd: commands::account::Cmd,
+    },
     /// Show the current repository, binding, and ref count.
     Status,
     // bole-w3a
@@ -204,6 +210,16 @@ enum Command {
         // bole-1x2v
         #[arg(long = "as")]
         as_keyfile: Option<std::path::PathBuf>,
+        // bole-q5rm: fold identity + announce into a hub push (need --as).
+        /// Publish/refresh your profile display name before pushing.
+        #[arg(long)]
+        name: Option<String>,
+        /// Profile bio to publish alongside --name.
+        #[arg(long)]
+        bio: Option<String>,
+        /// Announce each pushed repo with this description before pushing.
+        #[arg(long)]
+        announce: Option<String>,
     },
     // bole-cg06
     /// Fetch a peer's refs into remote-tracking refs.
@@ -272,6 +288,8 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Command::Init { path } => commands::init::run(path, &out).await,
+        // bole-q5rm: account creation needs no repository.
+        Command::Account { cmd } => commands::account::run(&out, cmd).await,
         Command::Status => {
             let ctx = open().await?;
             commands::status::run(&ctx, &out).await
@@ -369,9 +387,9 @@ async fn run() -> Result<()> {
             commands::sync::run(&ctx, &out, commands::sync::Cmd::Serve { listen, once, addr_file, hub }).await
         }
         // bole-cg06
-        Command::Push { addr, timelines, remote, as_keyfile } => {
+        Command::Push { addr, timelines, remote, as_keyfile, name, bio, announce } => {
             let ctx = open().await?;
-            commands::sync::run(&ctx, &out, commands::sync::Cmd::Push { addr, timelines, remote, as_keyfile }).await
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Push { addr, timelines, remote, as_keyfile, name, bio, announce }).await
         }
         // bole-cg06
         Command::Fetch { addr, remote } => {
