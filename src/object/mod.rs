@@ -81,4 +81,7 @@ pub enum Object {
     // bole-t290
     /// A signed comment in a change proposal's review thread.
     ReviewComment(crate::pr::ReviewComment),
+    // bole-lkv3
+    /// A signed message-board post.
+    Post(crate::board::Post),
 }

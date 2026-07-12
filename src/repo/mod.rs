@@ -14,6 +14,8 @@ pub mod ephemeral;
 pub mod collab;
 // bole-060a
 pub mod pr;
+// bole-lkv3
+pub mod board;
 
 // bole-1vi
 use std::collections::BTreeMap;
