@@ -1037,6 +1037,31 @@ async fn proposals_list_and_get_with_comments() {
     assert_eq!(json["error"]["code"], "not_found");
 }
 
+// bole-x23l
+#[tokio::test]
+async fn profile_bundle_endpoint_lists_repos() {
+    use bole::{CollabSigner, reporecord::RepoSigner};
+    let (_dir, state) = state_with_temp_repo().await;
+    let seed = [77u8; 32];
+    let me = CollabSigner::from_seed(seed);
+    let repo_signer = RepoSigner::from_seed(seed);
+    let key_hex = bole::key_hex(&me.public_key());
+    state.repo.publish_profile(&me.sign_profile("Me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    state.repo.publish_repo(&repo_signer.sign_repo("grove", "the hub", 1)).await.unwrap();
+    state.repo.publish_repo(&repo_signer.sign_repo("dotfiles", "config", 1)).await.unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/profiles/{key_hex}/bundle")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let repos: Vec<&str> = json["repos"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(repos, vec!["dotfiles", "grove"], "bundle lists the owner's repos");
+    assert_eq!(json["repos"][0]["description"], "config");
+}
+
 // bole-p0lo
 #[tokio::test]
 async fn board_endpoint_returns_threaded_posts() {

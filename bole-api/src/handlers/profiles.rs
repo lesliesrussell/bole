@@ -97,11 +97,23 @@ pub async fn get_bundle(
             "created_at": t.created_at,
         }))
         .collect();
+    // bole-x23l: the owner's announced repos (RepoRecords), for the hub view.
+    let repos: Vec<_> = b
+        .repos
+        .iter()
+        .map(|r| json!({
+            "name": r.name,
+            "description": r.description,
+            "owner": bole::key_hex(&r.owner),
+            "seq": r.seq,
+        }))
+        .collect();
     Ok(Json(json!({
         "key": bole::key_hex(&b.key),
         "is_local": b.is_local,
         "profile": profile,
         "trust": { "edges": edges },
         "timelines": timelines,
+        "repos": repos,
     })))
 }

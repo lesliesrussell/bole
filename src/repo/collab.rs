@@ -63,6 +63,8 @@ pub struct ProfileBundle {
     pub profile: Option<Profile>,
     pub edges: Vec<TrustEdge>,
     pub timelines: Vec<TimelineView>,
+    // bole-x23l: the repos this key has announced (RepoRecords), for the hub.
+    pub repos: Vec<crate::reporecord::RepoRecord>,
 }
 
 // bole-581
@@ -280,7 +282,11 @@ impl Repository {
             }
         }
 
-        Ok(ProfileBundle { key: *key, is_local, profile, edges, timelines })
+        // bole-x23l: the owner's announced repos (verified fail-closed by
+        // list_repos). Public metadata like the profile/edges — not ACL-gated.
+        let repos = self.list_repos(key).await?;
+
+        Ok(ProfileBundle { key: *key, is_local, profile, edges, timelines, repos })
     }
 
     // bole-440
@@ -558,6 +564,30 @@ mod tests {
             Ref::Tag(Tag { target: id, created_at: 0, message: None }),
         );
         tx.commit().unwrap();
+    }
+
+    // bole-x23l
+    #[tokio::test]
+    async fn bundle_lists_owner_repos() {
+        use crate::acl::Accessor;
+        use crate::collab::CollabSigner;
+        use crate::reporecord::RepoSigner;
+
+        let repo = Repository::memory();
+        let seed = [30u8; 32];
+        let me = CollabSigner::from_seed(seed);
+        let repo_signer = RepoSigner::from_seed(seed); // same key = same owner
+        repo.publish_profile(&me.sign_profile("Me".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_repo(&repo_signer.sign_repo("grove", "the hub", 1)).await.unwrap();
+        repo.publish_repo(&repo_signer.sign_repo("dotfiles", "config", 1)).await.unwrap();
+
+        let b = repo.profile_bundle(&me.public_key(), &Accessor::privileged()).await.unwrap();
+        let names: Vec<&str> = b.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["dotfiles", "grove"], "profile lists the owner's repos");
+
+        let ghost = CollabSigner::from_seed([31u8; 32]);
+        let gb = repo.profile_bundle(&ghost.public_key(), &Accessor::privileged()).await.unwrap();
+        assert!(gb.repos.is_empty());
     }
 
     // bole-k93a
