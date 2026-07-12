@@ -788,6 +788,25 @@ impl Repository {
         snapshot_id: ObjectId,
         accessor: &Accessor,
     ) -> Result<()> {
+        self.advance_timeline_expecting(name, snapshot_id, None, accessor).await
+    }
+
+    // bole-znv2
+    /// Like [`advance_timeline`](Repository::advance_timeline), but with an
+    /// optional `expected_old`: when `Some(h)`, the advance applies only if the
+    /// timeline is currently at `h`, else it fails with
+    /// [`Error::TransactionConflict`](crate::Error::TransactionConflict). A
+    /// merge uses this to bind the advance to the exact head its three-way diff
+    /// was computed against, so a concurrent advance conflicts rather than being
+    /// silently clobbered by a merge built on stale state. `None` reproduces the
+    /// plain advance (CAS against the head read here).
+    pub async fn advance_timeline_expecting(
+        &self,
+        name: &RefName,
+        snapshot_id: ObjectId,
+        expected_old: Option<ObjectId>,
+        accessor: &Accessor,
+    ) -> Result<()> {
         // bole-fo2
         let lattice = self.acls.lattice()?;
         let rules = self.acls.label_ruleset()?;
@@ -834,6 +853,18 @@ impl Repository {
         let timeline = self.refs.get_timeline(name)?.ok_or_else(|| {
             Error::Storage(format!("timeline not found: {}", name.as_str()))
         })?;
+        // bole-znv2: bind the advance to the caller's expected head. Without
+        // this a merge computed against head A could land while the target has
+        // since moved to B (advance would CAS against its own fresh read of B),
+        // silently dropping B. Fail-fast so the caller recomputes.
+        if let Some(expected) = expected_old {
+            if timeline.head != expected {
+                return Err(Error::TransactionConflict(format!(
+                    "timeline '{}' moved from the expected head (merge is stale); retry",
+                    name.as_str()
+                )));
+            }
+        }
         // bole-48r
         // Deleting a path is a write to that path, but walk_tree_filtered over the
         // NEW tree cannot see a path that is no longer there. Enumerate the OLD
