@@ -60,6 +60,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::Collab(_) => "collab",
         // bole-060a
         Object::ChangeProposal(_) => "change-proposal",
+        // bole-t290
+        Object::ReviewComment(_) => "review-comment",
     }
 }
 

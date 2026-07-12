@@ -39,6 +39,30 @@ pub enum Cmd {
         /// The proposal's object id (64 hex).
         id: String,
     },
+    // bole-t290
+    /// Add a comment to a proposal's review thread.
+    Comment {
+        /// The proposal's object id (64 hex).
+        id: String,
+        /// The comment body.
+        #[arg(long)]
+        body: String,
+        /// Mark this comment as resolving the thread.
+        #[arg(long)]
+        resolve: bool,
+        /// Env var holding the 64-hex Ed25519 seed (the author).
+        #[arg(long, default_value = "BOLE_COLLAB_KEY")]
+        key_env: String,
+        /// File holding the 64-hex Ed25519 seed.
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    // bole-t290
+    /// List a proposal's review comments.
+    Comments {
+        /// The proposal's object id (64 hex).
+        id: String,
+    },
 }
 
 /// Dispatches a `pr` subcommand.
@@ -109,6 +133,56 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     "author": key::hex32(&p.author),
                     "created_at": p.created_at,
                 }),
+            );
+            Ok(())
+        }
+        // bole-t290
+        Cmd::Comment { id, body, resolve, key_env, key_file } => {
+            let oid = id.parse::<bole::ObjectId>().map_err(|e| anyhow!("invalid proposal id: {e}"))?;
+            let seed = key::resolve(&key_env, key_file.as_deref())?;
+            let signer = ProposalSigner::from_seed(seed);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let c = signer.sign_comment(oid, body.clone(), resolve, now);
+            let cid = ctx.repo.add_comment(&c).await?;
+            out.emit(
+                || format!("commented on {oid}{}: {body}", if resolve { " (resolved)" } else { "" }),
+                || serde_json::json!({
+                    "id": cid.to_string(),
+                    "proposal": oid.to_string(),
+                    "body": body,
+                    "resolves": resolve,
+                    "author": key::hex32(&c.author),
+                }),
+            );
+            Ok(())
+        }
+        // bole-t290
+        Cmd::Comments { id } => {
+            let oid = id.parse::<bole::ObjectId>().map_err(|e| anyhow!("invalid proposal id: {e}"))?;
+            let comments = ctx.repo.list_comments(&oid).await?;
+            let rows: Vec<_> = comments.iter().map(|(cid, c)| serde_json::json!({
+                "id": cid.to_string(),
+                "body": c.body,
+                "resolves": c.resolves,
+                "author": key::hex32(&c.author),
+                "created_at": c.created_at,
+            })).collect();
+            out.emit(
+                || {
+                    if rows.is_empty() {
+                        "no comments".to_string()
+                    } else {
+                        comments
+                            .iter()
+                            .map(|(_, c)| format!("{}{}: {}", key::hex32(&c.author), if c.resolves { " (resolved)" } else { "" }, c.body))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                },
+                || serde_json::json!({ "proposal": oid.to_string(), "comments": rows }),
             );
             Ok(())
         }

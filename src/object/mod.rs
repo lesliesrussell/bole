@@ -78,4 +78,7 @@ pub enum Object {
     // bole-060a
     /// A signed change proposal (a PR: merge one timeline into another).
     ChangeProposal(crate::pr::ChangeProposal),
+    // bole-t290
+    /// A signed comment in a change proposal's review thread.
+    ReviewComment(crate::pr::ReviewComment),
 }

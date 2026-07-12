@@ -535,6 +535,19 @@ fn cli_pr_create_list_show() {
     assert_eq!(sv["from"], "feature/x");
     assert_eq!(sv["into"], "release/1.0");
 
+    // Comment on it, then list comments.
+    ok(w, &["pr", "comment", &id, "--body", "looks good", "--resolve"], Some(&seed));
+    let comments = ok(w, &["pr", "comments", &id, "--json"], Some(&seed));
+    let cvj: serde_json::Value = serde_json::from_slice(&comments.stdout).unwrap();
+    let crows = cvj["comments"].as_array().unwrap();
+    assert_eq!(crows.len(), 1);
+    assert_eq!(crows[0]["body"], "looks good");
+    assert_eq!(crows[0]["resolves"], true);
+
+    // A comment on an unknown proposal errors.
+    let badc = run(w, &["pr", "comment", &"00".repeat(32), "--body", "x"], Some(&seed));
+    assert!(!badc.status.success(), "comment on unknown proposal must error");
+
     // Show a bogus id errors.
     let bad = run(w, &["pr", "show", &"00".repeat(32)], Some(&seed));
     assert!(!bad.status.success(), "unknown proposal id must error");

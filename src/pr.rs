@@ -13,6 +13,7 @@ use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 use crate::collab::Key;
+use crate::object::ObjectId;
 
 // bole-060a
 /// Domain-separation tag for change-proposal signatures. Prevents a proposal
@@ -97,6 +98,27 @@ impl ProposalSigner {
         p.sig = self.signing.sign(&proposal_message(&p)).to_bytes().to_vec();
         p
     }
+
+    // bole-t290
+    /// Signs a review comment on the proposal at `proposal`.
+    pub fn sign_comment(
+        &self,
+        proposal: ObjectId,
+        body: impl Into<String>,
+        resolves: bool,
+        created_at: u64,
+    ) -> ReviewComment {
+        let mut c = ReviewComment {
+            author: self.public_key(),
+            proposal,
+            body: body.into(),
+            resolves,
+            created_at,
+            sig: Vec::new(),
+        };
+        c.sig = self.signing.sign(&comment_message(&c)).to_bytes().to_vec();
+        c
+    }
 }
 
 // bole-060a
@@ -112,6 +134,66 @@ pub fn verify_proposal(p: &ChangeProposal) -> bool {
         Err(_) => return false,
     };
     vk.verify(&proposal_message(p), &ed25519_dalek::Signature::from_bytes(&bytes)).is_ok()
+}
+
+// bole-t290
+/// Domain-separation tag for review-comment signatures.
+const REVIEW_COMMENT_DOMAIN: &[u8] = b"bole-review-comment-v1\0";
+
+// bole-t290
+/// A signed comment in a change proposal's review thread. `proposal` is the
+/// object id of the [`ChangeProposal`] it comments on; `resolves` marks a
+/// comment that resolves the thread (e.g. an approval/dismissal note). Metadata
+/// only — it grants nothing; the merge is still approval-gated separately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewComment {
+    pub author: Key,
+    pub proposal: ObjectId,
+    pub body: String,
+    pub resolves: bool,
+    pub created_at: u64,
+    /// Ed25519 signature (64 bytes) over the domain-separated unsigned fields.
+    pub sig: Vec<u8>,
+}
+
+// bole-t290
+#[derive(Serialize)]
+struct CommentMsg<'a> {
+    author: &'a Key,
+    proposal: &'a ObjectId,
+    body: &'a str,
+    resolves: bool,
+    created_at: u64,
+}
+
+// bole-t290
+fn comment_message(c: &ReviewComment) -> Vec<u8> {
+    let mut m = REVIEW_COMMENT_DOMAIN.to_vec();
+    let body = postcard::to_allocvec(&CommentMsg {
+        author: &c.author,
+        proposal: &c.proposal,
+        body: &c.body,
+        resolves: c.resolves,
+        created_at: c.created_at,
+    })
+    .expect("postcard serialization is infallible for owned data");
+    m.extend_from_slice(&body);
+    m
+}
+
+// bole-t290
+/// Verifies a review comment's signature against its embedded author key.
+/// Fail-closed: a malformed key or signature returns `false`.
+pub fn verify_comment(c: &ReviewComment) -> bool {
+    let vk = match VerifyingKey::from_bytes(&c.author) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let bytes: [u8; 64] = match c.sig.as_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    vk.verify(&comment_message(c), &ed25519_dalek::Signature::from_bytes(&bytes)).is_ok()
 }
 
 #[cfg(test)]
@@ -151,6 +233,31 @@ mod tests {
         let mut p5 = signer.sign_proposal("feature/x", "main", "t", 1);
         p5.created_at = 999;
         assert!(!verify_proposal(&p5), "tampered created_at must not verify");
+    }
+
+    #[test]
+    fn comment_sign_verify_and_tamper() {
+        let signer = ProposalSigner::from_seed([5u8; 32]);
+        let pid = ObjectId::from_content(b"proposal");
+        let c = signer.sign_comment(pid, "looks good", true, 9);
+        assert_eq!(c.author, signer.public_key());
+        assert_eq!(c.proposal, pid);
+        assert!(c.resolves);
+        assert!(verify_comment(&c));
+
+        // Each field is signed.
+        let mut c1 = signer.sign_comment(pid, "b", false, 1);
+        c1.body = "evil".into();
+        assert!(!verify_comment(&c1), "tampered body");
+        let mut c2 = signer.sign_comment(pid, "b", false, 1);
+        c2.resolves = true;
+        assert!(!verify_comment(&c2), "tampered resolves");
+        let mut c3 = signer.sign_comment(pid, "b", false, 1);
+        c3.proposal = ObjectId::from_content(b"other");
+        assert!(!verify_comment(&c3), "tampered proposal ref");
+        let mut c4 = signer.sign_comment(pid, "b", false, 1);
+        c4.created_at = 999;
+        assert!(!verify_comment(&c4), "tampered created_at");
     }
 
     #[test]

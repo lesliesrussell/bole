@@ -8,7 +8,7 @@
 
 use crate::error::{Error, Result};
 use crate::object::{Object, ObjectId};
-use crate::pr::{verify_proposal, ChangeProposal};
+use crate::pr::{verify_comment, verify_proposal, ChangeProposal, ReviewComment};
 use crate::refs::{Ref, RefName, Tag};
 use crate::repo::Repository;
 
@@ -17,6 +17,13 @@ use crate::repo::Repository;
 /// proposal, named by its object id). Pinning makes proposals GC-roots so they
 /// survive `gc()`, and lets `list_proposals` enumerate them.
 pub const PROPOSALS_PREFIX: &str = "refs/proposals/";
+
+// bole-t290
+/// The ref prefix under which a proposal's review comments are pinned. Each
+/// comment tag is `refs/proposals/comments/<proposal-id>/<comment-id>`. Keeping
+/// comments under their own top-level segment (not nested inside a proposal's
+/// own tag name) keeps the two enumerations independent.
+pub const COMMENTS_PREFIX: &str = "refs/proposals/comments/";
 
 impl Repository {
     // bole-060a
@@ -69,9 +76,66 @@ impl Repository {
     pub async fn list_proposals(&self) -> Result<Vec<(ObjectId, ChangeProposal)>> {
         let mut out = Vec::new();
         for name in self.refs.list(PROPOSALS_PREFIX)? {
+            // bole-t290: the comments sub-namespace lives under the same top
+            // prefix; skip it so proposal enumeration stays clean.
+            if name.as_str().starts_with(COMMENTS_PREFIX) {
+                continue;
+            }
             if let Some(tag) = self.refs.get_tag(&name)? {
                 if let Some(p) = self.get_proposal(&tag.target).await? {
                     out.push((tag.target, p));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    // bole-t290
+    /// Adds a signed [`ReviewComment`] to its proposal's thread: verifies it
+    /// (fail-closed), stores it, and pins it under
+    /// `refs/proposals/comments/<proposal-id>/<comment-id>` so it survives GC
+    /// and appears in [`list_comments`](Repository::list_comments). Errors if
+    /// the referenced proposal is not present (a comment must attach to a real,
+    /// verified proposal). Returns the comment's id.
+    pub async fn add_comment(&self, c: &ReviewComment) -> Result<ObjectId> {
+        if !verify_comment(c) {
+            return Err(Error::PolicyViolation(
+                "review comment signature does not verify".into(),
+            ));
+        }
+        if self.get_proposal(&c.proposal).await?.is_none() {
+            return Err(Error::PolicyViolation(format!(
+                "review comment references an unknown proposal: {}",
+                c.proposal
+            )));
+        }
+        let id = self.objects.put(&Object::ReviewComment(c.clone())).await?;
+        let name = RefName::new(format!("{COMMENTS_PREFIX}{}/{id}", c.proposal))?;
+        let mut tx = self.refs.transaction();
+        tx.set(name, Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit()?;
+        Ok(id)
+    }
+
+    // bole-t290
+    /// Loads the [`ReviewComment`] at `id`, verified fail-closed. `None` if
+    /// absent, not a comment, or unverifiable.
+    pub async fn get_comment(&self, id: &ObjectId) -> Result<Option<ReviewComment>> {
+        match self.objects.get(id).await? {
+            Some(Object::ReviewComment(c)) if verify_comment(&c) => Ok(Some(c)),
+            _ => Ok(None),
+        }
+    }
+
+    // bole-t290
+    /// Every review comment on `proposal` (id + comment), verified fail-closed.
+    pub async fn list_comments(&self, proposal: &ObjectId) -> Result<Vec<(ObjectId, ReviewComment)>> {
+        let mut out = Vec::new();
+        let prefix = format!("{COMMENTS_PREFIX}{proposal}/");
+        for name in self.refs.list(&prefix)? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                if let Some(c) = self.get_comment(&tag.target).await? {
+                    out.push((tag.target, c));
                 }
             }
         }
@@ -144,6 +208,46 @@ mod tests {
         let id2 = repo.publish_proposal(&p).await.unwrap();
         assert_eq!(id1, id2);
         assert_eq!(repo.list_proposals().await.unwrap().len(), 1, "same proposal pinned once");
+    }
+
+    #[tokio::test]
+    async fn comment_add_list_and_survives_gc() {
+        let repo = Repository::memory();
+        let signer = ProposalSigner::from_seed([13u8; 32]);
+        let pid = repo.publish_proposal(&signer.sign_proposal("f", "main", "t", 0)).await.unwrap();
+
+        let c1 = signer.sign_comment(pid, "first", false, 1);
+        let c2 = signer.sign_comment(pid, "resolve", true, 2);
+        let id1 = repo.add_comment(&c1).await.unwrap();
+        let _id2 = repo.add_comment(&c2).await.unwrap();
+
+        let mut listed = repo.list_comments(&pid).await.unwrap();
+        listed.sort_by_key(|(_, c)| c.created_at);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].1.body, "first");
+        assert!(listed[1].1.resolves);
+
+        // Comments and their proposal survive GC; proposal listing is unaffected.
+        repo.gc(&[], 0, 1_000_000).await.unwrap();
+        assert_eq!(repo.list_comments(&pid).await.unwrap().len(), 2, "comments survive GC");
+        assert_eq!(repo.list_proposals().await.unwrap().len(), 1, "comments dont leak into proposal listing");
+        assert!(repo.get_comment(&id1).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn add_comment_rejects_unsigned_and_unknown_proposal() {
+        let repo = Repository::memory();
+        let signer = ProposalSigner::from_seed([14u8; 32]);
+        let pid = repo.publish_proposal(&signer.sign_proposal("f", "main", "t", 0)).await.unwrap();
+
+        // Tampered comment -> refused.
+        let mut bad = signer.sign_comment(pid, "b", false, 0);
+        bad.body = "tampered".into();
+        assert!(repo.add_comment(&bad).await.is_err(), "tampered comment refused");
+
+        // Comment on a non-existent proposal -> refused.
+        let orphan = signer.sign_comment(crate::ObjectId::from_content(b"ghost"), "b", false, 0);
+        assert!(repo.add_comment(&orphan).await.is_err(), "comment on unknown proposal refused");
     }
 
     #[tokio::test]
