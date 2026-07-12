@@ -9,9 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::collab::Profile;
 use crate::error::{Error, Result};
 use crate::object::ObjectId;
 use crate::refs::RefName;
+use crate::reporecord::RepoRecord;
 
 /// The only protocol version in v1.
 pub const PROTO_VERSION: u16 = 1;
@@ -184,6 +186,13 @@ pub enum Message {
     /// client → hub: the ed25519 signature over the domain-tagged challenge.
     /// On success the hub proceeds with a push scoped to the owner's namespace.
     HubProof { sig: Vec<u8> },
+    // bole-8uhy
+    /// client → hub (after the timeline push): the pusher's account — their
+    /// self-signed `Profile` (if any) and their `RepoRecord`s. The hub lands
+    /// only objects whose key is the authenticated owner, so a push publishes
+    /// your identity + repo listing into the hub's collab store (making the
+    /// pushed repo appear under your profile). Answered with `Done`.
+    HubIdentity { profile: Option<Profile>, repos: Vec<RepoRecord> },
     /// end of a phase / session.
     Done,
     /// a typed failure (version, auth, policy, corrupt frame, …).

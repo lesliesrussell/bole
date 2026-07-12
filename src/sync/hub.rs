@@ -168,6 +168,29 @@ async fn serve_authenticated_push(conn: &mut dyn Conn, repo: &Repository, owner:
     }
     let results = apply_push_ops(repo, &accessor, &ops).await?;
     conn.send(&Message::RefStatus(results)).await?;
+
+    // bole-8uhy: land the pusher's account — their signed Profile and
+    // RepoRecords — so the pushed repo appears under their profile in Grove.
+    // Only objects whose key is the authenticated owner are landed: you can
+    // publish your own identity/repos, never someone else's. `publish_*`
+    // re-verifies each signature and enforces monotonic seq, so a stale or
+    // duplicate re-push is a harmless no-op.
+    match conn.recv().await? {
+        Message::HubIdentity { profile, repos } => {
+            if let Some(p) = profile {
+                if p.key == owner {
+                    let _ = repo.publish_profile(&p).await;
+                }
+            }
+            for r in repos {
+                if r.owner == owner {
+                    let _ = repo.publish_repo(&r).await;
+                }
+            }
+            conn.send(&Message::Done).await?;
+        }
+        _ => return Err(Error::Storage("hub: expected HubIdentity".into())),
+    }
     Ok(())
 }
 
@@ -235,6 +258,18 @@ pub async fn hub_push(
         }
     }
     tx.commit()?;
+
+    // bole-8uhy: publish our account to the hub too — our own Profile (if any)
+    // and every repo we've announced — so the pushed repo shows up under our
+    // profile. The hub drops anything not signed by this authenticated owner.
+    let profile = local.profile(&owner).await?;
+    let repos = local.list_repos(&owner).await?;
+    conn.send(&Message::HubIdentity { profile, repos }).await?;
+    match conn.recv().await? {
+        Message::Done => {}
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("hub: expected Done after identity".into())),
+    }
     Ok(results)
 }
 
@@ -375,7 +410,10 @@ mod tests {
         let _ = name_a;
         a.send(&M::Pack(crate::store::pack::PackBuilder::new().finish().unwrap().0)).await.unwrap();
         a.send(&M::RefUpdate(vec![])).await.unwrap();
-        let _ = a.recv().await;
+        let _ = a.recv().await; // RefStatus
+        // bole-8uhy: the push now ends with an identity exchange.
+        a.send(&M::HubIdentity { profile: None, repos: vec![] }).await.unwrap();
+        let _ = a.recv().await; // Done
         let _ = server.await;
     }
 
@@ -468,6 +506,70 @@ mod tests {
         // Owner B's repo must not have been pulled.
         assert!(!tracked.iter().any(|(n, _)| n.as_str().contains(&fingerprint(&owner_b))), "leaked owner B: {tracked:?}");
         let _ = b_name;
+    }
+
+    // bole-8uhy: a push carries the owner's account — their signed Profile and
+    // RepoRecords land in the hub's collab store, so the pushed repo shows up
+    // under their profile in Grove.
+    #[tokio::test]
+    async fn hub_push_lands_owner_identity_and_repos() {
+        use crate::collab::CollabSigner;
+        let seed = [31u8; 32];
+        let (client, name, _head) = seed_local_repo(seed, "dotfiles").await;
+        // The user builds their account locally: a profile + an announced repo.
+        let me = CollabSigner::from_seed(seed);
+        let owner = me.public_key();
+        client.publish_profile(&me.sign_profile("Ada".into(), "hi".into(), vec![], vec![], 1)).await.unwrap();
+        let rsigner = RepoSigner::from_seed(seed);
+        client.publish_repo(&rsigner.sign_repo("dotfiles", "my config", 1)).await.unwrap();
+
+        let hub = Arc::new(Repository::memory());
+        let hub2 = hub.clone();
+        let (mut a, mut b) = InProcessConn::pair();
+        let server = tokio::spawn(async move { serve_hub(&mut b, &hub2).await });
+        hub_push(&mut a, &client, &seed, "hub", &[(name.clone(), name.clone())]).await.unwrap();
+        server.await.unwrap().unwrap();
+
+        // The hub now hosts the owner's identity and repo listing.
+        let p = hub.profile(&owner).await.unwrap().expect("profile landed on hub");
+        assert_eq!(p.display_name, "Ada");
+        let repos = hub.list_repos(&owner).await.unwrap();
+        assert_eq!(repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["dotfiles"], "repo record landed");
+    }
+
+    // bole-8uhy: you cannot publish someone else's identity through your push —
+    // the hub drops any pushed object whose key isn't the authenticated owner,
+    // even a validly-signed one. Driven manually to send a forged HubIdentity.
+    #[tokio::test]
+    async fn hub_push_rejects_foreign_identity() {
+        use crate::collab::CollabSigner;
+        use crate::sync::wire::Message as M;
+        let seed = [32u8; 32];
+        // A perfectly valid profile — but for a DIFFERENT owner.
+        let victim = CollabSigner::from_seed([99u8; 32]);
+        let victim_key = victim.public_key();
+        let foreign = victim.sign_profile("Victim".into(), String::new(), vec![], vec![], 1);
+
+        let hub = Arc::new(Repository::memory());
+        let hub2 = hub.clone();
+        let (mut a, mut b) = InProcessConn::pair();
+        let server = tokio::spawn(async move { serve_hub(&mut b, &hub2).await });
+
+        // Authenticate as `seed`, push nothing, then offer the foreign identity.
+        let signing = SigningKey::from_bytes(&seed);
+        a.send(&M::HubHello { owner: signing.verifying_key().to_bytes() }).await.unwrap();
+        let nonce = match a.recv().await.unwrap() { M::HubChallenge { nonce } => nonce, m => panic!("{m:?}") };
+        a.send(&M::HubProof { sig: signing.sign(&challenge_message(&nonce)).to_bytes().to_vec() }).await.unwrap();
+        let _ = a.recv().await.unwrap(); // Welcome
+        a.send(&M::Pack(crate::store::pack::PackBuilder::new().finish().unwrap().0)).await.unwrap();
+        a.send(&M::RefUpdate(vec![])).await.unwrap();
+        let _ = a.recv().await.unwrap(); // RefStatus
+        a.send(&M::HubIdentity { profile: Some(foreign), repos: vec![] }).await.unwrap();
+        let _ = a.recv().await.unwrap(); // Done
+        let _ = server.await;
+
+        // The victim's profile must NOT have been planted by the pusher.
+        assert!(hub.profile(&victim_key).await.unwrap().is_none(), "foreign identity must not land");
     }
 
     // bole-odh6: pulling a repo the hub doesn't host is an error, not a silent
