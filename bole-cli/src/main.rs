@@ -190,6 +190,9 @@ enum Command {
         once: bool,
         #[arg(long)]
         addr_file: Option<std::path::PathBuf>,
+        // bole-1x2v
+        #[arg(long)]
+        hub: bool,
     },
     // bole-cg06
     /// Push local timelines to a peer's `bole serve`.
@@ -198,6 +201,9 @@ enum Command {
         timelines: Vec<String>,
         #[arg(long, default_value = "origin")]
         remote: String,
+        // bole-1x2v
+        #[arg(long = "as")]
+        as_keyfile: Option<std::path::PathBuf>,
     },
     // bole-cg06
     /// Fetch a peer's refs into remote-tracking refs.
@@ -349,14 +355,14 @@ async fn run() -> Result<()> {
         }
         // bole-1n7
         // bole-cg06
-        Command::Serve { listen, once, addr_file } => {
+        Command::Serve { listen, once, addr_file, hub } => {
             let ctx = open().await?;
-            commands::sync::run(&ctx, &out, commands::sync::Cmd::Serve { listen, once, addr_file }).await
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Serve { listen, once, addr_file, hub }).await
         }
         // bole-cg06
-        Command::Push { addr, timelines, remote } => {
+        Command::Push { addr, timelines, remote, as_keyfile } => {
             let ctx = open().await?;
-            commands::sync::run(&ctx, &out, commands::sync::Cmd::Push { addr, timelines, remote }).await
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Push { addr, timelines, remote, as_keyfile }).await
         }
         // bole-cg06
         Command::Fetch { addr, remote } => {

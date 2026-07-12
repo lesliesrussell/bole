@@ -22,6 +22,8 @@ pub mod collab;
 pub mod http;
 // bole-6h7
 pub mod authn;
+// bole-1x2v
+pub mod hub;
 
 use crate::acl::{Accessor, ResourceRef};
 use crate::error::{Error, Result};

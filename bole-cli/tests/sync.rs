@@ -115,3 +115,49 @@ async fn push_replicates_timeline_to_served_peer() {
     };
     assert!(server_repo.objects.get(&blob_id).await.unwrap().is_some(), "blob closure transferred");
 }
+
+// bole-1x2v
+/// bole serve --hub + bole push --as: an authenticated push lands under the
+/// owner's namespace on the hub.
+#[tokio::test]
+async fn hub_push_lands_in_owner_namespace() {
+    let hub = tempfile::tempdir().unwrap();
+    let client = tempfile::tempdir().unwrap();
+    assert!(bin().args(["init", "."]).current_dir(hub.path()).output().unwrap().status.success());
+    let client_head = seed_main(client.path()).await;
+
+    // The owner's key file (64-hex seed).
+    let keyfile = client.path().join("owner.key");
+    std::fs::write(&keyfile, "ab".repeat(32)).unwrap(); // 0xab * 32
+    let owner = bole::RepoSigner::from_seed([0xabu8; 32]).public_key();
+    let ns = bole::sync::hub::user_namespace(&owner); // refs/users/<fp>/
+
+    // Hub serving one connection.
+    let addr_file = hub.path().join(".addr");
+    let mut serve = bin()
+        .args(["serve", "--hub", "--listen", "127.0.0.1:0", "--once", "--addr-file", addr_file.to_str().unwrap()])
+        .current_dir(hub.path())
+        .spawn()
+        .unwrap();
+    let addr = wait_for_addr(&addr_file);
+
+    // Push local `main` as repo `grove` (→ refs/users/<fp>/grove/main), authenticated.
+    let push = bin()
+        .args(["push", &addr, "grove:main", "--as", keyfile.to_str().unwrap(), "--json"])
+        .current_dir(client.path())
+        .output()
+        .unwrap();
+    assert!(push.status.success(), "hub push failed: {push:?}");
+    let v: serde_json::Value = serde_json::from_slice(&push.stdout).unwrap();
+    assert!(v["results"][0]["status"].as_str().unwrap().contains("Ok"), "not accepted: {v}");
+
+    let _ = serve.wait();
+
+    // The hub has the repo under the owner's namespace at the client head.
+    let hub_repo = Repository::disk(hub.path().join(".bole")).await.unwrap();
+    let remote = bole::RefName::new(format!("{ns}grove/main")).unwrap();
+    assert_eq!(
+        hub_repo.refs.get_timeline(&remote).unwrap().expect("owner namespace populated").head.to_string(),
+        client_head
+    );
+}

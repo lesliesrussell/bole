@@ -172,6 +172,18 @@ pub enum Message {
     /// search bounded by `max_hops`. Answered with a `Pack` of matching profiles
     /// + the directed reverse-reachability edge ball, then `Done`.
     Search { term: String, max_hops: u8 },
+    // bole-1x2v
+    /// client → hub: begin an owner-authenticated push as `owner` (a 32-byte
+    /// ed25519 public key). The hub replies with a `HubChallenge`.
+    HubHello { owner: [u8; 32] },
+    // bole-1x2v
+    /// hub → client: a random challenge the client must sign with the owner key
+    /// to prove possession before any write is authorized.
+    HubChallenge { nonce: [u8; 32] },
+    // bole-1x2v
+    /// client → hub: the ed25519 signature over the domain-tagged challenge.
+    /// On success the hub proceeds with a push scoped to the owner's namespace.
+    HubProof { sig: Vec<u8> },
     /// end of a phase / session.
     Done,
     /// a typed failure (version, auth, policy, corrupt frame, …).
