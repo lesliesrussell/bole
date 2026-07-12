@@ -52,6 +52,11 @@ pub mod crypto;
 pub mod sync;
 // bole-eean
 pub mod audit;
+// bole-lkv3
+pub mod board;
+pub use board::{verify_post, BoardSigner, Post};
+// bole-lkv3
+pub use repo::board::BOARD_PREFIX;
 // bole-060a
 pub mod pr;
 pub use pr::{verify_comment, verify_proposal, ChangeProposal, ProposalSigner, ReviewComment};

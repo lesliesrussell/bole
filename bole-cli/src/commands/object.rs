@@ -62,6 +62,8 @@ fn kind(obj: &Object) -> &'static str {
         Object::ChangeProposal(_) => "change-proposal",
         // bole-t290
         Object::ReviewComment(_) => "review-comment",
+        // bole-lkv3
+        Object::Post(_) => "board-post",
     }
 }
 
