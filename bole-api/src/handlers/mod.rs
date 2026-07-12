@@ -8,3 +8,5 @@ pub mod snapshots;
 pub mod profiles;
 // bole-3xj5
 pub mod repos;
+// bole-4cnv
+pub mod proposals;

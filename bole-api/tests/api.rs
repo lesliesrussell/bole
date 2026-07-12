@@ -980,3 +980,59 @@ mod auth_precedence {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
+
+// bole-4cnv
+#[tokio::test]
+async fn proposals_list_and_get_with_comments() {
+    use bole::pr::ProposalSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signer = ProposalSigner::from_seed([42u8; 32]);
+    let pid = state
+        .repo
+        .publish_proposal(&signer.sign_proposal("feature/x", "release/1.0", "Add x", 7))
+        .await
+        .unwrap();
+    state
+        .repo
+        .add_comment(&signer.sign_comment(pid, "looks good", true, 8))
+        .await
+        .unwrap();
+    let app = build_router(state);
+
+    // List.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri("/v1/proposals").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let rows = json["proposals"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], pid.to_string());
+    assert_eq!(rows[0]["from"], "feature/x");
+    assert_eq!(rows[0]["into"], "release/1.0");
+
+    // Get one, with its comment thread.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(format!("/v1/proposals/{pid}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["title"], "Add x");
+    let comments = json["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["body"], "looks good");
+    assert_eq!(comments[0]["resolves"], true);
+
+    // Unknown id -> 404 envelope.
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/proposals/{}", "00".repeat(32))).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let json = body_json(resp).await;
+    assert_eq!(json["error"]["code"], "not_found");
+}

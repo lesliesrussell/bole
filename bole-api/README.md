@@ -78,6 +78,8 @@ request that presents no credential at all resolves to `Anonymous`.
 | GET | `/v1/snapshots/{id}` | ACL-filtered snapshot metadata (author, message, parents, `visible_paths`). |
 | GET | `/v1/snapshots/{id}/blob?path=` | Raw bytes of a blob at `path`, restricted to paths visible to the caller. |
 | GET | `/v1/profiles/{key}` | A published `Profile` by 64-hex collab key, after signature verification. |
+| GET | `/v1/proposals` | Open change proposals (PRs), verified fail-closed. |
+| GET | `/v1/proposals/{id}` | One proposal by object id, with its review-comment thread; 404 if unknown. |
 
 All endpoints except `/v1/status` run through the `RequestAuth` extractor and
 thus require (or default to) a resolved principal; `/v1/status` does not
