@@ -394,3 +394,29 @@ bole merge run agent/fmt main -m "merge formatter output"
 # Export to Git.
 bole git export --to /tmp/export.git
 ```
+
+## Native sync (over TCP)
+
+bole replicates repositories directly between nodes — no Git in the loop. The
+transport has **no TLS or peer authentication**; run it only over a trusted
+network (localhost, a VPN, an SSH tunnel). See [THREAT_MODEL.md](THREAT_MODEL.md).
+
+```bash
+# On node B — serve this repo for fetch/push (accessor-gated by the bound actor;
+# full access when none is bound). `:0` picks a free port.
+bole serve --listen 127.0.0.1:9000
+bole serve --listen 127.0.0.1:0 --once --addr-file /tmp/addr   # scripts/tests
+
+# On node A — push local timelines to B's `bole serve`.
+bole push 127.0.0.1:9000 main                 # replicates main + its closure
+bole push 127.0.0.1:9000 main release/1.0 --remote nodeB
+
+# On node A — fetch B's refs into refs/remotes/<remote>/… (never touches local
+# timelines).
+bole fetch 127.0.0.1:9000 --remote nodeB
+```
+
+Push is compare-and-swap on the peer's heads against A's remote-tracking refs,
+so a peer that moved since A last saw it rejects the push (non-fast-forward).
+A push into an approval-gated timeline is refused fail-closed unless the policy
+is deterministic across replicas.

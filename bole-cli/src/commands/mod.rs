@@ -23,6 +23,8 @@ pub mod approver;
 pub mod policy;
 // bole-6m6f
 pub mod board;
+// bole-cg06
+pub mod sync;
 // bole-xwqv
 pub mod pr;
 // bole-6i1

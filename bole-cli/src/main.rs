@@ -181,6 +181,31 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::node::Cmd,
     },
+    // bole-cg06
+    /// Serve this repository for fetch/push over TCP (native sync).
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        listen: String,
+        #[arg(long)]
+        once: bool,
+        #[arg(long)]
+        addr_file: Option<std::path::PathBuf>,
+    },
+    // bole-cg06
+    /// Push local timelines to a peer's `bole serve`.
+    Push {
+        addr: String,
+        timelines: Vec<String>,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
+    // bole-cg06
+    /// Fetch a peer's refs into remote-tracking refs.
+    Fetch {
+        addr: String,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Pull peers and search the local discovery index.
     Discover {
         #[command(subcommand)]
@@ -323,6 +348,21 @@ async fn run() -> Result<()> {
             commands::trust::run(&ctx, &out, cmd).await
         }
         // bole-1n7
+        // bole-cg06
+        Command::Serve { listen, once, addr_file } => {
+            let ctx = open().await?;
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Serve { listen, once, addr_file }).await
+        }
+        // bole-cg06
+        Command::Push { addr, timelines, remote } => {
+            let ctx = open().await?;
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Push { addr, timelines, remote }).await
+        }
+        // bole-cg06
+        Command::Fetch { addr, remote } => {
+            let ctx = open().await?;
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Fetch { addr, remote }).await
+        }
         Command::Node { cmd } => {
             let ctx = open().await?;
             commands::node::run(&ctx, &out, cmd).await
