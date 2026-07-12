@@ -80,6 +80,7 @@ request that presents no credential at all resolves to `Anonymous`.
 | GET | `/v1/profiles/{key}` | A published `Profile` by 64-hex collab key, after signature verification. |
 | GET | `/v1/proposals` | Open change proposals (PRs), verified fail-closed. |
 | GET | `/v1/proposals/{id}` | One proposal by object id, with its review-comment thread; 404 if unknown. |
+| GET | `/v1/boards/{board}` | A discussion board's posts (each with its `parent` for threading), verified fail-closed. |
 
 All endpoints except `/v1/status` run through the `RequestAuth` extractor and
 thus require (or default to) a resolved principal; `/v1/status` does not

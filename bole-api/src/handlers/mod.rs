@@ -10,3 +10,5 @@ pub mod profiles;
 pub mod repos;
 // bole-4cnv
 pub mod proposals;
+// bole-p0lo
+pub mod boards;
