@@ -24,10 +24,10 @@ use crate::object::ObjectId;
 use crate::refs::{Ref, RefName, Tag};
 use crate::repo::Repository;
 use crate::sync::negotiate;
-use crate::sync::session::{advertise, apply_push_ops, build_pack};
+use crate::sync::session::{advertise, apply_push_ops, build_pack, serve_fetch};
 use crate::sync::transport::Conn;
 use crate::sync::wire::{
-    CapSet, Message, RefApplyStatus, RefStatusEntry, RefUpdateOp, PROTO_VERSION,
+    CapSet, Intent, Message, RefApplyStatus, RefStatusEntry, RefUpdateOp, PROTO_VERSION,
 };
 use crate::store::pack::decode_pack;
 
@@ -78,6 +78,32 @@ fn verify_proof(owner: &[u8; 32], nonce: &[u8; 32], sig: &[u8]) -> bool {
     vk.verify(&challenge_message(nonce), &ed25519_dalek::Signature::from_bytes(&bytes)).is_ok()
 }
 
+// bole-odh6
+/// Hub responder entry point: dispatch on the first message. `HubHello` begins
+/// an owner-authenticated push (writes fenced to the owner's namespace); a
+/// `Hello` with a fetch/clone intent is a *public read* of the hub's repos
+/// (hub metadata is public-by-default — see bole-dqwr). A plain (unauthed)
+/// push is refused: writes on a hub always require `--as`.
+pub async fn serve_hub(conn: &mut dyn Conn, repo: &Repository) -> Result<()> {
+    match conn.recv().await? {
+        Message::HubHello { owner } => serve_authenticated_push(conn, repo, owner).await,
+        Message::Hello { intent: Intent::Fetch | Intent::Clone, .. } => {
+            // Public read: everything on the hub is world-readable, so a
+            // read-only privileged accessor advertises every owner's repos and
+            // the client filters to the one it asked for (see `hub_fetch`).
+            serve_fetch(conn, repo, &Accessor::privileged()).await
+        }
+        Message::Hello { intent: Intent::Push, .. } => {
+            conn.send(&Message::Error("hub requires authenticated push (use --as)".into())).await?;
+            Err(Error::AccessDenied("hub: plain push not allowed; authenticate with --as".into()))
+        }
+        _ => {
+            conn.send(&Message::Error("expected HubHello or Hello".into())).await?;
+            Err(Error::Storage("hub: expected HubHello or Hello".into()))
+        }
+    }
+}
+
 // bole-1x2v
 /// Hub responder: authenticate the pusher, then accept a push scoped to their
 /// namespace. Runs the same object-transfer + `apply_push_ops` as the ordinary
@@ -92,6 +118,12 @@ pub async fn serve_hub_push(conn: &mut dyn Conn, repo: &Repository) -> Result<()
             return Err(Error::Storage("hub: expected HubHello".into()));
         }
     };
+    serve_authenticated_push(conn, repo, owner).await
+}
+
+// bole-odh6: the push flow after the `HubHello` has been received (owner known).
+// Split out so `serve_hub` can dispatch fetch vs. push on the first message.
+async fn serve_authenticated_push(conn: &mut dyn Conn, repo: &Repository, owner: [u8; 32]) -> Result<()> {
     // 2. Challenge with a fresh nonce.
     let mut nonce = [0u8; 32];
     OsRng.fill_bytes(&mut nonce);
@@ -204,6 +236,68 @@ pub async fn hub_push(
     }
     tx.commit()?;
     Ok(results)
+}
+
+// bole-odh6
+/// Hub pull initiator: fetch one `owner`/`repo_name` from a hub into
+/// remote-tracking refs. Public read — no auth. The hub advertises every
+/// owner's repos, so this filters the adverts to `refs/users/<owner-fp>/<repo>/`
+/// and only wants (and lands the closure of) that repo's heads, leaving other
+/// owners' repos untouched. Errors if the hub hosts no such repo. Returns the
+/// tracking refs it set: `refs/remotes/<remote_name>/refs/users/<fp>/<repo>/…`.
+pub async fn hub_fetch(
+    conn: &mut dyn Conn,
+    local: &Repository,
+    owner: &[u8; 32],
+    repo_name: &str,
+    remote_name: &str,
+) -> Result<Vec<(RefName, ObjectId)>> {
+    let prefix = format!("{}{}/", user_namespace(owner), repo_name); // refs/users/<fp>/<repo>/
+    conn.send(&Message::Hello {
+        proto_min: PROTO_VERSION,
+        proto_max: PROTO_VERSION,
+        caps: CapSet::EMPTY,
+        intent: Intent::Fetch,
+        client_nonce: None,
+    })
+    .await?;
+    let refs = match conn.recv().await? {
+        Message::Welcome { refs, .. } => refs,
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("hub: expected Welcome".into())),
+    };
+    // Only the requested repo's refs — the fence that keeps a "pull my repo"
+    // from dragging down every other owner on the hub.
+    let wanted: Vec<_> = refs.into_iter().filter(|r| r.name.as_str().starts_with(&prefix)).collect();
+    if wanted.is_empty() {
+        // Drain the exchange so the server task ends cleanly, then report.
+        conn.send(&Message::HaveWant { want: vec![], have: vec![] }).await?;
+        let _ = conn.recv().await; // Pack
+        let _ = conn.recv().await; // Done
+        return Err(Error::Storage(format!("hub hosts no repo {repo_name} for that owner")));
+    }
+    let want: Vec<ObjectId> = wanted.iter().map(|r| r.target).collect();
+    let have: Vec<ObjectId> = local.objects.list().await?;
+    conn.send(&Message::HaveWant { want, have }).await?;
+    let pack = match conn.recv().await? {
+        Message::Pack(p) => p,
+        Message::Error(e) => return Err(Error::Storage(e)),
+        _ => return Err(Error::Storage("hub: expected Pack".into())),
+    };
+    let _done = conn.recv().await?; // Done
+    for (_id, canonical) in decode_pack(&pack)? {
+        local.objects.put_raw(&canonical).await?;
+    }
+    let mut tx = local.refs.transaction();
+    let mut tracked = Vec::new();
+    for r in &wanted {
+        let tref = RefName::new(format!("refs/remotes/{remote_name}/{}", r.name.as_str()))
+            .map_err(|e| Error::Storage(format!("bad tracking ref name: {e}")))?;
+        tx.set(tref.clone(), Ref::Tag(Tag { target: r.target, created_at: 0, message: None }));
+        tracked.push((tref, r.target));
+    }
+    tx.commit()?;
+    Ok(tracked)
 }
 
 #[cfg(test)]
@@ -329,5 +423,66 @@ mod tests {
         assert!(matches!(&results[0].status, RefApplyStatus::Denied(_)), "cross-namespace push refused: {:?}", results[0].status);
         let _ = Object::Snapshot; // silence unused import in some cfgs
         assert!(hub.refs.get_timeline(&victim).unwrap().is_none(), "victim namespace untouched");
+    }
+
+    // bole-odh6: seed a hub directly with `owner`'s repo (objects + timeline).
+    async fn seed_hub_repo(hub: &Repository, owner: &[u8; 32], repo_name: &str) -> (RefName, ObjectId) {
+        let fp = fingerprint(owner);
+        let tree = hub.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let head = hub
+            .objects
+            .put_snapshot(Snapshot { root: tree, parents: vec![], author: "o".into(), created_at: 0, message: "seed".into() })
+            .await
+            .unwrap();
+        let name = RefName::new(format!("refs/users/{fp}/{repo_name}/main")).unwrap();
+        hub.refs.create_timeline(name.clone(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        (name, head)
+    }
+
+    // bole-odh6: a puller fetches one owner/repo from the hub — public read, no
+    // auth — and gets ONLY that repo's refs+objects, not other owners'.
+    #[tokio::test]
+    async fn hub_pull_fetches_only_requested_repo() {
+        let owner_a = RepoSigner::from_seed([21u8; 32]).public_key();
+        let owner_b = RepoSigner::from_seed([22u8; 32]).public_key();
+        let hub = Repository::memory();
+        let (a_name, a_head) = seed_hub_repo(&hub, &owner_a, "dotfiles").await;
+        let (b_name, _b_head) = seed_hub_repo(&hub, &owner_b, "secret").await;
+
+        let hub = Arc::new(hub);
+        let hub2 = hub.clone();
+        let (mut ca, mut cb) = InProcessConn::pair();
+        let server = tokio::spawn(async move { serve_hub(&mut cb, &hub2).await });
+
+        let puller = Repository::memory();
+        let tracked = hub_fetch(&mut ca, &puller, &owner_a, "dotfiles", "hub").await.unwrap();
+        server.await.unwrap().unwrap();
+
+        // Exactly the requested repo's ref came back, and its object landed.
+        assert_eq!(tracked.len(), 1, "only the requested repo's ref: {tracked:?}");
+        assert_eq!(tracked[0].1, a_head);
+        assert!(puller.objects.get_raw(&a_head).await.unwrap().is_some(), "head object transferred");
+        let tref = RefName::new(format!("refs/remotes/hub/{}", a_name.as_str())).unwrap();
+        assert_eq!(puller.refs.get_tag(&tref).unwrap().unwrap().target, a_head, "tracking ref set");
+
+        // Owner B's repo must not have been pulled.
+        assert!(!tracked.iter().any(|(n, _)| n.as_str().contains(&fingerprint(&owner_b))), "leaked owner B: {tracked:?}");
+        let _ = b_name;
+    }
+
+    // bole-odh6: pulling a repo the hub doesn't host is an error, not a silent
+    // empty success.
+    #[tokio::test]
+    async fn hub_pull_unknown_repo_errors() {
+        let owner = RepoSigner::from_seed([23u8; 32]).public_key();
+        let hub = Arc::new(Repository::memory());
+        let hub2 = hub.clone();
+        let (mut ca, mut cb) = InProcessConn::pair();
+        let server = tokio::spawn(async move { serve_hub(&mut cb, &hub2).await });
+
+        let puller = Repository::memory();
+        let res = hub_fetch(&mut ca, &puller, &owner, "nope", "hub").await;
+        let _ = server.await;
+        assert!(res.is_err(), "pulling a missing repo must error, got {res:?}");
     }
 }

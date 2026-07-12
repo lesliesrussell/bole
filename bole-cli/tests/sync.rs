@@ -161,3 +161,61 @@ async fn hub_push_lands_in_owner_namespace() {
         client_head
     );
 }
+
+// bole-odh6
+/// bole serve --hub + push --as + pull: owner A pushes a repo, then a fresh
+/// puller pulls it back by `<owner-hex>/<repo>` — the full hub round-trip.
+#[tokio::test]
+async fn hub_pull_round_trips_a_pushed_repo() {
+    let hub = tempfile::tempdir().unwrap();
+    let pusher = tempfile::tempdir().unwrap();
+    let puller = tempfile::tempdir().unwrap();
+    assert!(bin().args(["init", "."]).current_dir(hub.path()).output().unwrap().status.success());
+    assert!(bin().args(["init", "."]).current_dir(puller.path()).output().unwrap().status.success());
+    let pushed_head = seed_main(pusher.path()).await;
+
+    let keyfile = pusher.path().join("owner.key");
+    std::fs::write(&keyfile, "ab".repeat(32)).unwrap(); // 0xab * 32
+    let owner = bole::RepoSigner::from_seed([0xabu8; 32]).public_key();
+    let owner_hex = bole::key_hex(&owner);
+    let fp = bole::collab::fingerprint(&owner);
+
+    // Long-lived hub (two connections: one push, one pull), killed at the end.
+    let addr_file = hub.path().join(".addr");
+    let mut serve = bin()
+        .args(["serve", "--hub", "--listen", "127.0.0.1:0", "--addr-file", addr_file.to_str().unwrap()])
+        .current_dir(hub.path())
+        .spawn()
+        .unwrap();
+    let addr = wait_for_addr(&addr_file);
+
+    // Push `grove` up.
+    let push = bin()
+        .args(["push", &addr, "grove:main", "--as", keyfile.to_str().unwrap(), "--json"])
+        .current_dir(pusher.path())
+        .output()
+        .unwrap();
+    assert!(push.status.success(), "hub push failed: {push:?}");
+
+    // Pull it back into the fresh puller by owner/repo.
+    let pull = bin()
+        .args(["pull", &addr, &format!("{owner_hex}/grove"), "--json"])
+        .current_dir(puller.path())
+        .output()
+        .unwrap();
+    assert!(pull.status.success(), "hub pull failed: {pull:?}");
+    let v: serde_json::Value = serde_json::from_slice(&pull.stdout).unwrap();
+    let tracked = v["tracked"].as_array().unwrap();
+    assert_eq!(tracked.len(), 1, "one repo timeline pulled: {v}");
+    assert_eq!(tracked[0]["target"].as_str().unwrap(), pushed_head, "pulled the pushed head");
+
+    serve.kill().unwrap();
+    let _ = serve.wait();
+
+    // The puller now tracks the repo at the pushed head, with the object present.
+    let puller_repo = Repository::disk(puller.path().join(".bole")).await.unwrap();
+    let tref = bole::RefName::new(format!("refs/remotes/origin/refs/users/{fp}/grove/main")).unwrap();
+    let target = puller_repo.refs.get_tag(&tref).unwrap().expect("tracking ref set").target;
+    assert_eq!(target.to_string(), pushed_head);
+    assert!(puller_repo.objects.get_raw(&target).await.unwrap().is_some(), "head object landed");
+}

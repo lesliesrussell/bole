@@ -62,6 +62,17 @@ pub enum Cmd {
         #[arg(long, default_value = "origin")]
         remote: String,
     },
+    // bole-odh6
+    /// Pull one owner's repo from a hub into remote-tracking refs (public read).
+    Pull {
+        /// Hub address, e.g. `127.0.0.1:9200`.
+        addr: String,
+        /// `<owner-hex>/<repo>` — the 64-hex owner key and the repo name to pull.
+        spec: String,
+        /// Name for the local remote-tracking refs.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
 }
 
 fn dial_addr(addr: &str) -> &str {
@@ -93,10 +104,11 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             loop {
                 let result = if hub {
                     // bole-1x2v: owner-authenticated push into per-owner namespaces.
+                    // bole-odh6: same port also serves public reads (pull).
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             let mut conn = bole::sync::transport::TcpConn::new(stream);
-                            bole::sync::hub::serve_hub_push(&mut conn, &ctx.repo).await
+                            bole::sync::hub::serve_hub(&mut conn, &ctx.repo).await
                         }
                         Err(e) => Err(bole::Error::Io(e)),
                     }
@@ -186,6 +198,27 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             out.emit(
                 || format!("fetched {} ref(s) from {dialed}", tracked.len()),
                 || serde_json::json!({ "fetched_from": dialed, "tracked": rows }),
+            );
+            Ok(())
+        }
+        // bole-odh6
+        Cmd::Pull { addr, spec, remote } => {
+            let (owner_hex, repo_name) = spec
+                .split_once('/')
+                .ok_or_else(|| anyhow::anyhow!("spec must be <owner-hex>/<repo>, got {spec:?}"))?;
+            let owner = key::parse_hex_32(owner_hex)?;
+            let dialed = dial_addr(&addr).to_string();
+            let mut conn = TcpConn::connect(&dialed)
+                .await
+                .with_context(|| format!("connecting to {dialed}"))?;
+            let tracked = bole::sync::hub::hub_fetch(&mut conn, &ctx.repo, &owner, repo_name, &remote).await?;
+            let rows: Vec<_> = tracked
+                .iter()
+                .map(|(name, id)| serde_json::json!({ "ref": name.as_str(), "target": id.to_string() }))
+                .collect();
+            out.emit(
+                || format!("pulled {} ref(s) for {repo_name} from {dialed}", tracked.len()),
+                || serde_json::json!({ "pulled_from": dialed, "owner": owner_hex, "repo": repo_name, "tracked": rows }),
             );
             Ok(())
         }
