@@ -23,6 +23,8 @@ pub fn build_router(state: AppState) -> Router {
         // bole-wy0f
         .route("/v1/users/{key}/repos", get(handlers::repos::list_for_owner))
         .route("/v1/repos/{owner}/{name}", get(handlers::repos::get_one))
+        // bole-3kiq
+        .route("/v1/repos/{owner}/{name}/tree", get(handlers::repos::get_tree))
         // bole-fmvq
         .route("/v1/users", get(handlers::profiles::list_users))
         .route("/v1/profiles/{key}", get(handlers::profiles::get_profile))

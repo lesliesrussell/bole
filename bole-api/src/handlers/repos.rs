@@ -73,3 +73,65 @@ pub async fn get_one(
         .ok_or_else(|| ApiError::not_found("no such repo"))?;
     Ok(Json(repo_json(&rec)))
 }
+
+// bole-3kiq
+/// `GET /v1/repos/{owner}/{name}/tree` — the repo's content view: the head
+/// snapshot of its `main` timeline (or the first timeline it has), the visible
+/// file paths, and the rendered-ready README.md text. Powers Grove's repo page
+/// (README above the fold, files below). 404 if the repo record is absent.
+pub async fn get_tree(
+    State(state): State<AppState>,
+    ApiPath((owner_hex, name)): ApiPath<(String, String)>,
+    auth: RequestAuth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let owner = parse_key(&owner_hex)?;
+    let rec = state
+        .repo
+        .get_repo(&owner, &name)
+        .await?
+        .ok_or_else(|| ApiError::not_found("no such repo"))?;
+
+    // Resolve the repo's timeline: prefer `main`, else the first one it has.
+    let prefix = format!("refs/users/{}/{}/", bole::fingerprint(&owner), name);
+    let timelines = state.repo.refs.list(&prefix)?;
+    let chosen = bole::RefName::new(format!("{prefix}main"))
+        .ok()
+        .filter(|m| timelines.iter().any(|t| t == m))
+        .or_else(|| timelines.first().cloned());
+    let (timeline_label, head) = match chosen.as_ref() {
+        Some(rn) => match state.repo.refs.get_timeline(rn)? {
+            Some(t) => (rn.as_str().strip_prefix(&prefix).unwrap_or("").to_string(), Some(t.head)),
+            None => (String::new(), None),
+        },
+        None => (String::new(), None),
+    };
+
+    // Files + README from the head snapshot, ACL-filtered by the caller.
+    let mut files: Vec<String> = Vec::new();
+    let mut readme: Option<String> = None;
+    if let Some(h) = head {
+        if let Some(f) = state.repo.get_snapshot_filtered(h, &auth.accessor).await? {
+            files = f.visible_paths.keys().cloned().collect();
+            files.sort();
+            // Root README.md (case-insensitive); its bytes if valid UTF-8.
+            if let Some(rp) = files.iter().find(|p| p.eq_ignore_ascii_case("README.md")) {
+                if let Some(blob_id) = f.visible_paths.get(rp) {
+                    if let Some(bole::Object::Blob(b)) = state.repo.objects.get(blob_id).await? {
+                        readme = String::from_utf8(b.data.to_vec()).ok();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "name": rec.name,
+        "description": rec.description,
+        "owner": bole::key_hex(&rec.owner),
+        "seq": rec.seq,
+        "timeline": timeline_label,
+        "head": head.map(|h| h.to_string()),
+        "files": files,
+        "readme": readme,
+    })))
+}
