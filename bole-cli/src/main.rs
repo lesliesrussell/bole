@@ -212,6 +212,15 @@ enum Command {
         #[arg(long, default_value = "origin")]
         remote: String,
     },
+    // bole-odh6
+    /// Pull one owner's repo from a hub into remote-tracking refs (public read).
+    Pull {
+        addr: String,
+        /// `<owner-hex>/<repo>` — the 64-hex owner key and the repo name.
+        spec: String,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Pull peers and search the local discovery index.
     Discover {
         #[command(subcommand)]
@@ -368,6 +377,11 @@ async fn run() -> Result<()> {
         Command::Fetch { addr, remote } => {
             let ctx = open().await?;
             commands::sync::run(&ctx, &out, commands::sync::Cmd::Fetch { addr, remote }).await
+        }
+        // bole-odh6
+        Command::Pull { addr, spec, remote } => {
+            let ctx = open().await?;
+            commands::sync::run(&ctx, &out, commands::sync::Cmd::Pull { addr, spec, remote }).await
         }
         Command::Node { cmd } => {
             let ctx = open().await?;

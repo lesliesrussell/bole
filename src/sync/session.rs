@@ -37,7 +37,8 @@ pub async fn serve(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) 
     }
 }
 
-async fn serve_fetch(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) -> Result<()> {
+// bole-odh6: reused by the hub read path (public fetch of a user's repos).
+pub(crate) async fn serve_fetch(conn: &mut dyn Conn, repo: &Repository, accessor: &Accessor) -> Result<()> {
     let refs = advertise(repo, accessor)?;
     // bole-yl2: the objects we may serve are rooted only at refs this accessor is
     // authorized to read. Capture that set BEFORE trusting the client's `want`.
