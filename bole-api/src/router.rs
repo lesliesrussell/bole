@@ -24,6 +24,8 @@ pub fn build_router(state: AppState) -> Router {
         // bole-4cnv
         .route("/v1/proposals", get(handlers::proposals::list))
         .route("/v1/proposals/{id}", get(handlers::proposals::get_one))
+        // bole-p0lo
+        .route("/v1/boards/{board}", get(handlers::boards::get_board))
         // bole-rvyl: axum's defaults for unmatched routes (bare 404) and wrong
         // methods (bare 405) are the only non-JSON error surfaces; every error
         // must speak the envelope.

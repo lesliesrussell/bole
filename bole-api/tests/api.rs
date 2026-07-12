@@ -1036,3 +1036,26 @@ async fn proposals_list_and_get_with_comments() {
     let json = body_json(resp).await;
     assert_eq!(json["error"]["code"], "not_found");
 }
+
+// bole-p0lo
+#[tokio::test]
+async fn board_endpoint_returns_threaded_posts() {
+    use bole::board::BoardSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signer = BoardSigner::from_seed([55u8; 32]);
+    let root = state.repo.publish_post(&signer.sign_post("general", "hi", None, 1)).await.unwrap();
+    state.repo.publish_post(&signer.sign_post("general", "reply", Some(root), 2)).await.unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/boards/general").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["board"], "general");
+    let posts = json["posts"].as_array().unwrap();
+    assert_eq!(posts.len(), 2);
+    assert!(posts.iter().any(|p| p["body"] == "hi" && p["parent"].is_null()));
+    assert!(posts.iter().any(|p| p["body"] == "reply" && p["parent"] == root.to_string()));
+}
