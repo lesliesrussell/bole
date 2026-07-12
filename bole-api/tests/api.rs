@@ -1133,3 +1133,83 @@ async fn profile_bundle_endpoint_contract_and_acl() {
     assert!(j2["trust"]["edges"].as_array().unwrap().is_empty());
     assert!(j2["timelines"].as_array().unwrap().is_empty());
 }
+
+// bole-wy0f
+#[tokio::test]
+async fn users_repos_endpoint_lists_owner_repos() {
+    use bole::reporecord::RepoSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signer = RepoSigner::from_seed([88u8; 32]);
+    let key_hex = bole::key_hex(&signer.public_key());
+    state.repo.publish_repo(&signer.sign_repo("grove", "the hub", 1)).await.unwrap();
+    state.repo.publish_repo(&signer.sign_repo("dotfiles", "config", 1)).await.unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/users/{key_hex}/repos")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let names: Vec<&str> = json["repos"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["dotfiles", "grove"], "lists the owner's repos, sorted");
+    assert_eq!(json["repos"][0]["description"], "config");
+    assert_eq!(json["repos"][0]["owner"], key_hex);
+    assert_eq!(json["owner"], key_hex);
+}
+
+// bole-wy0f
+#[tokio::test]
+async fn users_repos_endpoint_empty_for_unknown_key() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let key_hex = "ab".repeat(32);
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/users/{key_hex}/repos")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["repos"].as_array().unwrap().is_empty(), "no repos for an unknown key");
+}
+
+// bole-wy0f
+#[tokio::test]
+async fn repo_endpoint_returns_one_record_or_404() {
+    use bole::reporecord::RepoSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signer = RepoSigner::from_seed([89u8; 32]);
+    let key_hex = bole::key_hex(&signer.public_key());
+    state.repo.publish_repo(&signer.sign_repo("grove", "the hub", 3)).await.unwrap();
+    let app = build_router(state);
+
+    let ok = app
+        .clone()
+        .oneshot(Request::builder().uri(format!("/v1/repos/{key_hex}/grove")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let json = body_json(ok).await;
+    assert_eq!(json["name"], "grove");
+    assert_eq!(json["description"], "the hub");
+    assert_eq!(json["owner"], key_hex);
+    assert_eq!(json["seq"], 3);
+
+    let missing = app
+        .oneshot(Request::builder().uri(format!("/v1/repos/{key_hex}/nope")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND, "unknown repo is a 404");
+}
+
+// bole-wy0f
+#[tokio::test]
+async fn repo_endpoint_rejects_bad_key() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/repos/not-hex/grove").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "a non-hex owner is a 400");
+}
