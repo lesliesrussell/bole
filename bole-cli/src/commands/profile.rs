@@ -133,13 +133,18 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                 "author": t.author,
                 "created_at": t.created_at,
             })).collect();
+            // bole-x23l
+            let repos_json: Vec<_> = b.repos.iter().map(|r| serde_json::json!({
+                "name": r.name, "description": r.description, "seq": r.seq,
+            })).collect();
             let bundle_key = key::hex32(&b.key);
             let is_local = b.is_local;
             out.emit(
                 || format!(
-                    "{} [{}] {} edges, {} timelines",
+                    "{} [{}] {} repos, {} edges, {} timelines",
                     bundle_key,
                     if is_local { "local" } else { "peer" },
+                    repos_json.len(),
                     edges_json.len(),
                     timelines_json.len(),
                 ),
@@ -147,6 +152,7 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
                     "key": bundle_key,
                     "is_local": is_local,
                     "profile": profile_json,
+                    "repos": repos_json,
                     "trust": { "edges": edges_json },
                     "timelines": timelines_json,
                 }),
