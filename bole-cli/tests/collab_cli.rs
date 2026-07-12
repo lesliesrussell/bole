@@ -552,3 +552,36 @@ fn cli_pr_create_list_show() {
     let bad = run(w, &["pr", "show", &"00".repeat(32)], Some(&seed));
     assert!(!bad.status.success(), "unknown proposal id must error");
 }
+
+// bole-6m6f
+#[test]
+fn cli_board_post_reply_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let w = tmp.path();
+    ok(w, &["init", "."], None);
+    let seed = "f4".repeat(32);
+
+    // Post a top-level message.
+    let posted = ok(w, &["board", "post", "general", "--body", "hello world", "--json"], Some(&seed));
+    let pv: serde_json::Value = serde_json::from_slice(&posted.stdout).unwrap();
+    assert_eq!(pv["board"], "general");
+    let pid = pv["id"].as_str().unwrap().to_string();
+
+    // Reply to it (threads under the same board).
+    let replied = ok(w, &["board", "reply", &pid, "--body", "nice", "--json"], Some(&seed));
+    let rv: serde_json::Value = serde_json::from_slice(&replied.stdout).unwrap();
+    assert_eq!(rv["board"], "general");
+    assert_eq!(rv["parent"], pid);
+
+    // List the board: two posts, the reply threaded to the parent.
+    let listed = ok(w, &["board", "list", "general", "--json"], Some(&seed));
+    let lv: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let rows = lv["posts"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|r| r["body"] == "hello world" && r["parent"].is_null()));
+    assert!(rows.iter().any(|r| r["body"] == "nice" && r["parent"] == pid));
+
+    // Reply to an unknown post errors.
+    let bad = run(w, &["board", "reply", &"00".repeat(32), "--body", "x"], Some(&seed));
+    assert!(!bad.status.success(), "reply to unknown post must error");
+}
