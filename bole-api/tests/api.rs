@@ -1202,6 +1202,54 @@ async fn repo_endpoint_returns_one_record_or_404() {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND, "unknown repo is a 404");
 }
 
+// bole-3kiq
+#[tokio::test]
+async fn repo_tree_endpoint_lists_files_and_readme() {
+    use bole::reporecord::RepoSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let signer = RepoSigner::from_seed([51u8; 32]);
+    let owner = signer.public_key();
+    let owner_hex = bole::key_hex(&owner);
+    state.repo.publish_repo(&signer.sign_repo("site", "my site", 1)).await.unwrap();
+
+    // A pushed timeline at refs/users/<fp>/site/main with a README + a file.
+    let mut ws = state.repo.ephemeral_workspace();
+    ws.write("README.md", &b"# Site\nWelcome to my site."[..]);
+    ws.write("src/index.html", &b"<h1>hi</h1>"[..]);
+    let snap = ws.commit("dev", "init", 0).await.unwrap();
+    let fp = bole::fingerprint(&owner);
+    let tl = bole::RefName::new(format!("refs/users/{fp}/site/main")).unwrap();
+    state.repo.refs.create_timeline(tl, snap, bole::TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/repos/{owner_hex}/site/tree")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "site");
+    assert_eq!(json["head"], snap.to_string());
+    assert_eq!(json["timeline"], "main");
+    let files: Vec<&str> = json["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert!(files.contains(&"README.md"), "files list includes README: {files:?}");
+    assert!(files.contains(&"src/index.html"), "files list includes nested file: {files:?}");
+    assert!(json["readme"].as_str().unwrap().contains("Welcome to my site"), "README content returned");
+}
+
+// bole-3kiq
+#[tokio::test]
+async fn repo_tree_endpoint_404_for_unknown_repo() {
+    let (_dir, state) = state_with_temp_repo().await;
+    let key_hex = "ab".repeat(32);
+    let app = build_router(state);
+    let resp = app
+        .oneshot(Request::builder().uri(format!("/v1/repos/{key_hex}/ghost/tree")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // bole-fmvq
 #[tokio::test]
 async fn users_directory_lists_everyone() {
