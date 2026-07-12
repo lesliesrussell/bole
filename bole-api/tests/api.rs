@@ -1059,3 +1059,52 @@ async fn board_endpoint_returns_threaded_posts() {
     assert!(posts.iter().any(|p| p["body"] == "hi" && p["parent"].is_null()));
     assert!(posts.iter().any(|p| p["body"] == "reply" && p["parent"] == root.to_string()));
 }
+
+// bole-jgjt
+#[tokio::test]
+async fn profile_bundle_endpoint_contract_and_acl() {
+    use bole::CollabSigner;
+    let (_dir, state) = state_with_temp_repo().await;
+    let me = CollabSigner::from_seed([71u8; 32]);
+    let peer = CollabSigner::from_seed([72u8; 32]);
+    let key_hex = bole::key_hex(&me.public_key());
+
+    // Own identity: profile + a follow out-edge + a public and a protected timeline.
+    state.repo.publish_profile(&me.sign_profile("Me".into(), "hi".into(), vec![], vec![], 1)).await.unwrap();
+    state.repo.publish_edge(&me.sign_edge(peer.public_key(), bole::TrustKind::Follow, None, 1)).await.unwrap();
+    let snap = seed_snapshot_and_timeline(&state.repo).await; // public "main"
+    state.repo.acls.set_timeline_acl(bole::TimelineAcl { pattern: "secret/**".into() }).unwrap();
+    state.repo.refs.create_timeline(
+        bole::RefName::new("secret/x").unwrap(), snap, bole::TimelinePolicy::Unrestricted, 0, "persistent".into(), None,
+    ).unwrap();
+
+    let app = build_router(state);
+
+    // Anonymous caller: bundle present; protected timeline filtered out.
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(format!("/v1/profiles/{key_hex}/bundle")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["is_local"], true);
+    assert_eq!(json["profile"]["display_name"], "Me");
+    assert!(json["trust"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "follow"));
+    let names: Vec<&str> = json["timelines"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"main"), "public timeline present: {names:?}");
+    assert!(!names.contains(&"secret/x"), "protected timeline must not leak to an anonymous caller: {names:?}");
+
+    // Unknown key: null/empty contract, is_local:false.
+    let ghost = "d3".repeat(32);
+    let resp2 = app
+        .oneshot(Request::builder().uri(format!("/v1/profiles/{ghost}/bundle")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let j2 = body_json(resp2).await;
+    assert_eq!(j2["is_local"], false);
+    assert_eq!(j2["profile"], serde_json::Value::Null);
+    assert!(j2["trust"]["edges"].as_array().unwrap().is_empty());
+    assert!(j2["timelines"].as_array().unwrap().is_empty());
+}

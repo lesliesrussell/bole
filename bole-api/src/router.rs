@@ -21,6 +21,8 @@ pub fn build_router(state: AppState) -> Router {
         // bole-3xj5
         .route("/v1/repos", get(handlers::repos::list))
         .route("/v1/profiles/{key}", get(handlers::profiles::get_profile))
+        // bole-jgjt
+        .route("/v1/profiles/{key}/bundle", get(handlers::profiles::get_bundle))
         // bole-4cnv
         .route("/v1/proposals", get(handlers::proposals::list))
         .route("/v1/proposals/{id}", get(handlers::proposals::get_one))
