@@ -164,6 +164,12 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::pr::Cmd,
     },
+    // bole-6m6f
+    /// Post to, list, and reply on discussion boards.
+    Board {
+        #[command(subcommand)]
+        cmd: commands::board::Cmd,
+    },
     /// Author/inspect this node's trust edges.
     Trust {
         #[command(subcommand)]
@@ -306,6 +312,11 @@ async fn run() -> Result<()> {
         Command::Pr { cmd } => {
             let ctx = open().await?;
             commands::pr::run(&ctx, &out, cmd).await
+        }
+        // bole-6m6f
+        Command::Board { cmd } => {
+            let ctx = open().await?;
+            commands::board::run(&ctx, &out, cmd).await
         }
         Command::Trust { cmd } => {
             let ctx = open().await?;
