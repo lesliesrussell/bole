@@ -12,6 +12,26 @@ use crate::auth::RequestAuth;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+// bole-fmvq
+/// `GET /v1/users` — the public user directory: everyone who has published a
+/// profile or announced a repo on this hub, with their display name and repo
+/// count. Powers Grove's browsable landing page.
+pub async fn list_users(
+    State(state): State<AppState>,
+    _auth: RequestAuth,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let users = state.repo.hub_users().await?;
+    let rows: Vec<_> = users
+        .iter()
+        .map(|u| json!({
+            "key": bole::key_hex(&u.key),
+            "display_name": u.display_name,
+            "repo_count": u.repo_count,
+        }))
+        .collect();
+    Ok(Json(json!({ "users": rows })))
+}
+
 pub async fn get_profile(
     State(state): State<AppState>,
     ApiPath(key_hex): ApiPath<String>,
