@@ -2,6 +2,8 @@
 //! Subcommand implementations.
 
 pub mod init;
+// bole-q5rm
+pub mod account;
 pub mod status;
 // bole-w3a
 pub mod tag;

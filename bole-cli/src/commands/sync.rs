@@ -54,6 +54,16 @@ pub enum Cmd {
         /// refs/users/<your-fp>/<repo>/<timeline>.
         #[arg(long = "as")]
         as_keyfile: Option<PathBuf>,
+        // bole-q5rm
+        /// Publish/refresh your profile display name before pushing (needs --as).
+        #[arg(long)]
+        name: Option<String>,
+        /// Profile bio to publish alongside --name.
+        #[arg(long)]
+        bio: Option<String>,
+        /// Announce each pushed repo with this description before pushing.
+        #[arg(long)]
+        announce: Option<String>,
     },
     /// Fetch a peer's refs into remote-tracking refs (never touches local timelines).
     Fetch {
@@ -127,9 +137,12 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Push { addr, timelines, remote, as_keyfile } => {
+        Cmd::Push { addr, timelines, remote, as_keyfile, name, bio, announce } => {
             if timelines.is_empty() {
                 anyhow::bail!("give at least one timeline (or, with --as, a <repo>[:<timeline>]) to push");
+            }
+            if (name.is_some() || announce.is_some()) && as_keyfile.is_none() {
+                anyhow::bail!("--name/--announce publish your account, which only applies to a hub push (add --as <keyfile>)");
             }
             let dialed = dial_addr(&addr).to_string();
 
@@ -137,6 +150,25 @@ pub async fn run(ctx: &RepoContext, out: &Output, cmd: Cmd) -> Result<()> {
             if let Some(keyfile) = as_keyfile {
                 let seed = key::resolve("", Some(keyfile.as_path()))?;
                 let owner = bole::RepoSigner::from_seed(seed).public_key();
+
+                // bole-q5rm: fold identity + announce into the push so onboarding
+                // is one command. publish_* enforce monotonic seq, so we bump
+                // past any current record.
+                if let Some(display) = &name {
+                    let signer = bole::CollabSigner::from_seed(seed);
+                    let seq = ctx.repo.profile(&signer.public_key()).await?.map(|p| p.seq + 1).unwrap_or(1);
+                    let prof = signer.sign_profile(display.clone(), bio.clone().unwrap_or_default(), vec![], vec![], seq);
+                    ctx.repo.publish_profile(&prof).await?;
+                }
+                if let Some(desc) = &announce {
+                    let signer = bole::RepoSigner::from_seed(seed);
+                    for spec in &timelines {
+                        let repo_name = spec.split_once(':').map(|(r, _)| r).unwrap_or(spec.as_str());
+                        let seq = ctx.repo.get_repo(&signer.public_key(), repo_name).await?.map(|r| r.seq + 1).unwrap_or(1);
+                        ctx.repo.publish_repo(&signer.sign_repo(repo_name.to_string(), desc.clone(), seq)).await?;
+                    }
+                }
+
                 let ns = bole::sync::hub::user_namespace(&owner); // refs/users/<fp>/
                 let mut pushes: Vec<(bole::RefName, bole::RefName)> = Vec::new();
                 for spec in &timelines {

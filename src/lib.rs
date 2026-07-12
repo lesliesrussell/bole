@@ -112,6 +112,18 @@ pub use collab::discovery::rank_strangers_multi;
 pub(crate) mod codec;
 
 pub use error::{Error, Result};
+
+// bole-q5rm
+/// Generate a fresh random 32-byte ed25519 seed — the private half of a brand
+/// new account/identity. Feed it to [`RepoSigner::from_seed`] /
+/// [`CollabSigner::from_seed`]. The `bole account create` CLI writes this to a
+/// key file; it is the only secret a user needs to own repos on a hub.
+pub fn generate_seed() -> [u8; 32] {
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    seed
+}
 // bole-qj8
 pub use object::{Blob, EntryKind, Object, ObjectId, ParseObjectIdError, Snapshot, Tree, TreeEntry};
 // bole-hto
@@ -161,3 +173,21 @@ pub use sync::collab::serve_collab_tcp_once;
 pub use sync::collab::{collab_fetch_authenticated, query_relay_set};
 // bole-dxlj
 pub use sync::collab::{collab_search, collab_search_authenticated};
+
+// bole-q5rm
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    #[test]
+    fn generate_seed_is_random_and_usable() {
+        let a = generate_seed();
+        let b = generate_seed();
+        assert_ne!(a, b, "two fresh seeds must differ");
+        // A generated seed yields a valid, stable account id.
+        let key1 = RepoSigner::from_seed(a).public_key();
+        let key2 = RepoSigner::from_seed(a).public_key();
+        assert_eq!(key1, key2, "same seed -> same account id");
+        assert_eq!(key1.len(), 32);
+    }
+}

@@ -219,3 +219,60 @@ async fn hub_pull_round_trips_a_pushed_repo() {
     assert_eq!(target.to_string(), pushed_head);
     assert!(puller_repo.objects.get_raw(&target).await.unwrap().is_some(), "head object landed");
 }
+
+// bole-q5rm
+/// The one-command onboarding: `bole account create` mints a key, then a single
+/// `push --as --name --announce` publishes identity + repo and pushes — and the
+/// account shows up on the hub.
+#[tokio::test]
+async fn account_create_then_folded_push_populates_hub() {
+    let hub = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    assert!(bin().args(["init", "."]).current_dir(hub.path()).output().unwrap().status.success());
+    seed_main(user.path()).await; // gives the user a `main` timeline
+
+    // 1. create an account (a keypair) — no repo needed for this step.
+    let keyfile = user.path().join("acc.key");
+    let created = bin()
+        .args(["account", "create", "--out", keyfile.to_str().unwrap(), "--json"])
+        .current_dir(user.path())
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "account create failed: {created:?}");
+    let acc: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let owner_hex = acc["account"].as_str().unwrap().to_string();
+    assert_eq!(owner_hex.len(), 64, "account id is a 64-hex key");
+
+    // Hub serving (killed at the end).
+    let addr_file = hub.path().join(".addr");
+    let mut serve = bin()
+        .args(["serve", "--hub", "--listen", "127.0.0.1:0", "--addr-file", addr_file.to_str().unwrap()])
+        .current_dir(hub.path())
+        .spawn()
+        .unwrap();
+    let addr = wait_for_addr(&addr_file);
+
+    // 2. one push that also publishes the profile + repo record.
+    let push = bin()
+        .args(["push", &addr, "site:main", "--as", keyfile.to_str().unwrap(),
+               "--name", "Zed", "--announce", "my website", "--json"])
+        .current_dir(user.path())
+        .output()
+        .unwrap();
+    assert!(push.status.success(), "folded push failed: {push:?}");
+
+    serve.kill().unwrap();
+    let _ = serve.wait();
+
+    // The hub now hosts Zed's identity and repo listing.
+    let owner: [u8; 32] = {
+        let raw = hex::decode(&owner_hex).unwrap();
+        raw.try_into().unwrap()
+    };
+    let hub_repo = Repository::disk(hub.path().join(".bole")).await.unwrap();
+    let profile = hub_repo.profile(&owner).await.unwrap().expect("profile landed on hub");
+    assert_eq!(profile.display_name, "Zed");
+    let repos = hub_repo.list_repos(&owner).await.unwrap();
+    assert_eq!(repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), vec!["site"]);
+    assert_eq!(repos[0].description, "my website");
+}
