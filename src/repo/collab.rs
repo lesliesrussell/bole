@@ -67,6 +67,15 @@ pub struct ProfileBundle {
     pub repos: Vec<crate::reporecord::RepoRecord>,
 }
 
+// bole-fmvq
+/// One entry in the hub's public user directory.
+#[derive(Debug, Clone)]
+pub struct HubUser {
+    pub key: Key,
+    pub display_name: Option<String>,
+    pub repo_count: usize,
+}
+
 // bole-581
 /// One resolved discovery hit for the CLI: the canonical key, the author's
 /// self-asserted display name (a hint), the trust-graph-resolved petname (None
@@ -165,6 +174,40 @@ impl Repository {
         );
         tx.commit()?;
         Ok(id)
+    }
+
+    // bole-fmvq
+    /// The public user directory: every key known to this hub — anyone with a
+    /// published profile OR an announced repo — with their display name (if any)
+    /// and repo count. Sorted by key for a stable listing. Powers Grove's
+    /// browsable landing page (no 64-hex key needed to find people).
+    pub async fn hub_users(&self) -> Result<Vec<HubUser>> {
+        use std::collections::BTreeMap;
+        // Ordered by key so the directory is deterministic.
+        let mut names: BTreeMap<Key, Option<String>> = BTreeMap::new();
+        let mut counts: BTreeMap<Key, usize> = BTreeMap::new();
+        for p in self.public_profiles().await? {
+            let name = (!p.display_name.is_empty()).then(|| p.display_name.clone());
+            names.insert(p.key, name);
+        }
+        for name in self.refs.list(&format!("{COLLAB_PUBLIC_PREFIX}repo/"))? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                if let Some(Object::RepoRecord(r)) = self.objects.get(&tag.target).await? {
+                    if crate::reporecord::verify_repo(&r) {
+                        *counts.entry(r.owner).or_insert(0) += 1;
+                        names.entry(r.owner).or_insert(None);
+                    }
+                }
+            }
+        }
+        Ok(names
+            .into_iter()
+            .map(|(key, display_name)| HubUser {
+                key,
+                display_name,
+                repo_count: counts.get(&key).copied().unwrap_or(0),
+            })
+            .collect())
     }
 
     // bole-18p
@@ -880,5 +923,31 @@ mod tests {
         assert!(repo.remove_relay(&key).await.unwrap(), "removed an existing pin");
         assert!(!repo.remove_relay(&key).await.unwrap(), "removing absent pin returns false");
         assert!(repo.relays().await.unwrap().is_empty());
+    }
+
+    // bole-fmvq
+    #[tokio::test]
+    async fn hub_users_directory_unions_profiles_and_repo_owners() {
+        use crate::collab::CollabSigner;
+        use crate::reporecord::RepoSigner;
+        let repo = Repository::memory();
+
+        // Ann: profile + two repos. Bea: a repo but no profile.
+        let ann = CollabSigner::from_seed([1u8; 32]);
+        let ann_repos = RepoSigner::from_seed([1u8; 32]);
+        repo.publish_profile(&ann.sign_profile("Ann".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        repo.publish_repo(&ann_repos.sign_repo("site", "", 1)).await.unwrap();
+        repo.publish_repo(&ann_repos.sign_repo("dotfiles", "", 1)).await.unwrap();
+        let bea_repos = RepoSigner::from_seed([2u8; 32]);
+        repo.publish_repo(&bea_repos.sign_repo("tool", "", 1)).await.unwrap();
+
+        let users = repo.hub_users().await.unwrap();
+        assert_eq!(users.len(), 2, "both a profile-only-and-repos user and a repo-only user appear");
+        let ann_row = users.iter().find(|u| u.key == ann.public_key()).unwrap();
+        assert_eq!(ann_row.display_name.as_deref(), Some("Ann"));
+        assert_eq!(ann_row.repo_count, 2);
+        let bea_row = users.iter().find(|u| u.key == bea_repos.public_key()).unwrap();
+        assert_eq!(bea_row.display_name, None, "no profile -> no name");
+        assert_eq!(bea_row.repo_count, 1);
     }
 }

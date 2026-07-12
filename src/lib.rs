@@ -150,7 +150,7 @@ pub use repo::collab::{COLLAB_PUBLIC_PREFIX, COLLAB_REMOTES_PREFIX, COLLAB_SCOPE
 // bole-581
 pub use repo::collab::QueryHit;
 // bole-k93a
-pub use repo::collab::{ProfileBundle, TimelineView};
+pub use repo::collab::{HubUser, ProfileBundle, TimelineView};
 // bole-6bd
 pub use repo::git_projection::project_to_git;
 // bole-9by

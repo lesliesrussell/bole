@@ -1202,6 +1202,35 @@ async fn repo_endpoint_returns_one_record_or_404() {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND, "unknown repo is a 404");
 }
 
+// bole-fmvq
+#[tokio::test]
+async fn users_directory_lists_everyone() {
+    use bole::{CollabSigner, reporecord::RepoSigner};
+    let (_dir, state) = state_with_temp_repo().await;
+    let ann = CollabSigner::from_seed([41u8; 32]);
+    let ann_repos = RepoSigner::from_seed([41u8; 32]);
+    state.repo.publish_profile(&ann.sign_profile("Ann".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+    state.repo.publish_repo(&ann_repos.sign_repo("site", "", 1)).await.unwrap();
+    let bea_repos = RepoSigner::from_seed([42u8; 32]);
+    state.repo.publish_repo(&bea_repos.sign_repo("tool", "", 1)).await.unwrap();
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/users").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let users = json["users"].as_array().unwrap();
+    assert_eq!(users.len(), 2, "both users listed");
+    let ann_row = users.iter().find(|u| u["key"] == bole::key_hex(&ann.public_key())).unwrap();
+    assert_eq!(ann_row["display_name"], "Ann");
+    assert_eq!(ann_row["repo_count"], 1);
+    let bea_row = users.iter().find(|u| u["key"] == bole::key_hex(&bea_repos.public_key())).unwrap();
+    assert_eq!(bea_row["display_name"], serde_json::Value::Null, "no profile -> null name");
+    assert_eq!(bea_row["repo_count"], 1);
+}
+
 // bole-wy0f
 #[tokio::test]
 async fn repo_endpoint_rejects_bad_key() {
