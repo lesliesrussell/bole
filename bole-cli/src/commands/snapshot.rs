@@ -107,7 +107,27 @@ async fn create(
         .await
         .context("storing snapshot")?;
     // bole-1kz
-    let file_count = worktree::snapshot_blobs(&ctx.repo.objects, snap_id).await?.len();
+    let blobs = worktree::snapshot_blobs(&ctx.repo.objects, snap_id).await?;
+    let file_count = blobs.len();
+
+    // bole-ohi0: warn loudly if this snapshot captured a file that looks like a
+    // bare account seed (a private key). Publishing it would leak the account.
+    let mut seed_files: Vec<String> = Vec::new();
+    for (path, id) in &blobs {
+        if let Some(bole::Object::Blob(b)) = ctx.repo.objects.get(id).await? {
+            if bole::looks_like_private_seed(&b.data) {
+                seed_files.push(path.clone());
+            }
+        }
+    }
+    if !seed_files.is_empty() {
+        eprintln!("⚠️  bole: this snapshot includes files that look like private account seeds:");
+        for p in &seed_files {
+            eprintln!("      {p}");
+        }
+        eprintln!("      A seed is your private key — pushing it publishes it. Remove it or add it to .boleignore:");
+        eprintln!("      bole ignore add {}", seed_files.join(" "));
+    }
 
     // Advance the bound timeline so the snapshot is reachable, unless opted out.
     let advanced = match &state.current_timeline {

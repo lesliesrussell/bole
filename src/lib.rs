@@ -124,6 +124,28 @@ pub fn generate_seed() -> [u8; 32] {
     rand::rngs::OsRng.fill_bytes(&mut seed);
     seed
 }
+
+// bole-ohi0
+/// Heuristic: does this file content look like a bare ed25519 account seed —
+/// i.e. some line, on its own, is exactly 64 hex characters (a private key)?
+/// Used to warn before a snapshot accidentally publishes an account's seed. A
+/// hex string embedded in prose/code (`key = <hex>`) is NOT flagged; only a
+/// line that is nothing but the 32-byte hex. Bounded to small files (a key file
+/// is tiny) so it never scans large blobs.
+pub fn looks_like_private_seed(content: &[u8]) -> bool {
+    const MAX: usize = 4096;
+    if content.is_empty() || content.len() > MAX {
+        return false;
+    }
+    let text = match std::str::from_utf8(content) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    text.lines().any(|line| {
+        let l = line.trim();
+        l.len() == 64 && l.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
 // bole-qj8
 pub use object::{Blob, EntryKind, Object, ObjectId, ParseObjectIdError, Snapshot, Tree, TreeEntry};
 // bole-hto
@@ -189,5 +211,22 @@ mod seed_tests {
         let key2 = RepoSigner::from_seed(a).public_key();
         assert_eq!(key1, key2, "same seed -> same account id");
         assert_eq!(key1.len(), 32);
+    }
+
+    #[test]
+    fn looks_like_private_seed_flags_bare_hex_only() {
+        // A bare 64-hex seed (with or without trailing newline) is flagged.
+        let seed = key_hex(&generate_seed());
+        assert!(looks_like_private_seed(seed.as_bytes()));
+        assert!(looks_like_private_seed(format!("{seed}\n").as_bytes()));
+        assert!(looks_like_private_seed(format!("  {seed}  \n").as_bytes()));
+        assert!(looks_like_private_seed(seed.to_uppercase().as_bytes()));
+        // Not flagged: prose, code, a hex string that isn't 32 bytes, empty.
+        assert!(!looks_like_private_seed(b"# My README\nhello world"));
+        assert!(!looks_like_private_seed(b"deadbeef")); // too short
+        assert!(!looks_like_private_seed(b""));
+        assert!(!looks_like_private_seed(format!("key = {seed}").as_bytes())); // embedded, not bare
+        // A 64-hex line inside a larger file is still caught (a key file with a comment).
+        assert!(looks_like_private_seed(format!("# secret\n{seed}\n").as_bytes()));
     }
 }
