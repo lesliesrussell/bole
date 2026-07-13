@@ -64,6 +64,13 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::account::Cmd,
     },
+    // bole-wphx
+    /// Health-check the repo/hub store: seed leaks, integrity, hygiene.
+    Doctor {
+        /// Treat warnings as failures too (non-zero exit).
+        #[arg(long)]
+        strict: bool,
+    },
     /// Show the current repository, binding, and ref count.
     Status,
     // bole-w3a
@@ -290,6 +297,11 @@ async fn run() -> Result<()> {
         Command::Init { path } => commands::init::run(path, &out).await,
         // bole-q5rm: account creation needs no repository.
         Command::Account { cmd } => commands::account::run(&out, cmd).await,
+        // bole-wphx
+        Command::Doctor { strict } => {
+            let ctx = open().await?;
+            commands::doctor::run(&ctx, &out, strict).await
+        }
         Command::Status => {
             let ctx = open().await?;
             commands::status::run(&ctx, &out).await

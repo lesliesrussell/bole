@@ -4,6 +4,8 @@
 pub mod init;
 // bole-q5rm
 pub mod account;
+// bole-wphx
+pub mod doctor;
 pub mod status;
 // bole-w3a
 pub mod tag;

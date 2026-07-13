@@ -1118,6 +1118,30 @@ impl Repository {
     /// unlinks unreachable loose objects older than `grace_secs` (relative to the
     /// unix-seconds clock `now`). Returns the number of objects removed. Never
     /// removes a reachable object.
+    // bole-wphx
+    /// Scan every timeline's head snapshot for files whose content looks like a
+    /// bare account seed (a private key). Returns `(timeline ref, path)` for each
+    /// hit — the leak `bole doctor` reports. Covers a hub store too, since a
+    /// pushed repo is just a timeline under `refs/users/**`.
+    pub async fn scan_committed_seeds(&self) -> Result<Vec<(RefName, String)>> {
+        let mut hits = Vec::new();
+        for name in self.refs.list("")? {
+            let head = match self.refs.get(&name)? {
+                Some(Ref::Timeline(t)) => t.head,
+                _ => continue,
+            };
+            let paths = crate::repo::ephemeral::snapshot_paths(&self.objects, head).await?;
+            for (path, blob_id) in paths {
+                if let Some(Object::Blob(b)) = self.objects.get(&blob_id).await? {
+                    if crate::looks_like_private_seed(&b.data) {
+                        hits.push((name.clone(), path));
+                    }
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     pub async fn gc(&self, extra_roots: &[ObjectId], grace_secs: u64, now: u64) -> Result<u64> {
         let mut roots: Vec<ObjectId> = extra_roots.to_vec();
         for name in self.refs.list("")? {
@@ -1496,6 +1520,38 @@ mod tests {
         }).await.unwrap();
         let lca = repo.find_common_ancestor(tip_a, tip_b).await.unwrap();
         assert!(lca == Some(base));
+    }
+
+    // bole-wphx
+    #[tokio::test]
+    async fn scan_committed_seeds_flags_only_seed_blobs() {
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        let seed_hex = crate::key_hex(&crate::generate_seed());
+        let seed_blob = repo.objects.put_blob(Bytes::from(format!("{seed_hex}\n"))).await.unwrap();
+        let doc_blob = repo.objects.put_blob(Bytes::from("# README\nhi")).await.unwrap();
+
+        // A "leaky" timeline: contains a seed file + a doc.
+        let mut leaky = BTreeMap::new();
+        leaky.insert("id.key".to_string(), TreeEntry { id: seed_blob, kind: EntryKind::Blob });
+        leaky.insert("README.md".to_string(), TreeEntry { id: doc_blob, kind: EntryKind::Blob });
+        let leaky_tree = repo.objects.put_tree(leaky).await.unwrap();
+        let leaky_head = repo.objects.put_snapshot(Snapshot { root: leaky_tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("refs/users/aa/repo/main").unwrap(), leaky_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // A clean timeline: only a doc.
+        let clean_tree = repo.objects.put_tree({ let mut m = BTreeMap::new(); m.insert("README.md".to_string(), TreeEntry { id: doc_blob, kind: EntryKind::Blob }); m }).await.unwrap();
+        let clean_head = repo.objects.put_snapshot(Snapshot { root: clean_tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("clean").unwrap(), clean_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let hits = repo.scan_committed_seeds().await.unwrap();
+        assert_eq!(hits.len(), 1, "only the seed file is flagged: {hits:?}");
+        assert_eq!(hits[0].0.as_str(), "refs/users/aa/repo/main");
+        assert_eq!(hits[0].1, "id.key");
     }
 
     #[tokio::test]
