@@ -434,6 +434,55 @@ impl<'a> DiskWorkspace<'a> {
         }
         Ok(out)
     }
+
+    // bole-wphx
+    /// Read-only scan for `bole doctor`: walk the working tree and return each
+    /// file whose content looks like a bare account seed, paired with whether
+    /// `.boleignore` already excludes it. Stores nothing. Ignored directories
+    /// are pruned (their contents can't be committed anyway); a seed file that
+    /// is NOT ignored is the real risk — it would be captured by the next
+    /// snapshot.
+    pub async fn scan_seed_files(&self) -> Result<Vec<(String, bool)>> {
+        let ignore = self.ignore_matcher();
+        let mut out = Vec::new();
+        let mut stack = vec![self.root.clone()];
+        while let Some(current) = stack.pop() {
+            let mut rd = tokio::fs::read_dir(&current).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let path = entry.path();
+                let ft = entry.file_type().await?;
+                if ft.is_symlink() {
+                    continue;
+                }
+                if ft.is_dir() {
+                    if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
+                        continue;
+                    }
+                    if ignore.matched(&path, true).is_ignore() {
+                        continue; // pruned: can't be committed
+                    }
+                    stack.push(path);
+                } else if ft.is_file() {
+                    if path.file_name().map(|n| n == REPO_DIR).unwrap_or(false) {
+                        continue;
+                    }
+                    // Only read small files (a seed file is tiny) to stay cheap.
+                    let meta = entry.metadata().await?;
+                    if meta.len() > 4096 {
+                        continue;
+                    }
+                    let bytes = tokio::fs::read(&path).await?;
+                    if crate::looks_like_private_seed(&bytes) {
+                        let ignored = ignore.matched(&path, false).is_ignore();
+                        let rel = path.strip_prefix(&self.root).unwrap().to_string_lossy().replace('\\', "/");
+                        out.push((rel, ignored));
+                    }
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
 }
 
 // bole-1kz
