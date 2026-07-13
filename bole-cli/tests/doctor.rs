@@ -15,17 +15,33 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
 
 const SEED: &str = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
 
-// A clean repo is all-clear and exits 0.
+// A clean repo whose .boleignore covers secrets is all-clear and exits 0.
 #[test]
 fn doctor_clean_repo_all_clear() {
     let dir = tempfile::tempdir().unwrap();
     assert!(run(dir.path(), &["init", "."]).status.success());
     std::fs::write(dir.path().join("README.md"), "# hi").unwrap();
+    // Cover the secret globs so the boleignore check is happy.
+    assert!(run(dir.path(), &["ignore", "add", "*.key", "*.pem", "*.seed", "id_rsa", ".env"]).status.success());
     let out = run(dir.path(), &["doctor", "--json"]);
     assert!(out.status.success(), "clean repo should exit 0: {out:?}");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["errors"], 0);
-    assert_eq!(v["warnings"], 0);
+    assert_eq!(v["warnings"], 0, "expected no warnings: {v}");
+}
+
+// A repo with no .boleignore warns about it (but doesn't fail exit).
+#[test]
+fn doctor_warns_when_boleignore_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(run(dir.path(), &["init", "."]).status.success());
+    std::fs::write(dir.path().join("README.md"), "# hi").unwrap();
+    let out = run(dir.path(), &["doctor", "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let has = v["checks"].as_array().unwrap().iter().any(|c|
+        c["check"] == "boleignore" && c["severity"] == "warn");
+    assert!(has, "missing .boleignore is warned: {v}");
 }
 
 // A seed sitting in the working tree (unignored) is a WARN, exit still 0 —
@@ -39,7 +55,6 @@ fn doctor_flags_worktree_seed_as_warning() {
     let out = run(dir.path(), &["doctor", "--json"]);
     assert!(out.status.success(), "warning alone should not fail exit code");
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["warnings"], 1, "worktree seed is a warning: {v}");
     assert_eq!(v["errors"], 0);
     let has = v["checks"].as_array().unwrap().iter().any(|c|
         c["check"] == "worktree-seed" && c["severity"] == "warn" && c["message"].as_str().unwrap().contains("id.key"));
@@ -56,11 +71,13 @@ fn doctor_quiet_when_seed_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     assert!(run(dir.path(), &["init", "."]).status.success());
     std::fs::write(dir.path().join("id.key"), format!("{SEED}\n")).unwrap();
-    assert!(run(dir.path(), &["ignore", "add", "id.key"]).status.success());
+    // Cover the seed file AND the secret globs so doctor is fully quiet.
+    assert!(run(dir.path(), &["ignore", "add", "id.key", "*.key", "*.pem", "*.seed", "id_rsa", ".env"]).status.success());
 
     let out = run(dir.path(), &["doctor", "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["warnings"], 0, "ignored seed is not warned about: {v}");
+    let seed_warn = v["checks"].as_array().unwrap().iter().any(|c| c["check"] == "worktree-seed" && c["severity"] == "warn");
+    assert!(!seed_warn, "ignored seed is not warned about: {v}");
     assert_eq!(v["errors"], 0);
 }
 

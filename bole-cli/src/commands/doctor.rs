@@ -76,6 +76,31 @@ pub async fn run(ctx: &RepoContext, out: &Output, strict: bool) -> Result<()> {
         }
     }
 
+    // Check 1b — .boleignore coverage: warn if it's missing or doesn't cover
+    // the usual secret footguns, so a stray key/env file can't slip in.
+    const SECRET_GLOBS: &[&str] = &["*.key", "*.pem", "*.seed", "id_rsa", ".env"];
+    let ignore_path = ctx.work_dir.join(bole::IGNORE_FILE);
+    match std::fs::read_to_string(&ignore_path) {
+        Err(_) => diags.push(Diagnostic::warn(
+            "boleignore",
+            "no .boleignore in the working tree",
+            format!("create one covering secrets: bole ignore add {}", SECRET_GLOBS.join(" ")),
+        )),
+        Ok(body) => {
+            let lines: Vec<&str> = body.lines().map(|l| l.trim()).collect();
+            let missing: Vec<&str> = SECRET_GLOBS.iter().copied().filter(|g| !lines.contains(g)).collect();
+            if missing.is_empty() {
+                diags.push(Diagnostic::ok("boleignore", ".boleignore covers common secret patterns"));
+            } else {
+                diags.push(Diagnostic::warn(
+                    "boleignore",
+                    format!(".boleignore does not cover: {}", missing.join(", ")),
+                    format!("bole ignore add {}", missing.join(" ")),
+                ));
+            }
+        }
+    }
+
     // Check 2 — working-tree seeds: a seed-like file the next snapshot would
     // capture (not covered by .boleignore).
     let ws = DiskWorkspace::new(&ctx.repo, &ctx.work_dir);
@@ -109,6 +134,43 @@ pub async fn run(ctx: &RepoContext, out: &Output, strict: bool) -> Result<()> {
             format!("{} of {} objects failed to decode", bad.len(), ids.len()),
             "run `bole store fsck` for the list; the store may be corrupt",
         ));
+    }
+
+    // Check 4 — object-graph health: dangling refs and broken closures (a
+    // missing object in a timeline's history breaks fetch/materialize).
+    let (dangling, broken) = ctx.repo.scan_object_health().await?;
+    if dangling.is_empty() && broken.is_empty() {
+        diags.push(Diagnostic::ok("object-closure", "all refs resolve to complete object closures"));
+    } else {
+        for r in &dangling {
+            diags.push(Diagnostic::error(
+                "object-closure",
+                format!("ref '{}' points at a missing object", r.as_str()),
+                "the target object is absent — restore it or delete the ref (bole ref delete)",
+            ));
+        }
+        for (r, id) in &broken {
+            diags.push(Diagnostic::error(
+                "object-closure",
+                format!("timeline '{}' is missing object {id} in its history", r.as_str()),
+                "history is incomplete (fetch/materialize will fail) — re-fetch from a complete peer",
+            ));
+        }
+    }
+
+    // Check 5 — collab signatures: every published Profile/RepoRecord/TrustEdge
+    // must verify. A failure means a tampered or corrupt signed object.
+    let invalid = ctx.repo.scan_invalid_collab_signatures().await?;
+    if invalid.is_empty() {
+        diags.push(Diagnostic::ok("collab-signatures", "all published profiles, repos, and trust edges verify"));
+    } else {
+        for (r, kind) in &invalid {
+            diags.push(Diagnostic::error(
+                "collab-signatures",
+                format!("{kind} at '{}' fails signature verification", r.as_str()),
+                "a tampered/corrupt signed object — remove it (bole ref delete) and re-publish",
+            ));
+        }
     }
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
