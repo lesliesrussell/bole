@@ -101,3 +101,57 @@ fn doctor_committed_seed_is_error_and_fails() {
         c["check"] == "committed-seed" && c["severity"] == "error");
     assert!(has, "committed-seed error present: {v}");
 }
+
+fn check<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    v["checks"].as_array().unwrap().iter().find(|c| c["check"] == name).expect("check present")
+}
+
+// A fresh repo reports the new checks as clean (ok) and stays exit 0.
+#[test]
+fn doctor_new_checks_clean_on_fresh_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(run(dir.path(), &["init", "."]).status.success());
+    let home = tempfile::tempdir().unwrap();
+    let out = bin().args(["doctor", "--json"]).current_dir(dir.path()).env("HOME", home.path()).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for c in ["orphan-repo", "policy-pin", "bound-state", "key-perms", "gc-opportunity"] {
+        assert_eq!(check(&v, c)["severity"], "ok", "{c} should be ok on a fresh repo: {v}");
+    }
+}
+
+// A seed file with loose perms in ~/.bole/keys is a key-perms warning.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_world_readable_keyring_seed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    assert!(run(dir.path(), &["init", "."]).status.success());
+    let home = tempfile::tempdir().unwrap();
+    let keys = home.path().join(".bole").join("keys");
+    std::fs::create_dir_all(&keys).unwrap();
+    let kf = keys.join("acct.key");
+    std::fs::write(&kf, "a1".repeat(32)).unwrap();
+    std::fs::set_permissions(&kf, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let out = bin().args(["doctor", "--json"]).current_dir(dir.path()).env("HOME", home.path()).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let has = v["checks"].as_array().unwrap().iter().any(|c|
+        c["check"] == "key-perms" && c["severity"] == "warn" && c["message"].as_str().unwrap().contains("acct.key"));
+    assert!(has, "loose keyring seed is warned: {v}");
+}
+
+// gc-opportunity reports reclaimable objects after orphaning one.
+#[test]
+fn doctor_reports_gc_opportunity() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(run(dir.path(), &["init", "."]).status.success());
+    let home = tempfile::tempdir().unwrap();
+    // Store a blob that no ref points at → reclaimable garbage.
+    std::fs::write(dir.path().join("junk.txt"), "loose garbage").unwrap();
+    assert!(run(dir.path(), &["object", "put-blob", "junk.txt"]).status.success());
+
+    let out = bin().args(["doctor", "--json"]).current_dir(dir.path()).env("HOME", home.path()).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let msg = check(&v, "gc-opportunity")["message"].as_str().unwrap();
+    assert!(msg.contains("reclaimable"), "gc-opportunity reports reclaimable count: {msg}");
+}

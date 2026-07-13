@@ -9,6 +9,8 @@
 use anyhow::Result;
 use bole::DiskWorkspace;
 
+use crate::commands::env::ENVS_FILE;
+use crate::commands::secret::SECRETS_FILE;
 use crate::context::RepoContext;
 use crate::output::Output;
 
@@ -171,6 +173,124 @@ pub async fn run(ctx: &RepoContext, out: &Output, strict: bool) -> Result<()> {
                 "a tampered/corrupt signed object — remove it (bole ref delete) and re-publish",
             ));
         }
+    }
+
+    // Check 6 — orphan repos: an announced repo with no pushed content, or
+    // pushed content with no announced RepoRecord (a hub coherence issue).
+    let (announced_empty, unannounced) = ctx.repo.scan_orphan_repos().await?;
+    if announced_empty.is_empty() && unannounced.is_empty() {
+        diags.push(Diagnostic::ok("orphan-repo", "every announced repo has content and vice versa"));
+    } else {
+        for (fp, name) in &announced_empty {
+            diags.push(Diagnostic::warn(
+                "orphan-repo",
+                format!("repo '{name}' (owner {}…) is announced but has no pushed content", &fp[..fp.len().min(12)]),
+                "push a timeline for it, or unannounce the RepoRecord",
+            ));
+        }
+        for (fp, name) in &unannounced {
+            diags.push(Diagnostic::warn(
+                "orphan-repo",
+                format!("timeline for '{name}' (owner {}…) has content but no announced RepoRecord", &fp[..fp.len().min(12)]),
+                "announce it (bole repo announce) so it appears under the profile",
+            ));
+        }
+    }
+
+    // Check 7 — policy pin: if refs/policy/root exists it must load as a valid
+    // PolicyObject::Root (policy_root is fail-closed on a malformed pin).
+    match ctx.repo.policy_root().await {
+        Ok(Some(_)) => diags.push(Diagnostic::ok("policy-pin", "policy root is pinned and intact")),
+        Ok(None) => diags.push(Diagnostic::ok("policy-pin", "no policy root pinned")),
+        Err(e) => diags.push(Diagnostic::error(
+            "policy-pin",
+            format!("refs/policy/root is malformed: {e}"),
+            "repair or delete the pin (bole ref delete refs/policy/root) and re-adopt a valid policy",
+        )),
+    }
+
+    // Check 8 — bound state: the CLI's current timeline/actor still exist.
+    let state = ctx.load_state()?;
+    let mut bound_ok = true;
+    if let Some(tl) = &state.current_timeline {
+        let missing = crate::resolve::ref_name(tl)
+            .ok()
+            .map(|rn| ctx.repo.refs.get_timeline(&rn).map(|t| t.is_none()).unwrap_or(true))
+            .unwrap_or(true);
+        if missing {
+            bound_ok = false;
+            diags.push(Diagnostic::warn(
+                "bound-state",
+                format!("current timeline '{tl}' no longer exists"),
+                "bind a valid timeline (bole workspace open <timeline>) or clear it",
+            ));
+        }
+    }
+    if let Some(actor) = &state.current_actor {
+        if !crate::actor::load(ctx)?.actors.contains_key(actor) {
+            bound_ok = false;
+            diags.push(Diagnostic::warn(
+                "bound-state",
+                format!("current actor '{actor}' no longer exists"),
+                "bind a valid actor (bole actor use <name>) or clear it",
+            ));
+        }
+    }
+    if bound_ok {
+        diags.push(Diagnostic::ok("bound-state", "bound timeline/actor are valid"));
+    }
+
+    // Check 9 — key-file permissions: seeds in ~/.bole/keys should be 0600.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(home) = std::env::var_os("HOME") {
+            let keys = std::path::Path::new(&home).join(".bole").join("keys");
+            let mut loose = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&keys) {
+                for e in rd.flatten() {
+                    if e.path().extension().map(|x| x == "key").unwrap_or(false) {
+                        if let Ok(meta) = e.metadata() {
+                            if meta.permissions().mode() & 0o077 != 0 {
+                                loose.push(e.file_name().to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            if loose.is_empty() {
+                diags.push(Diagnostic::ok("key-perms", "account seeds in ~/.bole/keys are owner-only (or none present)"));
+            } else {
+                for f in &loose {
+                    diags.push(Diagnostic::warn(
+                        "key-perms",
+                        format!("~/.bole/keys/{f} is readable by others"),
+                        format!("chmod 600 ~/.bole/keys/{f}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check 10 — gc opportunity (informational): reclaimable object count.
+    let mut extra_roots = Vec::new();
+    for file in [SECRETS_FILE, ENVS_FILE] {
+        if let Ok(map) = crate::registry::load(ctx, file) {
+            for id_str in map.values() {
+                if let Ok(id) = id_str.parse::<bole::ObjectId>() {
+                    extra_roots.push(id);
+                }
+            }
+        }
+    }
+    let reclaimable = ctx.repo.unreachable_object_count(&extra_roots).await?;
+    if reclaimable == 0 {
+        diags.push(Diagnostic::ok("gc-opportunity", "no reclaimable objects"));
+    } else {
+        diags.push(Diagnostic::ok(
+            "gc-opportunity",
+            format!("{reclaimable} reclaimable object(s) — run `bole store gc` to reclaim space"),
+        ));
     }
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();

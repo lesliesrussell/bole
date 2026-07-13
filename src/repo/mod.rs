@@ -1200,6 +1200,25 @@ impl Repository {
         self.objects.sweep(&reachable, grace_secs, now).await
     }
 
+    // bole-wsth
+    /// How many stored objects are unreachable from the ref set + `extra_roots`
+    /// — i.e. reclaimable by `bole store gc`. A read-only dry count (sweeps
+    /// nothing). Pass the same `extra_roots` gc uses (CLI secret/env registries)
+    /// so registry-rooted objects aren't miscounted as garbage.
+    pub async fn unreachable_object_count(&self, extra_roots: &[ObjectId]) -> Result<usize> {
+        let mut roots: Vec<ObjectId> = extra_roots.to_vec();
+        for name in self.refs.list("")? {
+            match self.refs.get(&name)? {
+                Some(crate::refs::Ref::Timeline(t)) => roots.push(t.head),
+                Some(crate::refs::Ref::Tag(t)) => roots.push(t.target),
+                None => {}
+            }
+        }
+        let reachable = self.mark_reachable(&roots).await?;
+        let all = self.objects.list().await?;
+        Ok(all.iter().filter(|id| !reachable.contains(id)).count())
+    }
+
     // bole-81z
     /// The reachable object closure from `roots`, following the object-graph
     /// edges: Snapshot → {root, parents}, Tree → entry ids, EnvOverlay → secret
@@ -1565,6 +1584,30 @@ mod tests {
         }).await.unwrap();
         let lca = repo.find_common_ancestor(tip_a, tip_b).await.unwrap();
         assert!(lca == Some(base));
+    }
+
+    // bole-wsth
+    #[tokio::test]
+    async fn unreachable_object_count_counts_only_garbage() {
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        // Reachable: a timeline head + its tree.
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let head = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("main").unwrap(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        assert_eq!(repo.unreachable_object_count(&[]).await.unwrap(), 0, "all reachable");
+
+        // Two loose blobs referenced by nothing = garbage.
+        let g1 = repo.objects.put_blob(Bytes::from("garbage1")).await.unwrap();
+        repo.objects.put_blob(Bytes::from("garbage2")).await.unwrap();
+        assert_eq!(repo.unreachable_object_count(&[]).await.unwrap(), 2, "two unreachable blobs");
+
+        // Pinning one as an extra root drops the count.
+        assert_eq!(repo.unreachable_object_count(&[g1]).await.unwrap(), 1, "extra root protects one");
     }
 
     // bole-w8o5

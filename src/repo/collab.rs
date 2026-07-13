@@ -226,6 +226,39 @@ impl Repository {
         Ok(out)
     }
 
+    // bole-wsth
+    /// Orphan-repo scan for `bole doctor`. Returns `(announced_empty,
+    /// unannounced)` as `(owner-fingerprint, repo-name)` pairs: repos announced
+    /// via a RepoRecord that have no pushed timeline content, and pushed
+    /// `refs/users/**` timelines with no announced RepoRecord. Both are keyed by
+    /// fingerprint, so the two ref namespaces compare directly.
+    pub async fn scan_orphan_repos(&self) -> Result<(Vec<(String, String)>, Vec<(String, String)>)> {
+        use std::collections::BTreeSet;
+        // Announced: refs/collab/public/repo/<fp>/<name>
+        let mut announced: BTreeSet<(String, String)> = BTreeSet::new();
+        let prefix = format!("{COLLAB_PUBLIC_PREFIX}repo/");
+        for name in self.refs.list(&prefix)? {
+            if let Some(rest) = name.as_str().strip_prefix(&prefix) {
+                if let Some((fp, repo)) = rest.split_once('/') {
+                    announced.insert((fp.to_string(), repo.to_string()));
+                }
+            }
+        }
+        // Content: refs/users/<fp>/<repo>/<timeline...>
+        let mut content: BTreeSet<(String, String)> = BTreeSet::new();
+        for name in self.refs.list("refs/users/")? {
+            if let Some(rest) = name.as_str().strip_prefix("refs/users/") {
+                let segs: Vec<&str> = rest.splitn(3, '/').collect();
+                if segs.len() >= 2 {
+                    content.insert((segs[0].to_string(), segs[1].to_string()));
+                }
+            }
+        }
+        let announced_empty = announced.difference(&content).cloned().collect();
+        let unannounced = content.difference(&announced).cloned().collect();
+        Ok((announced_empty, unannounced))
+    }
+
     // bole-w8o5
     /// Signature-validity scan for `bole doctor`: walk every published collab
     /// object (Profile, TrustEdge, RepoRecord) and return `(ref, kind)` for each
@@ -967,6 +1000,34 @@ mod tests {
         assert_eq!(flagged.len(), 1, "the tampered profile is flagged: {flagged:?}");
         assert_eq!(flagged[0].0, ref_name);
         assert_eq!(flagged[0].1, "profile");
+    }
+
+    // bole-wsth
+    #[tokio::test]
+    async fn scan_orphan_repos_finds_both_directions() {
+        use crate::collab::fingerprint;
+        use crate::object::Snapshot;
+        use crate::refs::{RefName, TimelinePolicy};
+        use crate::reporecord::RepoSigner;
+        use std::collections::BTreeMap;
+
+        let repo = Repository::memory();
+        let signer = RepoSigner::from_seed([12u8; 32]);
+        let fp = fingerprint(&signer.public_key());
+
+        // "announced" repo with no pushed content.
+        repo.publish_repo(&signer.sign_repo("ghosted", "", 1)).await.unwrap();
+        // pushed content with no announced RepoRecord.
+        let tree = repo.objects.put_tree(BTreeMap::new()).await.unwrap();
+        let head = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new(format!("refs/users/{fp}/lonely/main")).unwrap(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+        // a healthy repo: both announced AND pushed.
+        repo.publish_repo(&signer.sign_repo("healthy", "", 1)).await.unwrap();
+        repo.refs.create_timeline(RefName::new(format!("refs/users/{fp}/healthy/main")).unwrap(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let (announced_empty, unannounced) = repo.scan_orphan_repos().await.unwrap();
+        assert_eq!(announced_empty, vec![(fp.clone(), "ghosted".to_string())], "announced-but-empty");
+        assert_eq!(unannounced, vec![(fp.clone(), "lonely".to_string())], "content-but-unannounced");
     }
 
     // bole-su8
