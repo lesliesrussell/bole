@@ -1142,6 +1142,51 @@ impl Repository {
         Ok(hits)
     }
 
+    // bole-w8o5
+    /// Object-graph health for `bole doctor`. Returns `(dangling, broken)`:
+    /// `dangling` = refs whose target object is absent from the store; `broken`
+    /// = `(ref, missing_id)` for a ref whose reachable closure references an
+    /// object that is absent (a partial/corrupt history that would break fetch
+    /// or materialize). Walks each ref's closure via `child_edges`.
+    pub async fn scan_object_health(&self) -> Result<(Vec<RefName>, Vec<(RefName, ObjectId)>)> {
+        use std::collections::HashSet;
+        let mut dangling = Vec::new();
+        let mut broken = Vec::new();
+        for name in self.refs.list("")? {
+            let target = match self.refs.get(&name)? {
+                Some(Ref::Timeline(t)) => t.head,
+                Some(Ref::Tag(t)) => t.target,
+                None => continue,
+            };
+            // BFS the closure; the first absent object is reported and we move on.
+            let mut seen: HashSet<ObjectId> = HashSet::new();
+            let mut stack = vec![target];
+            let mut root_missing = false;
+            let mut missing: Option<ObjectId> = None;
+            while let Some(id) = stack.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                match self.objects.get(&id).await? {
+                    Some(obj) => stack.extend(crate::sync::negotiate::child_edges(&obj)),
+                    None => {
+                        if id == target {
+                            root_missing = true;
+                        }
+                        missing = Some(id);
+                        break;
+                    }
+                }
+            }
+            if root_missing {
+                dangling.push(name);
+            } else if let Some(m) = missing {
+                broken.push((name, m));
+            }
+        }
+        Ok((dangling, broken))
+    }
+
     pub async fn gc(&self, extra_roots: &[ObjectId], grace_secs: u64, now: u64) -> Result<u64> {
         let mut roots: Vec<ObjectId> = extra_roots.to_vec();
         for name in self.refs.list("")? {
@@ -1520,6 +1565,40 @@ mod tests {
         }).await.unwrap();
         let lca = repo.find_common_ancestor(tip_a, tip_b).await.unwrap();
         assert!(lca == Some(base));
+    }
+
+    // bole-w8o5
+    #[tokio::test]
+    async fn scan_object_health_finds_dangling_and_broken() {
+        use crate::object::{Snapshot, TreeEntry, EntryKind};
+        use crate::refs::{Ref, RefName, Tag, TimelinePolicy};
+        use std::collections::BTreeMap;
+        use bytes::Bytes;
+
+        let repo = Repository::memory();
+        // A healthy timeline.
+        let blob = repo.objects.put_blob(Bytes::from("x")).await.unwrap();
+        let tree = repo.objects.put_tree({ let mut m = BTreeMap::new(); m.insert("a".to_string(), TreeEntry { id: blob, kind: EntryKind::Blob }); m }).await.unwrap();
+        let head = repo.objects.put_snapshot(Snapshot { root: tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("good").unwrap(), head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        // A dangling tag: points at an object never stored.
+        let ghost: ObjectId = "0000000000000000000000000000000000000000000000000000000000000000".parse().unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(RefName::new("refs/tags/ghost").unwrap(), Ref::Tag(Tag { target: ghost, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        // A broken timeline: snapshot exists but its tree references a missing blob.
+        let missing_blob: ObjectId = "1111111111111111111111111111111111111111111111111111111111111111".parse().unwrap();
+        let broken_tree = repo.objects.put_tree({ let mut m = BTreeMap::new(); m.insert("gone".to_string(), TreeEntry { id: missing_blob, kind: EntryKind::Blob }); m }).await.unwrap();
+        let broken_head = repo.objects.put_snapshot(Snapshot { root: broken_tree, parents: vec![], author: "t".into(), created_at: 0, message: "m".into() }).await.unwrap();
+        repo.refs.create_timeline(RefName::new("broken").unwrap(), broken_head, TimelinePolicy::Unrestricted, 0, "persistent".into(), None).unwrap();
+
+        let (dangling, broken) = repo.scan_object_health().await.unwrap();
+        assert_eq!(dangling.iter().map(|r| r.as_str()).collect::<Vec<_>>(), vec!["refs/tags/ghost"]);
+        assert_eq!(broken.len(), 1, "one broken closure: {broken:?}");
+        assert_eq!(broken[0].0.as_str(), "broken");
+        assert_eq!(broken[0].1, missing_blob);
     }
 
     // bole-wphx

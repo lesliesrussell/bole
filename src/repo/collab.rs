@@ -226,6 +226,41 @@ impl Repository {
         Ok(out)
     }
 
+    // bole-w8o5
+    /// Signature-validity scan for `bole doctor`: walk every published collab
+    /// object (Profile, TrustEdge, RepoRecord) and return `(ref, kind)` for each
+    /// whose signature FAILS to verify — a tampered or corrupt signed object,
+    /// which undermines the hub's trust model. Fail-closed: a ref that doesn't
+    /// resolve to the expected object type is reported too.
+    pub async fn scan_invalid_collab_signatures(&self) -> Result<Vec<(RefName, &'static str)>> {
+        let mut bad = Vec::new();
+        for name in self.refs.list(&format!("{COLLAB_PUBLIC_PREFIX}profile/"))? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                match self.objects.get(&tag.target).await? {
+                    Some(Object::Collab(CollabObject::Profile(p))) if verify_profile(&p) => {}
+                    _ => bad.push((name, "profile")),
+                }
+            }
+        }
+        for name in self.refs.list(&format!("{COLLAB_PUBLIC_PREFIX}edge/"))? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                match self.objects.get(&tag.target).await? {
+                    Some(Object::Collab(CollabObject::TrustEdge(e))) if verify_edge(&e) => {}
+                    _ => bad.push((name, "trust-edge")),
+                }
+            }
+        }
+        for name in self.refs.list(&format!("{COLLAB_PUBLIC_PREFIX}repo/"))? {
+            if let Some(tag) = self.refs.get_tag(&name)? {
+                match self.objects.get(&tag.target).await? {
+                    Some(Object::RepoRecord(r)) if crate::reporecord::verify_repo(&r) => {}
+                    _ => bad.push((name, "repo-record")),
+                }
+            }
+        }
+        Ok(bad)
+    }
+
     // bole-18p
     /// Every current public trust edge.
     pub async fn public_edges(&self) -> Result<Vec<TrustEdge>> {
@@ -903,6 +938,35 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].reach, 0, "own profile is self");
         assert_eq!(hits[0].petname, None, "no vouch for self -> fingerprint fallback -> None");
+    }
+
+    // bole-w8o5
+    #[tokio::test]
+    async fn scan_invalid_collab_signatures_flags_tampered_profile() {
+        use crate::collab::{fingerprint, CollabObject, CollabSigner};
+        use crate::object::Object;
+        use crate::refs::{Ref, RefName, Tag};
+        let repo = Repository::memory();
+        let signer = CollabSigner::from_seed([7u8; 32]);
+
+        // A valid profile: not flagged.
+        repo.publish_profile(&signer.sign_profile("Good".into(), String::new(), vec![], vec![], 1)).await.unwrap();
+        assert!(repo.scan_invalid_collab_signatures().await.unwrap().is_empty(), "valid profile is clean");
+
+        // A tampered profile planted directly under a different key's ref.
+        let victim = CollabSigner::from_seed([8u8; 32]);
+        let mut bad = victim.sign_profile("Bad".into(), String::new(), vec![], vec![], 1);
+        bad.sig[0] ^= 0xff; // break the signature
+        let id = repo.objects.put(&Object::Collab(CollabObject::Profile(bad.clone()))).await.unwrap();
+        let ref_name = RefName::new(format!("refs/collab/public/profile/{}", fingerprint(&bad.key))).unwrap();
+        let mut tx = repo.refs.transaction();
+        tx.set(ref_name.clone(), Ref::Tag(Tag { target: id, created_at: 0, message: None }));
+        tx.commit().unwrap();
+
+        let flagged = repo.scan_invalid_collab_signatures().await.unwrap();
+        assert_eq!(flagged.len(), 1, "the tampered profile is flagged: {flagged:?}");
+        assert_eq!(flagged[0].0, ref_name);
+        assert_eq!(flagged[0].1, "profile");
     }
 
     // bole-su8
